@@ -1,0 +1,21 @@
+{
+  "name": "bukowski",
+  "version": "1.0.0",
+  "description": "Flicker-free terminal viewport for Ink-based CLI apps",
+  "main": "index.js",
+  "bin": {
+    "bukowski": "./index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["terminal", "viewport", "scrollback", "ink", "cli"],
+  "author": "vmitro",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "commonjs",
+  "dependencies": {
+    "@xterm/addon-serialize": "^0.13.0",
+    "@xterm/headless": "^5.5.0",
+    "node-pty": "^1.0.0"
+  }
+}

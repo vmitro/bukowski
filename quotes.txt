@@ -1,0 +1,35 @@
+Find what you love and let it kill your terminal flicker.
+— Charles Bukowski, probably
+
+Some people never go crazy. What truly horrible lives they must lead.
+— Charles Bukowski
+
+The problem with the world is that the intelligent people are full of doubts, while the stupid ones are full of confidence.
+— Charles Bukowski
+
+I don't hate people. I just feel better when they aren't around.
+— Charles Bukowski
+
+I got life, mother. I got laughs, sister. I got freedom, brother.
+— Claude, Hair
+
+How can people be so heartless? How can people be so cruel?
+— Hair
+
+Let the sun shine in.
+— Hair
+
+Manchester, England, England. Across the Atlantic Sea.
+— Claude, Hair
+
+I am not a viewport. I am a free buffer!
+— bukowski
+
+The scroll is dead. Long live the scroll.
+— bukowski
+
+We are all just terminals, waiting to be rendered.
+— bukowski
+
+Some CLIs never go crazy with memory. What truly horrible lives they must lead.
+— Charles Bukowski, on heap allocation
