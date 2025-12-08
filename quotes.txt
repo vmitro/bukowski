@@ -1,35 +1,47 @@
 Find what you love and let it kill your terminal flicker.
-— Charles Bukowski, probably
+— bukowski, on passion, probably
 
-Some people never go crazy. What truly horrible lives they must lead.
-— Charles Bukowski
+Some terminals never go crazy. What truly horrible output they must render.
+— bukowski, on sanity, probably
 
-The problem with the world is that the intelligent people are full of doubts, while the stupid ones are full of confidence.
-— Charles Bukowski
+The problem with the world is that the intelligent buffers are full of doubts, while the stupid ones are full of confidence.
+— bukowski, on scrollback, probably
 
-I don't hate people. I just feel better when they aren't around.
-— Charles Bukowski
+I don't hate flicker. I just feel better when it isn't around.
+— bukowski, on rendering, probably
 
-I got life, mother. I got laughs, sister. I got freedom, brother.
-— Claude, Hair
+I got frames, mother. I got scrollback, sister. I got vim modes, brother.
+— bukowski, on Hair, probably
 
-How can people be so heartless? How can people be so cruel?
-— Hair
+How can terminals be so heartless? How can renderers be so cruel?
+— bukowski, on tearing, probably
 
-Let the sun shine in.
-— Hair
+Let the sync update shine in.
+— bukowski, on DEC 2026, probably
 
-Manchester, England, England. Across the Atlantic Sea.
-— Claude, Hair
+Manchester, England, England. Across the xterm-256color Sea.
+— bukowski, on TERM, probably
 
-I am not a viewport. I am a free buffer!
-— bukowski
+I am not a viewport. I am a free buffer.
+— bukowski, on identity, probably
 
 The scroll is dead. Long live the scroll.
-— bukowski
+— bukowski, on followTail, probably
 
 We are all just terminals, waiting to be rendered.
-— bukowski
+— bukowski, on existence, probably
 
-Some CLIs never go crazy with memory. What truly horrible lives they must lead.
-— Charles Bukowski, on heap allocation
+If you're going to try, go all the way to contentHeight. Otherwise, don't even start.
+— bukowski, on commitment, probably
+
+An SGR sequence a day keeps the plaintext away.
+— bukowski, on style, probably
+
+Some people never use vim mode. What truly horrible workflows they must have.
+— bukowski, on navigation, probably
+
+The terminal, like a good poem, should end before you want it to. But the scrollback remembers everything.
+— bukowski, on memory, probably
+
+Real terminals don't flicker. They render with intention.
+— bukowski, on standards, probably
