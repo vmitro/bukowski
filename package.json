@@ -1,10 +1,11 @@
 {
   "name": "bukowski",
-  "version": "1.0.0",
-  "description": "Flicker-free terminal viewport for Ink-based CLI apps",
+  "version": "1.1.0",
+  "description": "Multi-agent terminal orchestration for LLM coding assistants",
   "main": "index.js",
   "bin": {
-    "bukowski": "./index.js"
+    "bukowski": "./index.js",
+    "bukowski-multi": "./multi.js"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
