@@ -13,6 +13,8 @@ const { InputRouter } = require('./src/input/InputRouter');
 const { IPCHub } = require('./src/ipc/IPCHub');
 const { FIPAHub } = require('./src/acl/FIPAHub');
 const { TabBar } = require('./src/ui/TabBar');
+const { ChatPane } = require('./src/ui/ChatPane');
+const { ConversationList } = require('./src/ui/ConversationList');
 const { LayoutNode } = require('./src/layout/LayoutNode');
 const { RegisterManager } = require('./src/input/RegisterManager');
 const { findLatestSession } = require('./src/utils/agentSessions');
@@ -308,7 +310,7 @@ process.on('SIGCONT', () => {
   const tabBar = new TabBar();
 
   // Create compositor
-  const compositor = new Compositor(session, layoutManager, tabBar);
+  const compositor = new Compositor(session, layoutManager, tabBar, chatPane, conversationList);
 
   // Wire up global references for signal handlers
   activeSession = session;
@@ -335,6 +337,10 @@ process.on('SIGCONT', () => {
 
   // Create input router
   const inputRouter = new InputRouter(session, layoutManager, ipcHub, fipaHub);
+
+  // Create FIPA UI components
+  const conversationList = new ConversationList(fipaHub.conversations);
+  const chatPane = new ChatPane(fipaHub.conversations);
 
   // Create register manager for yank/paste
   const registerManager = new RegisterManager();
@@ -780,6 +786,7 @@ process.on('SIGCONT', () => {
       case 'wq':
       case 'x': {
         // :wq / :x - save and quit
+        if (args[0]) session.name = args[0];
         session.focusedPaneId = layoutManager.focusedPaneId;
         // If zoomed, save the unzoomed layout
         if (layoutManager.isZoomed()) {
@@ -1421,6 +1428,23 @@ process.on('SIGCONT', () => {
       case 'passthrough':
         // Already written to agent in InputRouter
         break;
+
+      // FIPA Actions
+      case 'fipa_request':
+      case 'fipa_inform':
+      case 'fipa_query_if':
+      case 'fipa_query_ref':
+      case 'fipa_cfp':
+      case 'fipa_propose':
+      case 'fipa_agree':
+      case 'fipa_refuse':
+      case 'fipa_subscribe': {
+        // All these actions will switch to chat mode for now
+        // More specific handling will be added later
+        inputRouter.setMode('chat');
+        compositor.draw(); // Redraw in chat mode
+        break;
+      }
     }
   }
 
@@ -1443,12 +1467,13 @@ process.on('SIGCONT', () => {
 
       // Extract modifiers and base button
       const isShift = (btn & 4) !== 0;
+      const isMeta = (btn & 8) !== 0;  // Alt/Meta key
       const isCtrl = (btn & 16) !== 0;
       const baseBtn = btn & ~(4 | 8 | 16); // Remove modifier bits
 
       if (mouseMatch[4] === 'M') {
         // Left click (btn 0) - focus pane under mouse
-        if (baseBtn === 0 && !isShift && !isCtrl) {
+        if (baseBtn === 0 && !isShift && !isCtrl && !isMeta) {
           const pane = layoutManager.findPaneAt(mx, my);
           if (pane && pane.id !== layoutManager.focusedPaneId) {
             layoutManager.focusPane(pane.id);
@@ -1461,8 +1486,8 @@ process.on('SIGCONT', () => {
             handleResize();
           }
         }
-        // Shift+scroll wheel - horizontal pane resize (adjust vertical splits)
-        else if (isShift && (baseBtn === 64 || baseBtn === 65)) {
+        // Shift or Alt+scroll wheel - horizontal pane resize (adjust vertical splits)
+        else if ((isShift || isMeta) && (baseBtn === 64 || baseBtn === 65)) {
           const delta = baseBtn === 64 ? 1 : -1;
           if (layoutManager.resizeAtPosition(mx, my, 'horizontal', delta)) {
             handleResize();

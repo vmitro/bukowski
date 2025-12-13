@@ -2,10 +2,12 @@
 // Renders like index.js: direct line output with preserved ANSI codes
 
 class Compositor {
-  constructor(session, layoutManager, tabBar) {
+  constructor(session, layoutManager, tabBar, chatPane, conversationList) {
     this.session = session;
     this.layoutManager = layoutManager;
     this.tabBar = tabBar;
+    this.chatPane = chatPane;
+    this.conversationList = conversationList;
     this.cols = 80;
     this.rows = 24;
     this.scrollOffsets = new Map(); // paneId -> scrollY
@@ -79,6 +81,13 @@ class Compositor {
    * Main draw function - renders directly like index.js
    */
   draw() {
+    const mode = this.inputRouter?.getMode();
+
+    if (mode === 'chat') {
+      this.drawChat();
+      return;
+    }
+
     const panes = this.layoutManager.getAllPanes();
     const focusedPaneId = this.layoutManager.focusedPaneId;
 
@@ -97,6 +106,36 @@ class Compositor {
 
     // Render borders between panes
     frame += this.renderBorders();
+
+    // Last row: Status bar
+    frame += `\x1b[${this.rows};1H\x1b[2K`;
+    frame += this.renderStatusBar();
+
+    frame += '\x1b[?25h';           // Show cursor
+    frame += '\x1b[?2026l';         // End sync update
+
+    process.stdout.write(frame);
+  }
+
+  /**
+   * Main draw function for chat mode
+   */
+  drawChat() {
+    let frame = '\x1b[?2026h';      // Begin sync update
+    frame += '\x1b[?25l\x1b[H';     // Hide cursor, home
+
+    const listWidth = 30;
+    const chatWidth = this.cols - listWidth;
+
+    // Render ConversationList (left) and ChatPane (right)
+    const listLines = this.conversationList.render(listWidth, this.rows - 1);
+    const chatLines = this.chatPane.render(chatWidth, this.rows - 1);
+
+    for (let i = 0; i < this.rows - 1; i++) {
+      const screenY = i + 1;
+      frame += `\x1b[${screenY};1H${listLines[i] || ''}`;
+      frame += `\x1b[${screenY};${listWidth + 1}H${chatLines[i] || ''}`;
+    }
 
     // Last row: Status bar
     frame += `\x1b[${this.rows};1H\x1b[2K`;
@@ -297,7 +336,7 @@ class Compositor {
 
     // Mode indicator
     const mode = this.inputRouter?.mode;
-    const modeNames = { insert: 'INSERT', normal: 'NORMAL', visual: 'VISUAL', 'visual-line': 'V-LINE', search: 'SEARCH', command: 'COMMAND' };
+    const modeNames = { insert: 'INSERT', normal: 'NORMAL', visual: 'VISUAL', 'visual-line': 'V-LINE', search: 'SEARCH', command: 'COMMAND', chat: 'CHAT' };
     if (mode && modeNames[mode]) {
       left += `[${modeNames[mode]}] `;
     }
@@ -344,12 +383,23 @@ class Compositor {
 
     // Center hint
     let hint = '';
-    if (this.searchState?.active) {
+    const prefixState = this.inputRouter?.getPrefixState?.();
+    if (prefixState) {
+      if (prefixState === 'fipa') {
+        hint = '(f)ipa: (r)eq (i)nfo (q)uery (c)fp (s)ub';
+      } else if (prefixState === 'layout') {
+        hint = '(w)layout: (s)plit (v)split (c)lose (z)oom';
+      } else if (prefixState === 'ipc') {
+        hint = '(a)gent: (s)end (b)cast (l)og';
+      } else {
+        hint = 'bukowski';
+      }
+    } else if (this.searchState?.active) {
       hint = 'Enter:search Esc:cancel';
     } else if (this.commandState?.active) {
       hint = 'Enter:execute Esc:cancel';
     } else if (mode === 'insert') {
-      hint = 'Esc:normal';
+      hint = 'CTRL+Space:cmd Esc:normal';
     } else if (mode === 'normal') {
       hint = 'i:insert /:search ::cmd';
     } else if (mode === 'visual' || mode === 'visual-line') {

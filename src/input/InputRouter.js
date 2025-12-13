@@ -7,7 +7,7 @@ class InputRouter {
     this.ipc = ipcHub;
     this.fipa = fipaHub;          // FIPA ACL hub for agent communication
 
-    this.mode = 'insert';         // 'insert' | 'normal' | 'visual' | 'visual-line' | 'search'
+    this.mode = 'insert';         // 'insert' | 'normal' | 'visual' | 'visual-line' | 'search' | 'chat'
     this.prefixActive = false;    // CTRL+Space was pressed
     this.layoutPrefix = false;    // Waiting for layout command (after 'w')
     this.ipcPrefix = false;       // Waiting for IPC command (after 'a')
@@ -114,6 +114,9 @@ class InputRouter {
       case 'command':
         return this.handleCommandMode(data);
 
+      case 'chat':
+        return this.handleChatMode(data);
+
       default:
         return this.passToAgent(data);
     }
@@ -160,6 +163,11 @@ class InputRouter {
       case 'F':
         this.fipaPrefix = true;
         return { action: 'fipa_prefix' };
+
+      // Chat mode
+      case 'c':
+        this.mode = 'chat';
+        return { action: 'mode_change', mode: 'chat' };
 
       // Tab switching (1-9)
       case '1': case '2': case '3': case '4': case '5':
@@ -321,6 +329,15 @@ class InputRouter {
       default:
         return { action: 'unknown_fipa', key };
     }
+  }
+
+  /**
+   * Handle chat mode input
+   */
+  handleChatMode(data) {
+    // For now, just a placeholder. This will be expanded to handle
+    // chat-specific commands like switching conversations, sending messages, etc.
+    return { action: 'chat_input', key: data };
   }
 
   /**
