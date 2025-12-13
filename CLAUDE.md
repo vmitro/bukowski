@@ -1,0 +1,1 @@
+- TODO: fix individual agents not getting their sessions resumed; right now the layout is preserved, but agent instances are started with a fresh session every time
