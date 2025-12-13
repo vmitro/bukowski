@@ -13,6 +13,7 @@ class Agent {
     this.args = config.args || [];
     this.env = config.env || {};
     this.autostart = config.autostart ?? false;
+    this.agentSessionId = config.agentSessionId || null;  // Agent's own session ID (for resume)
 
     this.pty = null;
     this.terminal = null;
@@ -20,15 +21,22 @@ class Agent {
     this.status = 'stopped'; // 'stopped' | 'running' | 'error'
     this.socketPath = null;  // IPC socket path
     this.exitCode = null;
+    this.spawnedAt = null;   // Timestamp when spawned (for session discovery)
   }
 
   spawn(cols = 80, rows = 24) {
     if (this.pty) this.kill();
 
+    this.spawnedAt = Date.now();
+
+    // Use large virtual terminal (like index.js) to reduce scroll churn
+    // The pane height determines the viewport, not the terminal rows
+    const virtualRows = parseInt(process.env.BUKOWSKI_ROWS) || 500;
+
     this.terminal = new Terminal({
       cols,
-      rows,
-      scrollback: 10000,
+      rows: virtualRows,
+      scrollback: parseInt(process.env.BUKOWSKI_SCROLLBACK) || 10000,
       allowProposedApi: true
     });
     this.serializeAddon = new SerializeAddon();
@@ -37,7 +45,7 @@ class Agent {
     this.pty = pty.spawn(this.command, this.args, {
       name: 'xterm-256color',
       cols,
-      rows,
+      rows: virtualRows,
       cwd: process.cwd(),
       env: { ...process.env, ...this.env, FORCE_COLOR: '1' }
     });
@@ -46,11 +54,11 @@ class Agent {
       this.terminal.write(data);
 
       // Handle cursor position request (DSR) - respond with current cursor position
-      // Codex and other apps send \x1b[6n and expect \x1b[{row};{col}R back
+      // Apps like Codex send \x1b[6n and expect \x1b[{row};{col}R back
       if (data.includes('\x1b[6n')) {
         const buffer = this.terminal.buffer.active;
-        const row = buffer.cursorY + 1;  // 1-indexed
-        const col = buffer.cursorX + 1;  // 1-indexed
+        const row = buffer.cursorY + 1;
+        const col = buffer.cursorX + 1;
         this.pty.write(`\x1b[${row};${col}R`);
       }
     });
@@ -71,8 +79,11 @@ class Agent {
   }
 
   resize(cols, rows) {
-    if (this.pty) this.pty.resize(cols, rows);
-    if (this.terminal) this.terminal.resize(cols, rows);
+    // Keep virtual rows constant (like index.js), only resize columns
+    // The pane height is used by Compositor for viewport calculation
+    const virtualRows = parseInt(process.env.BUKOWSKI_ROWS) || 500;
+    if (this.pty) this.pty.resize(cols, virtualRows);
+    if (this.terminal) this.terminal.resize(cols, virtualRows);
   }
 
   write(data) {
@@ -220,7 +231,8 @@ class Agent {
       command: this.command,
       args: this.args,
       env: this.env,
-      autostart: this.autostart
+      autostart: this.autostart,
+      agentSessionId: this.agentSessionId
     };
   }
 

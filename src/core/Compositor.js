@@ -1,4 +1,5 @@
 // src/core/Compositor.js - Multi-viewport rendering compositor
+// Renders like index.js: direct line output with preserved ANSI codes
 
 class Compositor {
   constructor(session, layoutManager, tabBar) {
@@ -7,190 +8,110 @@ class Compositor {
     this.tabBar = tabBar;
     this.cols = 80;
     this.rows = 24;
-    this.frame = null;       // 2D array of { char, fg, bg, attrs }
     this.scrollOffsets = new Map(); // paneId -> scrollY
     this.followTail = new Map();    // paneId -> boolean (whether to auto-scroll)
+    this.drawScheduled = false;     // Throttle like index.js scheduleDraw()
     this.searchState = null; // Will be set from multi.js
     this.visualState = null; // Will be set from multi.js - {mode, visualAnchor, visualCursor}
+  }
+
+  /**
+   * Schedule a throttled draw (exactly like index.js pattern)
+   */
+  scheduleDraw() {
+    if (!this.drawScheduled) {
+      this.drawScheduled = true;
+      setTimeout(() => {
+        this.drawScheduled = false;
+        if (this.followTail.get(this.layoutManager.focusedPaneId) !== false) {
+          this.scrollFocusedToBottom();
+        }
+        // Also update other panes that are following tail
+        this.updateFollowTailScrolls();
+        this.draw();
+      }, 16);
+    }
+  }
+
+  /**
+   * Scroll focused pane to bottom (like index.js scrollToBottom)
+   */
+  scrollFocusedToBottom() {
+    const paneId = this.layoutManager.focusedPaneId;
+    const pane = this.layoutManager.findPane(paneId);
+    if (!pane) return;
+
+    const agent = this.session.getAgent(pane.agentId);
+    if (!agent) return;
+
+    const contentHeight = agent.getContentHeight();
+    const maxScroll = Math.max(0, contentHeight - pane.bounds.height);
+    this.scrollOffsets.set(paneId, maxScroll);
+  }
+
+  /**
+   * Update scroll positions for non-focused panes with followTail enabled
+   */
+  updateFollowTailScrolls() {
+    for (const pane of this.layoutManager.getAllPanes()) {
+      const paneId = pane.id;
+      if (paneId === this.layoutManager.focusedPaneId) continue; // Already handled
+
+      if (this.followTail.get(paneId) !== false) {
+        const agent = this.session.getAgent(pane.agentId);
+        if (!agent) continue;
+
+        const contentHeight = agent.getContentHeight();
+        const maxScroll = Math.max(0, contentHeight - pane.bounds.height);
+        this.scrollOffsets.set(paneId, maxScroll);
+      }
+    }
   }
 
   resize(cols, rows) {
     this.cols = cols;
     this.rows = rows;
-    // Recalculate layout bounds
     // Reserve: 1 row for tab bar, 1 row for status bar
     this.layoutManager.calculateBounds(0, 1, cols, rows - 2);
   }
 
   /**
-   * Create empty frame buffer
+   * Main draw function - renders directly like index.js
    */
-  createFrame() {
-    const frame = [];
-    for (let y = 0; y < this.rows; y++) {
-      const row = [];
-      for (let x = 0; x < this.cols; x++) {
-        row.push({ char: ' ', fg: null, bg: null, attrs: 0 });
-      }
-      frame.push(row);
-    }
-    return frame;
-  }
+  draw() {
+    const panes = this.layoutManager.getAllPanes();
+    const focusedPaneId = this.layoutManager.focusedPaneId;
 
-  /**
-   * Write string to frame at position
-   */
-  writeToFrame(frame, x, y, str) {
-    if (y < 0 || y >= this.rows) return;
+    // Build output with DEC 2026 sync update (like index.js)
+    let frame = '\x1b[?2026h';      // Begin sync update
+    frame += '\x1b[?25l\x1b[H';     // Hide cursor, home
 
-    let col = x;
-    let i = 0;
+    // Row 0: Tab bar
+    frame += '\x1b[1;1H\x1b[2K';
+    frame += this.renderTabBar();
 
-    while (i < str.length && col < this.cols) {
-      // Skip ANSI escape sequences
-      if (str[i] === '\x1b' && str[i + 1] === '[') {
-        let j = i + 2;
-        while (j < str.length && !/[A-Za-z]/.test(str[j])) j++;
-        i = j + 1;
-        continue;
-      }
-
-      if (col >= 0) {
-        frame[y][col].char = str[i];
-      }
-      col++;
-      i++;
-    }
-  }
-
-  /**
-   * Write raw string with ANSI codes preserved
-   * @param {number} maxWidth - Optional max width to write (for pane boundaries)
-   */
-  writeRawToFrame(frame, x, y, str, maxWidth = null) {
-    if (y < 0 || y >= this.rows) return x;
-
-    const maxCol = maxWidth !== null ? x + maxWidth : this.cols;
-    let col = x;
-    let i = 0;
-    let currentFg = null;
-    let currentBg = null;
-    let currentAttrs = 0;
-
-    while (i < str.length) {
-      // Stop if we've reached the max column
-      if (col >= maxCol) break;
-
-      // Parse ANSI escape sequences
-      if (str[i] === '\x1b' && str[i + 1] === '[') {
-        let j = i + 2;
-        let params = '';
-        while (j < str.length && !/[A-Za-z]/.test(str[j])) {
-          params += str[j];
-          j++;
-        }
-        const cmd = str[j];
-
-        if (cmd === 'm') {
-          const codes = params.split(';').map(n => parseInt(n, 10) || 0);
-          this.applySGR(codes, (fg, bg, attrs) => {
-            currentFg = fg;
-            currentBg = bg;
-            currentAttrs = attrs;
-          }, currentFg, currentBg, currentAttrs);
-        }
-
-        i = j + 1;
-        continue;
-      }
-
-      if (col >= 0 && col < this.cols) {
-        frame[y][col].char = str[i];
-        frame[y][col].fg = currentFg;
-        frame[y][col].bg = currentBg;
-        frame[y][col].attrs = currentAttrs;
-      }
-      col++;
-      i++;
+    // Render each pane's content
+    for (const pane of panes) {
+      frame += this.renderPaneContent(pane, pane.id === focusedPaneId);
     }
 
-    return col;
+    // Render borders between panes
+    frame += this.renderBorders();
+
+    // Last row: Status bar
+    frame += `\x1b[${this.rows};1H\x1b[2K`;
+    frame += this.renderStatusBar();
+
+    frame += '\x1b[?25h';           // Show cursor
+    frame += '\x1b[?2026l';         // End sync update
+
+    process.stdout.write(frame);
   }
 
   /**
-   * Apply SGR codes to style state
+   * Render tab bar (like index.js status bar approach)
    */
-  applySGR(codes, setter, fg, bg, attrs) {
-    let i = 0;
-    while (i < codes.length) {
-      const c = codes[i];
-
-      if (c === 0) {
-        fg = null;
-        bg = null;
-        attrs = 0;
-      } else if (c === 1) {
-        attrs |= 1; // Bold
-      } else if (c === 2) {
-        attrs |= 2; // Dim
-      } else if (c === 3) {
-        attrs |= 4; // Italic
-      } else if (c === 4) {
-        attrs |= 8; // Underline
-      } else if (c === 7) {
-        attrs |= 16; // Inverse
-      } else if (c === 9) {
-        attrs |= 32; // Strikethrough
-      } else if (c >= 30 && c <= 37) {
-        fg = c - 30;
-      } else if (c >= 90 && c <= 97) {
-        fg = c - 90 + 8;
-      } else if (c === 38) {
-        if (codes[i + 1] === 5) {
-          fg = { type: '256', value: codes[i + 2] };
-          i += 2;
-        } else if (codes[i + 1] === 2) {
-          fg = { type: 'rgb', r: codes[i + 2], g: codes[i + 3], b: codes[i + 4] };
-          i += 4;
-        }
-      } else if (c >= 40 && c <= 47) {
-        bg = c - 40;
-      } else if (c >= 100 && c <= 107) {
-        bg = c - 100 + 8;
-      } else if (c === 48) {
-        if (codes[i + 1] === 5) {
-          bg = { type: '256', value: codes[i + 2] };
-          i += 2;
-        } else if (codes[i + 1] === 2) {
-          bg = { type: 'rgb', r: codes[i + 2], g: codes[i + 3], b: codes[i + 4] };
-          i += 4;
-        }
-      }
-      i++;
-    }
-
-    setter(fg, bg, attrs);
-  }
-
-  /**
-   * Main render function - builds complete frame
-   */
-  render() {
-    this.frame = this.createFrame();
-
-    // Render components
-    this.renderTabBar(this.frame);
-    this.renderPanes(this.frame);
-    this.renderBorders(this.frame);
-    this.renderStatusBar(this.frame);
-
-    return this.frame;
-  }
-
-  /**
-   * Render tab bar (row 0)
-   */
-  renderTabBar(frame) {
+  renderTabBar() {
     const agents = this.session.getAllAgents();
     const focusedPane = this.layoutManager.getFocusedPane();
 
@@ -202,317 +123,120 @@ class Compositor {
     }));
 
     this.tabBar.setTabs(tabs);
-    const tabBarStr = this.tabBar.render(this.cols);
-
-    // Write tab bar with styling
-    this.writeRawToFrame(frame, 0, 0, tabBarStr);
+    return this.tabBar.render(this.cols);
   }
 
   /**
-   * Render all visible panes
+   * Render a single pane's content (like index.js draw())
    */
-  renderPanes(frame) {
-    const panes = this.layoutManager.getAllPanes();
-
-    for (const pane of panes) {
-      this.renderPane(frame, pane);
-    }
-  }
-
-  /**
-   * Render single pane content
-   */
-  renderPane(frame, pane) {
+  renderPaneContent(pane, isFocused) {
     const agent = this.session.getAgent(pane.agentId);
-    if (!agent) return;
+    if (!agent) return '';
 
     const { x, y, width, height } = pane.bounds;
-    const isFocused = pane.id === this.layoutManager.focusedPaneId;
-
-    // Get scroll offset for this pane
     let scrollY = this.scrollOffsets.get(pane.id) || 0;
     const contentHeight = agent.getContentHeight();
     const maxScroll = Math.max(0, contentHeight - height);
 
-    // Auto-scroll to follow output if followTail is true (default: true for new panes)
-    if (this.followTail.get(pane.id) !== false) {
+    // Clamp scroll
+    if (scrollY > maxScroll) {
       scrollY = maxScroll;
       this.scrollOffsets.set(pane.id, scrollY);
     }
 
-    // Render visible lines
+    let result = '';
+
+    // Render visible lines (like index.js visible[] building)
     for (let row = 0; row < height; row++) {
       const bufferLine = scrollY + row;
-      const screenY = y + row;
+      const screenY = y + row + 1; // +1 for 1-indexed cursor positioning
 
-      if (screenY >= this.rows - 1) break; // Leave room for status bar
+      // Position cursor and clear line portion
+      result += `\x1b[${screenY};${x + 1}H`;
 
-      let lineContent = agent.getLine(bufferLine);
-      if (lineContent) {
-        // Apply search highlighting if this is the focused pane and we have matches
-        if (isFocused && this.searchState && this.searchState.matches.length > 0) {
-          const lineMatches = this.searchState.matches.filter(m => m.line === bufferLine);
-          if (lineMatches.length > 0) {
-            const plainLine = agent.getLineText(bufferLine);
-            lineContent = this.highlightSearchMatches(lineContent, plainLine, lineMatches, bufferLine);
+      let lineContent = '';
+      if (bufferLine < contentHeight) {
+        lineContent = agent.getLine(bufferLine);
+
+        // Apply highlighting like index.js does
+        if (isFocused) {
+          const plainLine = agent.getLineText(bufferLine);
+
+          // Search highlights
+          if (this.searchState?.matches?.length > 0) {
+            const lineMatches = this.searchState.matches.filter(m => m.line === bufferLine);
+            if (lineMatches.length > 0) {
+              lineContent = this.highlightSearchMatches(lineContent, plainLine, lineMatches, bufferLine);
+            }
           }
-        }
 
-        // Apply visual selection highlighting if this is the focused pane and we're in visual mode
-        if (isFocused && this.visualState &&
-            (this.visualState.mode === 'visual' || this.visualState.mode === 'vline')) {
-          const selRange = this.getSelectionRangeOnLine(bufferLine, agent);
-          if (selRange) {
-            const plainLine = agent.getLineText(bufferLine);
-            lineContent = this.highlightVisualSelection(lineContent, plainLine, selRange, bufferLine);
+          // Visual selection highlights
+          if (this.visualState && (this.visualState.mode === 'visual' || this.visualState.mode === 'vline')) {
+            lineContent = this.applyVisualHighlight(lineContent, plainLine, bufferLine);
           }
-        }
 
-        // Apply normal mode cursor if this is the focused pane and we're in normal mode
-        const mode = this.inputRouter?.mode;
-        if (isFocused && mode === 'normal' && this.visualState?.normalCursor) {
-          if (bufferLine === this.visualState.normalCursor.line) {
-            const plainLine = agent.getLineText(bufferLine);
-            lineContent = this.highlightNormalCursor(lineContent, plainLine, this.visualState.normalCursor.col);
+          // Normal mode cursor
+          if (this.visualState?.mode === 'normal' && this.visualState.normalCursor) {
+            if (bufferLine === this.visualState.normalCursor.line) {
+              lineContent = this.insertCursorMarker(lineContent, plainLine, this.visualState.normalCursor.col);
+            }
           }
-        }
-
-        this.writeRawToFrame(frame, x, screenY, lineContent, width);
-      }
-    }
-  }
-
-  /**
-   * Highlight search matches in a line
-   * @param {string} styledLine - Line with ANSI codes
-   * @param {string} plainLine - Plain text line
-   * @param {Array} matches - Matches on this line [{col, length}, ...]
-   * @param {number} lineIdx - Line index for checking current match
-   * @returns {string} Line with search highlights applied
-   */
-  highlightSearchMatches(styledLine, plainLine, matches, lineIdx) {
-    const currentMatch = this.searchState.matches[this.searchState.index];
-    const isCurrentLine = currentMatch && currentMatch.line === lineIdx;
-
-    let result = '';
-    let plainIdx = 0;
-    let i = 0;
-
-    while (i < styledLine.length) {
-      // Skip ANSI escape sequences
-      if (styledLine[i] === '\x1b' && styledLine[i + 1] === '[') {
-        const escEnd = styledLine.indexOf('m', i);
-        if (escEnd !== -1) {
-          result += styledLine.substring(i, escEnd + 1);
-          i = escEnd + 1;
-          continue;
         }
       }
 
-      // Check if this position is in a match
-      let inMatch = false;
-      let isCurrentMatchPos = false;
-      for (const m of matches) {
-        if (plainIdx >= m.col && plainIdx < m.col + m.length) {
-          inMatch = true;
-          if (isCurrentLine && currentMatch && m.col === currentMatch.col) {
-            isCurrentMatchPos = true;
-          }
-          break;
-        }
-      }
-
-      if (isCurrentMatchPos) {
-        // Current match: bright yellow bg + black fg
-        result += `\x1b[30;103m${styledLine[i]}\x1b[0m`;
-      } else if (inMatch) {
-        // Other matches: yellow bg
-        result += `\x1b[43m${styledLine[i]}\x1b[49m`;
-      } else {
-        result += styledLine[i];
-      }
-
-      plainIdx++;
-      i++;
+      // Truncate/pad to pane width and output
+      result += this.fitToWidth(lineContent, width);
     }
 
     return result;
   }
 
   /**
-   * Calculate visual selection range for a given line
-   * @param {number} lineIdx - Buffer line index
-   * @param {object} agent - Agent with getLineText method
-   * @returns {object|null} - {hlStart, hlEnd, cursorLine, cursorCol} or null if line not in selection
+   * Fit line content to width, handling ANSI codes
    */
-  getSelectionRangeOnLine(lineIdx, agent) {
-    const { visualAnchor, visualCursor, mode } = this.visualState;
-
-    // Determine selection bounds (swap if anchor > cursor)
-    let startLine = visualAnchor.line;
-    let startCol = visualAnchor.col;
-    let endLine = visualCursor.line;
-    let endCol = visualCursor.col;
-
-    if (startLine > endLine || (startLine === endLine && startCol > endCol)) {
-      [startLine, endLine] = [endLine, startLine];
-      [startCol, endCol] = [endCol, startCol];
-    }
-
-    // Check if this line is within the selection
-    if (lineIdx < startLine || lineIdx > endLine) {
-      return null;
-    }
-
-    const lineText = agent.getLineText(lineIdx) || '';
-    const lineLength = lineText.length;
-
-    let hlStart, hlEnd;
-
-    if (mode === 'vline') {
-      // Visual line mode: highlight entire line
-      hlStart = 0;
-      hlEnd = lineLength;
-    } else {
-      // Visual char mode: calculate column range
-      if (startLine === endLine) {
-        // Single line selection
-        hlStart = startCol;
-        hlEnd = endCol + 1; // Include the end character
-      } else if (lineIdx === startLine) {
-        // First line of multi-line selection
-        hlStart = startCol;
-        hlEnd = lineLength;
-      } else if (lineIdx === endLine) {
-        // Last line of multi-line selection
-        hlStart = 0;
-        hlEnd = endCol + 1;
-      } else {
-        // Middle line: highlight entire line
-        hlStart = 0;
-        hlEnd = lineLength;
-      }
-    }
-
-    // Clamp to line bounds
-    hlStart = Math.max(0, hlStart);
-    hlEnd = Math.min(lineLength, hlEnd);
-
-    return {
-      hlStart,
-      hlEnd,
-      cursorLine: visualCursor.line,
-      cursorCol: visualCursor.col
-    };
-  }
-
-  /**
-   * Highlight visual selection in a line
-   * @param {string} styledLine - Line with ANSI codes
-   * @param {string} plainLine - Plain text line
-   * @param {object} selRange - {hlStart, hlEnd, cursorLine, cursorCol}
-   * @param {number} lineIdx - Line index
-   * @returns {string} Line with visual selection highlights applied
-   */
-  highlightVisualSelection(styledLine, plainLine, selRange, lineIdx) {
-    const { hlStart, hlEnd, cursorLine, cursorCol } = selRange;
-
+  fitToWidth(line, width) {
+    let visibleLen = 0;
     let result = '';
-    let plainIdx = 0;
     let i = 0;
 
-    while (i < styledLine.length) {
-      // Skip ANSI escape sequences
-      if (styledLine[i] === '\x1b' && styledLine[i + 1] === '[') {
-        const escEnd = styledLine.indexOf('m', i);
+    while (i < line.length && visibleLen < width) {
+      if (line[i] === '\x1b') {
+        // ANSI escape - copy until 'm'
+        const escEnd = line.indexOf('m', i);
         if (escEnd !== -1) {
-          result += styledLine.substring(i, escEnd + 1);
+          result += line.substring(i, escEnd + 1);
           i = escEnd + 1;
           continue;
         }
       }
-
-      // Check if this position is in the selection
-      const inSelection = plainIdx >= hlStart && plainIdx < hlEnd;
-      const isCursor = lineIdx === cursorLine && plainIdx === cursorCol;
-
-      if (isCursor) {
-        // Cursor position: underline + inverse
-        result += `\x1b[4;7m${styledLine[i]}\x1b[0m`;
-      } else if (inSelection) {
-        // Selected: inverse video
-        result += `\x1b[7m${styledLine[i]}\x1b[0m`;
-      } else {
-        result += styledLine[i];
-      }
-
-      plainIdx++;
+      result += line[i];
+      visibleLen++;
       i++;
     }
 
-    // If selection extends beyond the line content (e.g., visual-line mode on empty line)
-    // show cursor at end of line if it's the cursor line
-    if (lineIdx === cursorLine && cursorCol >= plainLine.length) {
-      result += `\x1b[4;7m \x1b[0m`;
+    // Pad with spaces if needed
+    if (visibleLen < width) {
+      result += ' '.repeat(width - visibleLen);
     }
 
-    return result;
-  }
-
-  /**
-   * Highlight normal mode cursor position
-   * @param {string} styledLine - Line with ANSI codes
-   * @param {string} plainLine - Plain text line
-   * @param {number} col - Cursor column
-   * @returns {string} Line with cursor highlight
-   */
-  highlightNormalCursor(styledLine, plainLine, col) {
-    let result = '';
-    let plainIdx = 0;
-    let i = 0;
-    let lastEsc = '';  // Track last escape sequence to restore after cursor
-
-    while (i < styledLine.length) {
-      // Skip ANSI escape sequences, but remember them
-      if (styledLine[i] === '\x1b') {
-        const escEnd = styledLine.indexOf('m', i);
-        if (escEnd !== -1) {
-          lastEsc = styledLine.substring(i, escEnd + 1);
-          result += lastEsc;
-          i = escEnd + 1;
-          continue;
-        }
-      }
-
-      if (plainIdx === col) {
-        // Cursor: underline + inverse, then restore previous style
-        result += `\x1b[4;7m${styledLine[i]}\x1b[0m${lastEsc}`;
-      } else {
-        result += styledLine[i];
-      }
-
-      plainIdx++;
-      i++;
-    }
-
-    // If cursor is beyond end of line, show block cursor
-    if (col >= plainLine.length) {
-      result += `\x1b[4;7m \x1b[0m`;
-    }
-
+    // Reset at end
+    result += '\x1b[0m';
     return result;
   }
 
   /**
    * Render borders between panes
    */
-  renderBorders(frame) {
-    this.drawBordersForNode(frame, this.layoutManager.layout);
+  renderBorders() {
+    let result = '';
+    result += this.renderBordersForNode(this.layoutManager.layout);
+    return result;
   }
 
-  drawBordersForNode(frame, node) {
-    if (!node || node.type !== 'container') return;
+  renderBordersForNode(node) {
+    if (!node || node.type !== 'container') return '';
 
+    let result = '';
     const { x, y, width, height } = node.bounds;
     const isHorizontal = node.orientation === 'horizontal';
 
@@ -524,41 +248,46 @@ class Compositor {
 
       if (isHorizontal) {
         // Vertical border
-        const borderX = x + offset - 1;
-        for (let row = y; row < y + height && row < this.rows - 1; row++) {
-          if (borderX >= 0 && borderX < this.cols) {
-            frame[row][borderX].char = '│';
-            frame[row][borderX].fg = 8; // Dim
+        const borderX = x + offset;
+        for (let row = y; row < y + height; row++) {
+          const screenY = row + 1; // 1-indexed
+          const screenX = borderX + 1;
+          if (screenX > 0 && screenX <= this.cols && screenY > 0 && screenY < this.rows) {
+            result += `\x1b[${screenY};${screenX}H\x1b[2m│\x1b[0m`;
           }
         }
       } else {
         // Horizontal border
-        const borderY = y + offset - 1;
-        if (borderY >= 0 && borderY < this.rows - 1) {
-          for (let col = x; col < x + width && col < this.cols; col++) {
-            frame[borderY][col].char = '─';
-            frame[borderY][col].fg = 8;
+        const borderY = y + offset;
+        const screenY = borderY + 1;
+        if (screenY > 0 && screenY < this.rows) {
+          for (let col = x; col < x + width; col++) {
+            const screenX = col + 1;
+            if (screenX > 0 && screenX <= this.cols) {
+              result += `\x1b[${screenY};${screenX}H\x1b[2m─\x1b[0m`;
+            }
           }
         }
       }
     }
 
-    // Recurse into children
+    // Recurse
     for (const child of node.children) {
-      this.drawBordersForNode(frame, child);
+      result += this.renderBordersForNode(child);
     }
+
+    return result;
   }
 
   /**
-   * Render status bar (last row)
+   * Render status bar (like index.js)
    */
-  renderStatusBar(frame) {
-    const y = this.rows - 1;
+  renderStatusBar() {
     const focusedAgent = this.layoutManager.getFocusedAgent();
     const panes = this.layoutManager.getAllPanes();
     const focusedPane = this.layoutManager.getFocusedPane();
 
-    // Build left status string
+    // Build left part
     let left = '';
 
     // Zoom indicator
@@ -566,20 +295,11 @@ class Compositor {
       left += '[ZOOM] ';
     }
 
-    // Mode indicator from InputRouter
+    // Mode indicator
     const mode = this.inputRouter?.mode;
-    if (mode === 'insert') {
-      left += '[INSERT] ';
-    } else if (mode === 'normal') {
-      left += '[NORMAL] ';
-    } else if (mode === 'visual') {
-      left += '[VISUAL] ';
-    } else if (mode === 'visual-line') {
-      left += '[V-LINE] ';
-    } else if (mode === 'search') {
-      left += '[SEARCH] ';
-    } else if (mode === 'command') {
-      left += '[COMMAND] ';
+    const modeNames = { insert: 'INSERT', normal: 'NORMAL', visual: 'VISUAL', 'visual-line': 'V-LINE', search: 'SEARCH', command: 'COMMAND' };
+    if (mode && modeNames[mode]) {
+      left += `[${modeNames[mode]}] `;
     }
 
     // Pane index
@@ -588,64 +308,41 @@ class Compositor {
       left += `[${focusedIdx + 1}/${panes.length}] `;
     }
 
-    // Register indicator
-    if (this.visualState?.awaitingRegister) {
-      left += '"_ ';
-    } else if (this.visualState?.selectedRegister) {
-      left += `"${this.visualState.selectedRegister} `;
-    }
-
-    // Command prompt (ex mode)
+    // Search/command status
     if (this.commandState?.active) {
       left += `:${this.commandState.buffer}_ `;
-    }
-    // Search prompt or status
-    else if (this.searchState?.active) {
+    } else if (this.searchState?.active) {
       left += `/${this.searchState.pattern}_ `;
     } else if (this.searchState?.matches?.length > 0) {
       left += `[${this.searchState.index + 1}/${this.searchState.matches.length}] `;
     }
 
-    // Build right status string
+    // Build right part
     let right = '';
 
-    // Scroll position [startLine-endLine/totalLines] or position indicator
     if (focusedPane && focusedAgent) {
       const scrollY = this.scrollOffsets.get(focusedPane.id) || 0;
       const contentHeight = focusedAgent.getContentHeight();
       const viewHeight = focusedPane.bounds.height;
-      const startLine = scrollY + 1;
-      const endLine = Math.min(scrollY + viewHeight, contentHeight);
+      const maxScroll = Math.max(0, contentHeight - viewHeight);
 
-      if (contentHeight > viewHeight) {
-        // Show scroll position when content exceeds view
-        const atTop = scrollY === 0;
-        const atBottom = scrollY >= contentHeight - viewHeight;
-        let posIndicator;
-        if (atTop) posIndicator = 'Top';
-        else if (atBottom) posIndicator = 'Bot';
-        else posIndicator = `${Math.round((scrollY / (contentHeight - viewHeight)) * 100)}%`;
+      const from = contentHeight ? scrollY + 1 : 0;
+      const to = Math.min(scrollY + viewHeight, contentHeight);
 
-        right += `[${startLine}-${endLine}/${contentHeight}] ${posIndicator} `;
-      } else {
-        right += 'All ';
-      }
+      let pctStr;
+      if (scrollY <= 0) pctStr = 'Top';
+      else if (scrollY >= maxScroll) pctStr = 'Bot';
+      else pctStr = `${Math.round(100 * scrollY / maxScroll)}%`;
+
+      right += `[${from}-${to}/${contentHeight}] ${pctStr} `;
     }
 
-    // Agent info
     if (focusedAgent) {
-      let statusIcon;
-      if (focusedAgent.status === 'running') {
-        statusIcon = '●';
-      } else if (focusedAgent.status === 'error') {
-        statusIcon = '✖';
-      } else {
-        statusIcon = '○';
-      }
+      const statusIcon = focusedAgent.status === 'running' ? '●' : (focusedAgent.status === 'error' ? '✖' : '○');
       right += `${focusedAgent.name} ${statusIcon}`;
     }
 
-    // Context-sensitive hint in the middle
+    // Center hint
     let hint = '';
     if (this.searchState?.active) {
       hint = 'Enter:search Esc:cancel';
@@ -659,109 +356,176 @@ class Compositor {
       hint = 'y:yank Esc:cancel';
     }
 
-    // Calculate padding
-    const totalLen = left.length + hint.length + right.length + 2; // +2 for edge spaces
+    // Build padded status line (like index.js)
+    const totalLen = left.length + hint.length + right.length + 2;
     const padding = Math.max(0, this.cols - totalLen);
     const leftPad = Math.floor(padding / 2);
     const rightPad = padding - leftPad;
 
-    // Write status bar with inverse colors
-    let fullStatus = '\x1b[7m ' + left;
-    fullStatus += ' '.repeat(leftPad);
-    fullStatus += hint;
-    fullStatus += ' '.repeat(rightPad);
-    fullStatus += right + ' \x1b[0m';
+    let status = '\x1b[7m ' + left;
+    status += ' '.repeat(leftPad);
+    status += hint;
+    status += ' '.repeat(rightPad);
+    status += right + ' \x1b[0m';
 
-    this.writeRawToFrame(frame, 0, y, fullStatus);
+    return status;
   }
 
   /**
-   * Convert frame to ANSI output string
+   * Highlight search matches (like index.js highlightSearchMatches)
    */
-  output() {
-    if (!this.frame) return '';
+  highlightSearchMatches(line, plainLine, matches, lineIdx) {
+    const currentMatch = this.searchState.matches[this.searchState.index];
+    const isCurrentLine = currentMatch && currentMatch.line === lineIdx;
 
     let result = '';
+    let plainIdx = 0;
+    let i = 0;
 
-    // Move to top-left
-    result += '\x1b[H';
-
-    // DEC 2026 synchronized update begin
-    result += '\x1b[?2026h';
-
-    let lastFg = null;
-    let lastBg = null;
-    let lastAttrs = 0;
-
-    for (let y = 0; y < this.rows; y++) {
-      for (let x = 0; x < this.cols; x++) {
-        const cell = this.frame[y][x];
-
-        // Check if style changed
-        if (cell.fg !== lastFg || cell.bg !== lastBg || cell.attrs !== lastAttrs) {
-          result += this.buildSGR(cell.fg, cell.bg, cell.attrs);
-          lastFg = cell.fg;
-          lastBg = cell.bg;
-          lastAttrs = cell.attrs;
+    while (i < line.length) {
+      if (line[i] === '\x1b') {
+        const escEnd = line.indexOf('m', i);
+        if (escEnd !== -1) {
+          result += line.substring(i, escEnd + 1);
+          i = escEnd + 1;
+          continue;
         }
-
-        result += cell.char;
       }
 
-      if (y < this.rows - 1) {
-        result += '\r\n';
+      let inMatch = false;
+      let isCurrentMatchPos = false;
+      for (const m of matches) {
+        if (plainIdx >= m.col && plainIdx < m.col + m.length) {
+          inMatch = true;
+          if (isCurrentLine && currentMatch && m.col === currentMatch.col) {
+            isCurrentMatchPos = true;
+          }
+          break;
+        }
       }
+
+      if (isCurrentMatchPos) {
+        result += `\x1b[30;103m${line[i]}\x1b[0m`;
+      } else if (inMatch) {
+        result += `\x1b[43m${line[i]}\x1b[49m`;
+      } else {
+        result += line[i];
+      }
+
+      plainIdx++;
+      i++;
     }
-
-    // Reset, end synchronized update, hide cursor
-    // Always hide the real terminal cursor - agent apps render their own cursor
-    // in the terminal buffer which we display. Trying to show/position the real
-    // cursor causes flickering conflicts with agents' cursor control sequences.
-    result += '\x1b[0m\x1b[?2026l\x1b[?25l';
 
     return result;
   }
 
   /**
-   * Build SGR escape sequence from style
+   * Apply visual selection highlight (like index.js highlightVisualSelection)
    */
-  buildSGR(fg, bg, attrs) {
-    const codes = [0]; // Reset first
+  applyVisualHighlight(line, plainLine, lineIdx) {
+    const { visualAnchor, visualCursor, mode } = this.visualState;
 
-    if (attrs & 1) codes.push(1);  // Bold
-    if (attrs & 2) codes.push(2);  // Dim
-    if (attrs & 4) codes.push(3);  // Italic
-    if (attrs & 8) codes.push(4);  // Underline
-    if (attrs & 16) codes.push(7); // Inverse
-    if (attrs & 32) codes.push(9); // Strikethrough
+    // Determine selection bounds
+    let startLine = visualAnchor.line;
+    let startCol = visualAnchor.col;
+    let endLine = visualCursor.line;
+    let endCol = visualCursor.col;
 
-    if (fg !== null) {
-      if (typeof fg === 'number') {
-        if (fg < 8) codes.push(30 + fg);
-        else codes.push(90 + fg - 8);
-      } else if (fg.type === '256') {
-        codes.push(38, 5, fg.value);
-      } else if (fg.type === 'rgb') {
-        codes.push(38, 2, fg.r, fg.g, fg.b);
-      }
+    if (startLine > endLine || (startLine === endLine && startCol > endCol)) {
+      [startLine, endLine] = [endLine, startLine];
+      [startCol, endCol] = [endCol, startCol];
     }
 
-    if (bg !== null) {
-      if (typeof bg === 'number') {
-        if (bg < 8) codes.push(40 + bg);
-        else codes.push(100 + bg - 8);
-      } else if (bg.type === '256') {
-        codes.push(48, 5, bg.value);
-      } else if (bg.type === 'rgb') {
-        codes.push(48, 2, bg.r, bg.g, bg.b);
+    if (lineIdx < startLine || lineIdx > endLine) {
+      if (lineIdx === visualCursor.line) {
+        return this.insertCursorMarker(line, plainLine, visualCursor.col);
       }
+      return line;
     }
 
-    return `\x1b[${codes.join(';')}m`;
+    let hlStart = 0;
+    let hlEnd = plainLine.length;
+
+    if (mode === 'vline') {
+      // Full line
+    } else {
+      if (lineIdx === startLine) hlStart = startCol;
+      if (lineIdx === endLine) hlEnd = endCol + 1;
+    }
+
+    let result = '';
+    let plainIdx = 0;
+    let i = 0;
+
+    while (i < line.length) {
+      if (line[i] === '\x1b') {
+        const escEnd = line.indexOf('m', i);
+        if (escEnd !== -1) {
+          result += line.substring(i, escEnd + 1);
+          i = escEnd + 1;
+          continue;
+        }
+      }
+
+      const inHighlight = plainIdx >= hlStart && plainIdx < hlEnd;
+      const isCursor = lineIdx === visualCursor.line && plainIdx === visualCursor.col;
+
+      if (isCursor) {
+        result += `\x1b[4;7m${line[i]}\x1b[24;27m`;
+      } else if (inHighlight) {
+        result += `\x1b[7m${line[i]}\x1b[27m`;
+      } else {
+        result += line[i];
+      }
+
+      plainIdx++;
+      i++;
+    }
+
+    if (lineIdx === visualCursor.line && visualCursor.col >= plainLine.length) {
+      result += `\x1b[4;7m \x1b[24;27m`;
+    }
+
+    return result;
   }
 
   /**
-   * Scroll pane by delta
+   * Insert cursor marker (like index.js insertCursorMarker)
+   */
+  insertCursorMarker(line, plainLine, col) {
+    let result = '';
+    let plainIdx = 0;
+    let i = 0;
+
+    while (i < line.length) {
+      if (line[i] === '\x1b') {
+        const escEnd = line.indexOf('m', i);
+        if (escEnd !== -1) {
+          result += line.substring(i, escEnd + 1);
+          i = escEnd + 1;
+          continue;
+        }
+      }
+
+      if (plainIdx === col) {
+        result += `\x1b[4;7m${line[i]}\x1b[24;27m`;
+      } else {
+        result += line[i];
+      }
+
+      plainIdx++;
+      i++;
+    }
+
+    if (col >= plainLine.length) {
+      result += `\x1b[4;7m \x1b[24;27m`;
+    }
+
+    return result;
+  }
+
+  /**
+   * Scroll pane by delta (like index.js scroll)
    */
   scrollPane(paneId, delta) {
     const pane = this.layoutManager.findPane(paneId);
@@ -770,15 +534,19 @@ class Compositor {
     const agent = this.session.getAgent(pane.agentId);
     if (!agent) return;
 
-    let scrollY = this.scrollOffsets.get(paneId) || 0;
     const contentHeight = agent.getContentHeight();
     const maxScroll = Math.max(0, contentHeight - pane.bounds.height);
+    const oldScroll = this.scrollOffsets.get(paneId) || 0;
 
-    scrollY = Math.max(0, Math.min(maxScroll, scrollY + delta));
+    let scrollY = Math.max(0, Math.min(maxScroll, oldScroll + delta));
     this.scrollOffsets.set(paneId, scrollY);
 
-    // Set followTail based on whether we're at the bottom (like index.js)
+    // Update followTail like index.js
     this.followTail.set(paneId, scrollY >= maxScroll);
+
+    if (scrollY !== oldScroll) {
+      this.draw();
+    }
   }
 
   /**
@@ -789,7 +557,7 @@ class Compositor {
   }
 
   /**
-   * Jump to top/bottom of focused pane
+   * Jump to top/bottom
    */
   scrollFocusedTo(position) {
     const paneId = this.layoutManager.focusedPaneId;
@@ -801,13 +569,14 @@ class Compositor {
 
     if (position === 'top') {
       this.scrollOffsets.set(paneId, 0);
-      this.followTail.set(paneId, false);  // Stop following tail when jumping to top
+      this.followTail.set(paneId, false);
     } else if (position === 'bottom') {
       const contentHeight = agent.getContentHeight();
       const maxScroll = Math.max(0, contentHeight - pane.bounds.height);
       this.scrollOffsets.set(paneId, maxScroll);
-      this.followTail.set(paneId, true);   // Resume following tail at bottom
+      this.followTail.set(paneId, true);
     }
+    this.draw();
   }
 }
 

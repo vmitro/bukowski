@@ -14,6 +14,7 @@ const { IPCHub } = require('./src/ipc/IPCHub');
 const { TabBar } = require('./src/ui/TabBar');
 const { LayoutNode } = require('./src/layout/LayoutNode');
 const { RegisterManager } = require('./src/input/RegisterManager');
+const { findLatestSession } = require('./src/utils/agentSessions');
 
 // Load quotes from quotes.txt
 const quotesPath = path.join(__dirname, 'quotes.txt');
@@ -79,12 +80,27 @@ const AGENT_TYPES = {
   claude: {
     command: 'node',
     args: [claudePath],
-    name: 'Claude'
+    name: 'Claude',
+    // Generate resume args based on session ID
+    getResumeArgs: (sessionId) => sessionId
+      ? ['--resume', sessionId]
+      : ['--continue']  // fallback to latest
   },
   codex: {
     command: 'node',
     args: codexPath ? [codexPath] : [],
-    name: 'Codex'
+    name: 'Codex',
+    getResumeArgs: (sessionId) => sessionId
+      ? ['resume', sessionId]
+      : ['resume', '--last']
+  },
+  gemini: {
+    command: 'gemini',
+    args: [],
+    name: 'Gemini',
+    getResumeArgs: (sessionId) => sessionId
+      ? ['-r', sessionId]
+      : []  // No resume support without session ID
   }
 };
 
@@ -213,22 +229,26 @@ process.on('SIGCONT', () => {
   // 2. Restore terminal state
   setupTerminal();
 
-  // 3. Force full redraw
+  // 3. Force full redraw (immediate)
   if (activeCompositor) {
-    activeCompositor.render();
-    process.stdout.write(activeCompositor.output());
+    activeCompositor.draw();
   }
 });
 
-// Alt screen buffer
-process.stdout.write('\x1b[?1049h');
+// Main async startup
+(async () => {
+  // Enter alt screen
+  process.stdout.write('\x1b[?1049h');
 
-// Show splash
-showSplash();
+  // Show splash
+  showSplash();
 
-const SPLASH_DURATION = parseInt(process.env.BUKOWSKI_SPLASH) || 2000;
+  const SPLASH_DURATION = parseInt(process.env.BUKOWSKI_SPLASH) || 2000;
 
-setTimeout(async () => {
+  // Wait for splash duration
+  await new Promise(resolve => setTimeout(resolve, SPLASH_DURATION));
+
+  // Continue with main initialization
   let session;
   let restoredSession = false;
 
@@ -604,6 +624,9 @@ setTimeout(async () => {
         agent.resize(pane.bounds.width, pane.bounds.height);
       }
     }
+
+    // Redraw with new dimensions
+    compositor.draw();
   }
 
   // Execute ex-command
@@ -615,6 +638,24 @@ setTimeout(async () => {
       return type;
     }
     return null; // invalid type
+  }
+
+  // Capture agent session IDs from filesystem before saving
+  async function captureAgentSessions() {
+    const cwd = process.cwd();
+    for (const agent of session.getAllAgents()) {
+      // Only capture if we don't already have a session ID and agent has been spawned
+      if (agent.spawnedAt && !agent.agentSessionId) {
+        try {
+          const sessionId = await findLatestSession(agent.type, cwd, agent.spawnedAt);
+          if (sessionId) {
+            agent.agentSessionId = sessionId;
+          }
+        } catch {
+          // Ignore errors - session ID capture is best-effort
+        }
+      }
+    }
   }
 
   function executeCommand(cmd) {
@@ -703,9 +744,26 @@ setTimeout(async () => {
         }
         // Sync focused pane ID to session before saving
         session.focusedPaneId = layoutManager.focusedPaneId;
-        session.save().then(filepath => {
-          // Could show a status message
-        }).catch(() => {});
+        // If zoomed, save the unzoomed layout (so restore gets full layout)
+        const wasZoomed = layoutManager.isZoomed();
+        const zoomedLayout = wasZoomed ? session.layout : null;
+        if (wasZoomed) {
+          session.layout = layoutManager.savedLayout;
+        }
+        // Capture agent session IDs before saving
+        captureAgentSessions().then(() => {
+          return session.save();
+        }).then(filepath => {
+          // Restore zoomed state after save
+          if (wasZoomed) {
+            session.layout = zoomedLayout;
+          }
+        }).catch(() => {
+          // Restore zoomed state on error too
+          if (wasZoomed) {
+            session.layout = zoomedLayout;
+          }
+        });
         break;
       }
 
@@ -713,7 +771,14 @@ setTimeout(async () => {
       case 'x': {
         // :wq / :x - save and quit
         session.focusedPaneId = layoutManager.focusedPaneId;
-        session.save().then(() => {
+        // If zoomed, save the unzoomed layout
+        if (layoutManager.isZoomed()) {
+          session.layout = layoutManager.savedLayout;
+        }
+        // Capture agent session IDs before saving
+        captureAgentSessions().then(() => {
+          return session.save();
+        }).then(() => {
           cleanup();
           if (ipcHub) ipcHub.stop();
           session.destroy();
@@ -783,13 +848,22 @@ setTimeout(async () => {
   compositor.resize(cols, rows);
 
   // Spawn agents for all panes
-  // For restored sessions, we spawn fresh agents (can't restore terminal state)
-  // For new sessions, spawn the initial agent
+  // For restored sessions, inject resume args so agents continue their conversations
+  // For new sessions, spawn the initial agent fresh
   const allPanes = layoutManager.getAllPanes();
   for (let i = 0; i < allPanes.length; i++) {
     const pane = allPanes[i];
     const agent = session.getAgent(pane.agentId);
     if (agent && !agent.pty) {
+      // If restoring a session, inject resume args for this agent type
+      if (restoredSession) {
+        const typeConfig = AGENT_TYPES[agent.type];
+        if (typeConfig?.getResumeArgs) {
+          const resumeArgs = typeConfig.getResumeArgs(agent.agentSessionId);
+          agent.args = [...agent.args, ...resumeArgs];
+        }
+      }
+
       // For the first pane, use half width trick for Claude banner
       if (i === 0 && agent.type === 'claude') {
         const initialWidth = Math.floor(pane.bounds.width / 2);
@@ -815,9 +889,12 @@ setTimeout(async () => {
   process.stdout.on('resize', handleResize);
 
   // Create new agent (for splits)
-  // Set up exit handler for an agent's PTY
-  function setupAgentExitHandler(agent) {
+  // Set up handlers for an agent's PTY (data + exit)
+  function setupAgentHandlers(agent) {
     if (!agent.pty) return;
+
+    // Connect data handler to scheduleDraw for proper throttled rendering
+    agent.pty.onData(() => compositor.scheduleDraw());
 
     agent.pty.onExit(({ exitCode }) => {
       // Find and close the pane for this agent
@@ -1062,7 +1139,7 @@ setTimeout(async () => {
         const newPane = layoutManager.splitHorizontal(newAgent.id);
         if (newPane) {
           newAgent.spawn(newPane.bounds.width, newPane.bounds.height);
-          setupAgentExitHandler(newAgent);
+          setupAgentHandlers(newAgent);
         }
         handleResize();
         break;
@@ -1075,7 +1152,7 @@ setTimeout(async () => {
         const newPane = layoutManager.splitVertical(newAgent.id);
         if (newPane) {
           newAgent.spawn(newPane.bounds.width, newPane.bounds.height);
-          setupAgentExitHandler(newAgent);
+          setupAgentHandlers(newAgent);
         }
         handleResize();
         break;
@@ -1119,7 +1196,7 @@ setTimeout(async () => {
           }
           currentPane.agentId = newAgent.id;
           newAgent.spawn(currentPane.bounds.width, currentPane.bounds.height);
-          setupAgentExitHandler(newAgent);
+          setupAgentHandlers(newAgent);
         }
         handleResize();
         break;
@@ -1342,25 +1419,50 @@ setTimeout(async () => {
     const str = data.toString();
 
     // Mouse handling (SGR)
+    // SGR button encoding:
+    //   bits 0-1: button (0=left, 1=middle, 2=right)
+    //   bit 2: shift
+    //   bit 3: meta/alt
+    //   bit 4: ctrl
+    //   64/65: scroll up/down
     const mouseMatch = str.match(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
     if (mouseMatch) {
       const btn = parseInt(mouseMatch[1]);
       const mx = parseInt(mouseMatch[2]) - 1;  // 1-indexed to 0-indexed
       const my = parseInt(mouseMatch[3]) - 1;
 
+      // Extract modifiers and base button
+      const isShift = (btn & 4) !== 0;
+      const isCtrl = (btn & 16) !== 0;
+      const baseBtn = btn & ~(4 | 8 | 16); // Remove modifier bits
+
       if (mouseMatch[4] === 'M') {
         // Left click (btn 0) - focus pane under mouse
-        if (btn === 0) {
+        if (baseBtn === 0 && !isShift && !isCtrl) {
           const pane = layoutManager.findPaneAt(mx, my);
           if (pane && pane.id !== layoutManager.focusedPaneId) {
             layoutManager.focusPane(pane.id);
           }
         }
-        // Scroll wheel - scroll pane under mouse
-        else if (btn === 64 || btn === 65) {
+        // Ctrl+scroll wheel - vertical pane resize (adjust horizontal splits)
+        else if (isCtrl && (baseBtn === 64 || baseBtn === 65)) {
+          const delta = baseBtn === 64 ? 1 : -1;
+          if (layoutManager.resizeAtPosition(mx, my, 'vertical', delta)) {
+            handleResize();
+          }
+        }
+        // Shift+scroll wheel - horizontal pane resize (adjust vertical splits)
+        else if (isShift && (baseBtn === 64 || baseBtn === 65)) {
+          const delta = baseBtn === 64 ? 1 : -1;
+          if (layoutManager.resizeAtPosition(mx, my, 'horizontal', delta)) {
+            handleResize();
+          }
+        }
+        // Plain scroll wheel - scroll pane under mouse
+        else if (baseBtn === 64 || baseBtn === 65) {
           const pane = layoutManager.findPaneAt(mx, my);
           if (pane) {
-            const delta = btn === 64 ? -3 : 3;
+            const delta = baseBtn === 64 ? -3 : 3;
             compositor.scrollPane(pane.id, delta);
           }
         }
@@ -1373,31 +1475,18 @@ setTimeout(async () => {
     handleAction(result);
   });
 
-  // Render loop
-  let lastRender = 0;
-  const FRAME_TIME = 16; // ~60fps
-
-  function render() {
-    const now = Date.now();
-    if (now - lastRender >= FRAME_TIME) {
-      lastRender = now;
-      const frame = compositor.render();
-      process.stdout.write(compositor.output());
-    }
-  }
-
-  // Render on agent output
+  // Render on agent output - use scheduleDraw for throttled drawing (like index.js)
   for (const agent of session.getAllAgents()) {
     if (agent.pty) {
-      agent.pty.onData(() => render());
+      agent.pty.onData(() => compositor.scheduleDraw());
     }
   }
 
-  // Initial render
-  render();
+  // Initial render (immediate)
+  compositor.draw();
 
-  // Periodic render for any missed updates
-  setInterval(render, 50);
+  // Periodic refresh for cursor blink / idle updates
+  setInterval(() => compositor.scheduleDraw(), 100);
 
   // Signal handlers
   process.on('SIGINT', () => {
@@ -1414,9 +1503,27 @@ setTimeout(async () => {
     process.exit(0);
   });
 
-  // Handle agent exit for initial agents
+  // Handle agent exit for initial agents (onData already set up above)
   for (const agent of session.getAllAgents()) {
-    setupAgentExitHandler(agent);
+    if (agent.pty) {
+      agent.pty.onExit(({ exitCode }) => {
+        const pane = layoutManager.findPaneByAgent(agent.id);
+        if (pane) {
+          layoutManager.focusPane(pane.id);
+          const allPanes = layoutManager.getAllPanes();
+          if (allPanes.length === 1) {
+            cleanup();
+            if (ipcHub) ipcHub.stop();
+            session.destroy();
+            process.exit(exitCode);
+          } else {
+            layoutManager.closePane();
+            session.removeAgent(agent.id);
+            handleResize();
+          }
+        }
+      });
+    }
   }
 
-}, SPLASH_DURATION);
+})();
