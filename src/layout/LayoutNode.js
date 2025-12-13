@@ -28,8 +28,25 @@ class Container extends LayoutNode {
   constructor(orientation = 'horizontal', ratios = [0.5, 0.5]) {
     super();
     this.orientation = orientation; // 'horizontal' | 'vertical'
-    this.ratios = ratios;           // [0.5, 0.5] for 50/50 split
+    // Store ratios normalized to sum to 1.0 for compatibility
+    // Integer weights are used internally during calculation
+    this.ratios = ratios;
     this.children = [];             // LayoutNode[]
+  }
+
+  /**
+   * Get integer weights (scaled to 10000) for proportional calculation
+   */
+  getWeights() {
+    return this.ratios.map(r => Math.round(r * 10000));
+  }
+
+  /**
+   * Set ratios from integer weights
+   */
+  setWeights(weights) {
+    const total = weights.reduce((a, b) => a + b, 0);
+    this.ratios = total > 0 ? weights.map(w => w / total) : weights.map(() => 1 / weights.length);
   }
 
   get type() { return 'container'; }

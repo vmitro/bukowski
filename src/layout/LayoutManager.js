@@ -188,7 +188,7 @@ class LayoutManager {
   }
 
   /**
-   * Calculate bounds for all nodes
+   * Calculate bounds for all nodes using integer-proportional distribution
    * @param {number} x - Start x
    * @param {number} y - Start y (after tab bar)
    * @param {number} width - Available width
@@ -200,27 +200,80 @@ class LayoutManager {
     node.bounds = { x, y, width, height };
 
     if (node.type === 'container') {
-      let offset = 0;
       const isHorizontal = node.orientation === 'horizontal';
       const totalSize = isHorizontal ? width : height;
+      const n = node.children.length;
 
-      for (let i = 0; i < node.children.length; i++) {
+      // Convert ratios to integer weights (scale by 10000 for precision)
+      const weights = node.ratios.map(r => Math.round(r * 10000));
+      const totalWeight = weights.reduce((a, b) => a + b, 0);
+
+      // Account for borders between panes (n-1 borders, 1 char each)
+      const borderSpace = n - 1;
+      const availableSize = totalSize - borderSpace;
+
+      // Distribute sizes proportionally using integer math
+      // This ensures consistent rounding regardless of terminal size
+      const sizes = this.distributeProportionally(availableSize, weights, totalWeight);
+
+      let offset = 0;
+      for (let i = 0; i < n; i++) {
         const child = node.children[i];
-        const ratio = node.ratios[i] || (1 / node.children.length);
-        const size = Math.floor(totalSize * ratio);
-
-        // Account for border (1 char) between panes
-        const borderOffset = i < node.children.length - 1 ? 1 : 0;
+        const size = sizes[i];
 
         if (isHorizontal) {
-          this.calculateBounds(x + offset, y, size - borderOffset, height, child);
+          this.calculateBounds(x + offset, y, size, height, child);
         } else {
-          this.calculateBounds(x, y + offset, width, size - borderOffset, child);
+          this.calculateBounds(x, y + offset, width, size, child);
         }
 
-        offset += size;
+        // Add border space after each child except last
+        offset += size + (i < n - 1 ? 1 : 0);
       }
     }
+  }
+
+  /**
+   * Distribute a total among parts proportionally using integer arithmetic
+   * Uses largest remainder method for fair distribution
+   * @param {number} total - Total to distribute
+   * @param {number[]} weights - Integer weights for each part
+   * @param {number} totalWeight - Sum of weights
+   * @returns {number[]} - Sizes for each part
+   */
+  distributeProportionally(total, weights, totalWeight) {
+    const n = weights.length;
+    if (n === 0) return [];
+    if (totalWeight === 0) {
+      // Fallback: equal distribution
+      const base = Math.floor(total / n);
+      const remainder = total - base * n;
+      return weights.map((_, i) => base + (i < remainder ? 1 : 0));
+    }
+
+    // Calculate base sizes and remainders
+    const sizes = [];
+    const remainders = [];
+    let allocated = 0;
+
+    for (let i = 0; i < n; i++) {
+      // Use integer multiplication then division to minimize rounding errors
+      const exact = (total * weights[i]) / totalWeight;
+      const base = Math.floor(exact);
+      sizes.push(base);
+      remainders.push({ index: i, fraction: exact - base });
+      allocated += base;
+    }
+
+    // Distribute remaining pixels to those with largest remainders
+    let leftover = total - allocated;
+    remainders.sort((a, b) => b.fraction - a.fraction);
+
+    for (let i = 0; i < leftover && i < remainders.length; i++) {
+      sizes[remainders[i].index]++;
+    }
+
+    return sizes;
   }
 
   /**
@@ -329,6 +382,135 @@ class LayoutManager {
     // Normalize ratios
     const total = parent.ratios.reduce((a, b) => a + b, 0);
     parent.ratios = parent.ratios.map(r => r / total);
+  }
+
+  /**
+   * Find the nearest resizable border to a screen position
+   * @param {number} x - Screen X
+   * @param {number} y - Screen Y
+   * @param {'horizontal'|'vertical'} orientation - Which border type to find
+   * @returns {{container, borderIndex, position}|null}
+   */
+  findBorderAt(x, y, orientation, node = this.layout) {
+    if (!node || node.type !== 'container') return null;
+
+    // Check this container's borders
+    if (node.orientation === orientation && node.children.length > 1) {
+      const { x: nx, y: ny, width, height } = node.bounds;
+      const isHorizontal = orientation === 'horizontal';
+      const totalSize = isHorizontal ? width : height;
+
+      let offset = 0;
+      for (let i = 0; i < node.children.length - 1; i++) {
+        const ratio = node.ratios[i] || (1 / node.children.length);
+        const size = Math.floor(totalSize * ratio);
+        offset += size;
+
+        // Border is at offset position (1 char wide)
+        const borderPos = isHorizontal ? nx + offset - 1 : ny + offset - 1;
+        const threshold = 2; // Click within 2 chars of border
+
+        if (isHorizontal) {
+          // Vertical border (for horizontal layout)
+          if (Math.abs(x - borderPos) <= threshold && y >= ny && y < ny + height) {
+            return { container: node, borderIndex: i, position: borderPos };
+          }
+        } else {
+          // Horizontal border (for vertical layout)
+          if (Math.abs(y - borderPos) <= threshold && x >= nx && x < nx + width) {
+            return { container: node, borderIndex: i, position: borderPos };
+          }
+        }
+      }
+    }
+
+    // Recurse into children
+    for (const child of node.children || []) {
+      const found = this.findBorderAt(x, y, orientation, child);
+      if (found) return found;
+    }
+
+    return null;
+  }
+
+  /**
+   * Find container by pane position for directional resize
+   * @param {number} x - Screen X
+   * @param {number} y - Screen Y
+   * @param {'horizontal'|'vertical'} orientation - Container orientation to find
+   * @returns {{container, childIndex}|null}
+   */
+  findContainerForResize(x, y, orientation) {
+    const pane = this.findPaneAt(x, y);
+    if (!pane) return null;
+
+    // Walk up the tree to find a container with matching orientation
+    let node = pane;
+    while (node.parent) {
+      const parent = node.parent;
+      if (parent.orientation === orientation && parent.children.length > 1) {
+        const idx = parent.children.indexOf(node);
+        return { container: parent, childIndex: idx };
+      }
+      node = parent;
+    }
+    return null;
+  }
+
+  /**
+   * Resize a container's border using integer-proportional adjustment
+   * @param {Container} container - The container to resize
+   * @param {number} borderIndex - Which border (0 = between child 0 and 1)
+   * @param {number} delta - Positive = grow left/top child, negative = shrink
+   */
+  resizeBorder(container, borderIndex, delta) {
+    if (!container || container.type !== 'container') return;
+    if (borderIndex < 0 || borderIndex >= container.children.length - 1) return;
+
+    // Convert to integer weights if not already (scale by 1000 for precision)
+    let weights = container.ratios.map(r => Math.round(r * 1000));
+
+    // Apply delta (scale appropriately)
+    const change = delta * 10; // Each scroll step = 1% of total
+    weights[borderIndex] = Math.max(50, weights[borderIndex] + change);
+    weights[borderIndex + 1] = Math.max(50, weights[borderIndex + 1] - change);
+
+    // Normalize back to ratios
+    const total = weights.reduce((a, b) => a + b, 0);
+    container.ratios = weights.map(w => w / total);
+  }
+
+  /**
+   * Resize pane at position in given direction
+   * @param {number} x - Mouse X
+   * @param {number} y - Mouse Y
+   * @param {'horizontal'|'vertical'} direction - Resize direction
+   * @param {number} delta - Positive = grow, negative = shrink
+   */
+  resizeAtPosition(x, y, direction, delta) {
+    // Map direction to container orientation:
+    // - 'vertical' resize means adjusting a horizontal split (vertical container)
+    // - 'horizontal' resize means adjusting a vertical split (horizontal container)
+    const orientation = direction === 'vertical' ? 'vertical' : 'horizontal';
+
+    const result = this.findContainerForResize(x, y, orientation);
+    if (!result) return false;
+
+    const { container, childIndex } = result;
+
+    // Determine which border to adjust
+    // If we're not the last child, resize the border after us
+    // If we're the last child, resize the border before us
+    let borderIndex;
+    if (childIndex < container.children.length - 1) {
+      borderIndex = childIndex;
+    } else {
+      borderIndex = childIndex - 1;
+      delta = -delta; // Reverse direction for last child
+    }
+
+    this.resizeBorder(container, borderIndex, delta);
+    return true;
   }
 
   /**
