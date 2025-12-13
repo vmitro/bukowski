@@ -11,6 +11,7 @@ const { LayoutManager } = require('./src/layout/LayoutManager');
 const { Compositor } = require('./src/core/Compositor');
 const { InputRouter } = require('./src/input/InputRouter');
 const { IPCHub } = require('./src/ipc/IPCHub');
+const { FIPAHub } = require('./src/acl/FIPAHub');
 const { TabBar } = require('./src/ui/TabBar');
 const { LayoutNode } = require('./src/layout/LayoutNode');
 const { RegisterManager } = require('./src/input/RegisterManager');
@@ -323,8 +324,17 @@ process.on('SIGCONT', () => {
     console.error('Warning: IPC hub failed to start:', err.message);
   }
 
+  // Start FIPA Hub
+  const fipaHub = new FIPAHub(ipcHub);
+  try {
+    // FIPA Hub does not need to be 'started' but we might listen to events etc
+    // For now, just instantiate and connect
+  } catch (err) {
+    console.error('Warning: FIPA hub failed to initialize:', err.message);
+  }
+
   // Create input router
-  const inputRouter = new InputRouter(session, layoutManager, ipcHub);
+  const inputRouter = new InputRouter(session, layoutManager, ipcHub, fipaHub);
 
   // Create register manager for yank/paste
   const registerManager = new RegisterManager();
@@ -1492,6 +1502,7 @@ process.on('SIGCONT', () => {
   process.on('SIGINT', () => {
     cleanup();
     if (ipcHub) ipcHub.stop();
+    if (fipaHub) fipaHub.shutdown();
     session.destroy();
     process.exit(0);
   });
@@ -1499,6 +1510,7 @@ process.on('SIGCONT', () => {
   process.on('SIGTERM', () => {
     cleanup();
     if (ipcHub) ipcHub.stop();
+    if (fipaHub) fipaHub.shutdown();
     session.destroy();
     process.exit(0);
   });
