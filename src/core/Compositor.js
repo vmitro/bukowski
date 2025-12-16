@@ -2,12 +2,13 @@
 // Renders like index.js: direct line output with preserved ANSI codes
 
 class Compositor {
-  constructor(session, layoutManager, tabBar, chatPane, conversationList) {
+  constructor(session, layoutManager, tabBar, chatPane, conversationList, overlayManager = null) {
     this.session = session;
     this.layoutManager = layoutManager;
     this.tabBar = tabBar;
     this.chatPane = chatPane;
     this.conversationList = conversationList;
+    this.overlayManager = overlayManager;  // For modal overlays (ACL input, agent picker)
     this.cols = 80;
     this.rows = 24;
     this.scrollOffsets = new Map(); // paneId -> scrollY
@@ -107,6 +108,9 @@ class Compositor {
     // Render borders between panes
     frame += this.renderBorders();
 
+    // Render overlays ON TOP of pane content (modal dialogs, ACL input, etc.)
+    frame += this.renderOverlays();
+
     // Last row: Status bar
     frame += `\x1b[${this.rows};1H\x1b[2K`;
     frame += this.renderStatusBar();
@@ -128,14 +132,19 @@ class Compositor {
     const chatWidth = this.cols - listWidth;
 
     // Render ConversationList (left) and ChatPane (right)
-    const listLines = this.conversationList.render(listWidth, this.rows - 1);
-    const chatLines = this.chatPane.render(chatWidth, this.rows - 1);
+    // Reserve 2 rows: 1 for input line, 1 for status bar
+    const listLines = this.conversationList.render(listWidth, this.rows - 2);
+    const chatLines = this.chatPane.render(chatWidth, this.rows - 2);
 
-    for (let i = 0; i < this.rows - 1; i++) {
+    for (let i = 0; i < this.rows - 2; i++) {
       const screenY = i + 1;
       frame += `\x1b[${screenY};1H${listLines[i] || ''}`;
       frame += `\x1b[${screenY};${listWidth + 1}H${chatLines[i] || ''}`;
     }
+
+    // Input line (second to last row)
+    frame += `\x1b[${this.rows - 1};1H\x1b[2K`;
+    frame += this.renderChatInput();
 
     // Last row: Status bar
     frame += `\x1b[${this.rows};1H\x1b[2K`;
@@ -145,6 +154,60 @@ class Compositor {
     frame += '\x1b[?2026l';         // End sync update
 
     process.stdout.write(frame);
+  }
+
+  /**
+   * Render chat input line
+   */
+  renderChatInput() {
+    const chatState = this.chatState || {};
+    const input = chatState.inputBuffer || '';
+    const performative = chatState.pendingPerformative || 'inform';
+    const selectedAgent = chatState.selectedAgent;
+
+    // Build prompt: [PERF] @target: message_
+    let prompt = '';
+
+    // Performative indicator
+    const perfColors = {
+      'request': '\x1b[36m',    // cyan
+      'inform': '\x1b[37m',     // white
+      'query-if': '\x1b[33m',   // yellow
+      'query-ref': '\x1b[33m',  // yellow
+      'cfp': '\x1b[35m',        // magenta
+      'propose': '\x1b[34m',    // blue
+      'agree': '\x1b[32m',      // green
+      'refuse': '\x1b[31m',     // red
+      'subscribe': '\x1b[36m',  // cyan
+    };
+    const perfColor = perfColors[performative] || '\x1b[37m';
+    prompt += `${perfColor}[${performative.toUpperCase()}]\x1b[0m `;
+
+    // Target agent
+    if (selectedAgent) {
+      prompt += `\x1b[36m@${selectedAgent}\x1b[0m: `;
+    } else {
+      prompt += '\x1b[2m<Tab to select agent>\x1b[0m ';
+    }
+
+    // Input buffer with cursor
+    const cursorPos = input.length;
+    const visibleInput = input + '\x1b[7m \x1b[27m'; // Block cursor
+
+    prompt += visibleInput;
+
+    // Pad to width
+    const visibleLen = this._stripAnsi(prompt).length;
+    const padding = Math.max(0, this.cols - visibleLen);
+
+    return '\x1b[48;5;236m ' + prompt + ' '.repeat(padding) + '\x1b[0m';
+  }
+
+  /**
+   * Strip ANSI codes (helper for chat input)
+   */
+  _stripAnsi(str) {
+    return str.replace(/\x1b\[[0-9;]*m/g, '');
   }
 
   /**
@@ -319,6 +382,51 @@ class Compositor {
   }
 
   /**
+   * Render overlays on top of pane content
+   * Overlays are drawn last so they appear above everything
+   */
+  renderOverlays() {
+    if (!this.overlayManager || !this.overlayManager.hasActiveOverlay()) {
+      return '';
+    }
+
+    let result = '';
+
+    // Render all overlays in z-order (back to front)
+    for (const overlay of this.overlayManager.getAllInOrder()) {
+      const { x, y, width, height } = overlay.bounds;
+
+      // First pass: clear the overlay area completely with spaces
+      // This prevents any pane content from bleeding through
+      for (let row = 0; row < height; row++) {
+        const screenY = y + row + 1;
+        const screenX = x + 1;
+        if (screenY > 0 && screenY <= this.rows && screenX > 0) {
+          // Reset attributes, position, write spaces for full width
+          result += `\x1b[${screenY};${screenX}H\x1b[0m${' '.repeat(width)}`;
+        }
+      }
+
+      // Second pass: render the overlay content on top
+      const rendered = overlay.render();
+
+      for (const { row, col, content } of rendered) {
+        // Convert to 1-indexed screen coordinates
+        const screenY = row + 1;
+        const screenX = col + 1;
+
+        // Bounds check
+        if (screenY > 0 && screenY <= this.rows && screenX > 0 && screenX <= this.cols) {
+          // Position cursor, reset any prior state, then render content
+          result += `\x1b[${screenY};${screenX}H\x1b[0m${content}`;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * Render status bar (like index.js)
    */
   renderStatusBar() {
@@ -336,7 +444,7 @@ class Compositor {
 
     // Mode indicator
     const mode = this.inputRouter?.mode;
-    const modeNames = { insert: 'INSERT', normal: 'NORMAL', visual: 'VISUAL', 'visual-line': 'V-LINE', search: 'SEARCH', command: 'COMMAND', chat: 'CHAT' };
+    const modeNames = { insert: 'INSERT', normal: 'NORMAL', visual: 'VISUAL', 'visual-line': 'V-LINE', search: 'SEARCH', command: 'COMMAND', chat: 'CHAT', 'acl-send': 'ACL' };
     if (mode && modeNames[mode]) {
       left += `[${modeNames[mode]}] `;
     }
@@ -404,6 +512,8 @@ class Compositor {
       hint = 'i:insert /:search ::cmd';
     } else if (mode === 'visual' || mode === 'visual-line') {
       hint = 'y:yank Esc:cancel';
+    } else if (mode === 'chat') {
+      hint = 'Tab:agent Ctrl+P:perf Enter:send Esc:exit';
     }
 
     // Build padded status line (like index.js)

@@ -1,5 +1,8 @@
 node_modules/
 debug.log
+error.log
 prompt.txt
 crossterm-src/
 public/
+bin/
+app.py
