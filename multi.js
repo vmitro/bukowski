@@ -18,6 +18,12 @@ const { ConversationList } = require('./src/ui/ConversationList');
 const { LayoutNode } = require('./src/layout/LayoutNode');
 const { RegisterManager } = require('./src/input/RegisterManager');
 const { findLatestSession } = require('./src/utils/agentSessions');
+const { OverlayManager } = require('./src/ui/OverlayManager');
+const { MCPServer } = require('./src/mcp/MCPServer');
+const os = require('os');
+
+// Socket discovery file for MCP bridge
+const SOCKET_DISCOVERY_FILE = path.join(os.homedir(), '.bukowski-mcp-socket');
 
 // Load quotes from quotes.txt
 const quotesPath = path.join(__dirname, 'quotes.txt');
@@ -78,12 +84,26 @@ try {
   codexPath = null; // Not installed
 }
 
+// FIPA reminder prompt for agents
+const FIPA_REMINDER = `You are running inside bukowski, a multi-agent terminal. Other AI agents may be running alongside you.
+
+Available tools (via MCP):
+- list_agents: See other connected agents
+- fipa_request: Ask another agent to do something
+- fipa_inform: Share information with another agent
+- fipa_query_if: Ask a yes/no question
+- fipa_query_ref: Ask for specific information
+- get_pending_messages: Check for messages from other agents
+
+When you're unsure about something outside your expertise, consider asking another agent.`;
+
 // Agent type configurations
 const AGENT_TYPES = {
   claude: {
     command: 'node',
     args: [claudePath],
     name: 'Claude',
+    promptFlag: '--append-system-prompt',
     // Generate resume args based on session ID
     getResumeArgs: (sessionId) => sessionId
       ? ['--resume', sessionId]
@@ -93,6 +113,7 @@ const AGENT_TYPES = {
     command: 'node',
     args: codexPath ? [codexPath] : [],
     name: 'Codex',
+    promptFlag: null,  // Codex uses positional arg, tricky with resume - skip for now
     getResumeArgs: (sessionId) => sessionId
       ? ['resume', sessionId]
       : ['resume', '--last']
@@ -101,11 +122,30 @@ const AGENT_TYPES = {
     command: 'gemini',
     args: [],
     name: 'Gemini',
+    promptFlag: null,  // Gemini uses positional arg - skip for now
     getResumeArgs: (sessionId) => sessionId
       ? ['-r', sessionId]
-      : []  // No resume support without session ID
+      : ['-r', 'latest']  // Fallback: latest in current project (Gemini is project-scoped)
   }
 };
+
+/**
+ * Get FIPA prompt args for an agent type
+ * @param {string} agentType
+ * @param {string[]} existingArgs
+ * @returns {string[]} Args to append
+ */
+function getFIPAPromptArgs(agentType, existingArgs) {
+  const config = AGENT_TYPES[agentType];
+  if (!config || !config.promptFlag) return [];
+
+  // Don't inject if user already provided this flag
+  if (existingArgs.includes(config.promptFlag)) {
+    return [];
+  }
+
+  return [config.promptFlag, FIPA_REMINDER];
+}
 
 // Parse CLI arguments
 function parseArgs() {
@@ -176,6 +216,13 @@ function cleanup() {
   process.stdout.write('\x1b[?1000l\x1b[?1006l'); // Disable mouse
   process.stdout.write('\x1b[?25h');              // Show cursor
   process.stdout.write('\x1b[?1049l');            // Exit alt screen
+
+  // Remove socket discovery file
+  try {
+    fs.unlinkSync(SOCKET_DISCOVERY_FILE);
+  } catch {
+    // Ignore - file may not exist
+  }
 }
 
 // Setup function - enter alt screen, enable mouse
@@ -280,12 +327,15 @@ process.on('SIGCONT', () => {
     session = new Session(sessionName);
 
     // Create initial Claude agent
+    // Inject FIPA reminder if user didn't provide their own prompt
+    const initialArgs = [claudePath, ...cliArgs.agentArgs];
+    const fipaArgs = getFIPAPromptArgs('claude', initialArgs);
     const claude = new Agent({
       id: 'claude-1',
       name: 'Claude',
       type: 'claude',
       command: 'node',
-      args: [claudePath, ...cliArgs.agentArgs],
+      args: [...initialArgs, ...fipaArgs],
       autostart: true
     });
 
@@ -309,13 +359,6 @@ process.on('SIGCONT', () => {
   // Create TabBar
   const tabBar = new TabBar();
 
-  // Create compositor
-  const compositor = new Compositor(session, layoutManager, tabBar, chatPane, conversationList);
-
-  // Wire up global references for signal handlers
-  activeSession = session;
-  activeCompositor = compositor;
-
   // Start IPC hub
   const ipcHub = new IPCHub(session);
   try {
@@ -335,12 +378,43 @@ process.on('SIGCONT', () => {
     console.error('Warning: FIPA hub failed to initialize:', err.message);
   }
 
-  // Create input router
-  const inputRouter = new InputRouter(session, layoutManager, ipcHub, fipaHub);
+  // Start MCP Server for agent tool communication
+  const mcpServer = new MCPServer(session, fipaHub, ipcHub);
+  try {
+    const socketPath = await mcpServer.start();
+    // Wire FIPAHub messages to MCP message queue
+    fipaHub.on('message', (msg) => {
+      if (msg.to) {
+        mcpServer.queueMessage(msg.to, msg);
+      }
+    });
+
+    // Write socket path to discovery file for MCP bridge
+    try {
+      fs.writeFileSync(SOCKET_DISCOVERY_FILE, socketPath, 'utf-8');
+    } catch {
+      // Ignore - discovery file is optional
+    }
+  } catch (err) {
+    console.error('Warning: MCP server failed to start:', err.message);
+  }
 
   // Create FIPA UI components
   const conversationList = new ConversationList(fipaHub.conversations);
   const chatPane = new ChatPane(fipaHub.conversations);
+
+  // Create overlay manager for modal UIs (ACL input, agent picker, etc.)
+  const overlayManager = new OverlayManager();
+
+  // Create compositor
+  const compositor = new Compositor(session, layoutManager, tabBar, chatPane, conversationList, overlayManager);
+
+  // Wire up global references for signal handlers
+  activeSession = session;
+  activeCompositor = compositor;
+
+  // Create input router
+  const inputRouter = new InputRouter(session, layoutManager, ipcHub, fipaHub);
 
   // Create register manager for yank/paste
   const registerManager = new RegisterManager();
@@ -370,12 +444,33 @@ process.on('SIGCONT', () => {
     buffer: ''
   };
 
+  // Chat mode state
+  const chatState = {
+    inputBuffer: '',
+    selectedAgent: null,      // Target agent for messages
+    pendingPerformative: 'inform',  // Default performative
+    showAgentPicker: false
+  };
+
+  // ACL send mode state (overlay-based)
+  const aclState = {
+    active: false,
+    selectedText: '',           // From visual selection (if any)
+    sourceAgent: null,          // Agent where selection was made
+    targetAgent: null,          // Selected target agent
+    performative: 'inform',     // Current performative
+    overlayId: null,            // Reference to open overlay
+    agentPickerActive: false    // Whether agent picker is showing
+  };
+
   // Wire states to compositor for rendering
   compositor.searchState = searchState;
   compositor.visualState = vimState;
   compositor.commandState = commandState;
+  compositor.chatState = chatState;          // For chat mode input
   compositor.layoutManager = layoutManager;  // For zoom indicator
   compositor.inputRouter = inputRouter;      // For mode indicator
+  compositor.fipaHub = fipaHub;              // For sending messages
 
   // Execute search on focused agent's buffer
   function executeSearch() {
@@ -657,15 +752,22 @@ process.on('SIGCONT', () => {
   }
 
   // Capture agent session IDs from filesystem before saving
+  // Always recapture - user might have run /resume inside the agent
+  // Track already-assigned IDs to avoid giving same session to multiple agents
   async function captureAgentSessions() {
     const cwd = process.cwd();
-    for (const agent of session.getAllAgents()) {
-      // Only capture if we don't already have a session ID and agent has been spawned
-      if (agent.spawnedAt && !agent.agentSessionId) {
+    const assignedIds = new Set();
+
+    // Sort agents by spawnedAt so earlier agents get first pick
+    const agents = session.getAllAgents().sort((a, b) => (a.spawnedAt || 0) - (b.spawnedAt || 0));
+
+    for (const agent of agents) {
+      if (agent.spawnedAt) {
         try {
-          const sessionId = await findLatestSession(agent.type, cwd, agent.spawnedAt);
+          const sessionId = await findLatestSession(agent.type, cwd, agent.spawnedAt, assignedIds);
           if (sessionId) {
             agent.agentSessionId = sessionId;
+            assignedIds.add(sessionId);
           }
         } catch {
           // Ignore errors - session ID capture is best-effort
@@ -872,12 +974,17 @@ process.on('SIGCONT', () => {
     const pane = allPanes[i];
     const agent = session.getAgent(pane.agentId);
     if (agent && !agent.pty) {
-      // If restoring a session, inject resume args for this agent type
+      // If restoring a session, rebuild args from AGENT_TYPES + resume args
+      // Don't use saved agent.args - they may contain old resume args
+      // Also inject FIPA reminder prompt
       if (restoredSession) {
         const typeConfig = AGENT_TYPES[agent.type];
-        if (typeConfig?.getResumeArgs) {
-          const resumeArgs = typeConfig.getResumeArgs(agent.agentSessionId);
-          agent.args = [...agent.args, ...resumeArgs];
+        if (typeConfig) {
+          const baseArgs = typeConfig.args || [];
+          const resumeArgs = typeConfig.getResumeArgs?.(agent.agentSessionId) || [];
+          const combinedArgs = [...baseArgs, ...resumeArgs];
+          const fipaArgs = getFIPAPromptArgs(agent.type, combinedArgs);
+          agent.args = [...combinedArgs, ...fipaArgs];
         }
       }
 
@@ -945,11 +1052,20 @@ process.on('SIGCONT', () => {
     }
     const agentConfig = AGENT_TYPES[type];
 
+    // Find next available ID (don't just use count - there may be gaps)
     const existingAgents = session.getAllAgents().filter(a => a.type === type);
-    const newId = `${type}-${existingAgents.length + 1}`;
+    const existingIds = new Set(existingAgents.map(a => a.id));
+    let nextNum = 1;
+    while (existingIds.has(`${type}-${nextNum}`)) {
+      nextNum++;
+    }
+    const newId = `${type}-${nextNum}`;
 
     // Combine base args with any extra CLI args (e.g., --continue)
-    const fullArgs = [...agentConfig.args, ...extraArgs];
+    // Inject FIPA reminder if user didn't provide their own prompt
+    const baseArgs = [...agentConfig.args, ...extraArgs];
+    const fipaArgs = getFIPAPromptArgs(type, baseArgs);
+    const fullArgs = [...baseArgs, ...fipaArgs];
 
     const newAgent = new Agent({
       id: newId,
@@ -1429,20 +1545,476 @@ process.on('SIGCONT', () => {
         // Already written to agent in InputRouter
         break;
 
-      // FIPA Actions
+      // FIPA Actions - set performative and switch to chat mode
       case 'fipa_request':
-      case 'fipa_inform':
-      case 'fipa_query_if':
-      case 'fipa_query_ref':
-      case 'fipa_cfp':
-      case 'fipa_propose':
-      case 'fipa_agree':
-      case 'fipa_refuse':
-      case 'fipa_subscribe': {
-        // All these actions will switch to chat mode for now
-        // More specific handling will be added later
+        chatState.pendingPerformative = 'request';
         inputRouter.setMode('chat');
-        compositor.draw(); // Redraw in chat mode
+        compositor.draw();
+        break;
+
+      case 'fipa_inform':
+        chatState.pendingPerformative = 'inform';
+        inputRouter.setMode('chat');
+        compositor.draw();
+        break;
+
+      case 'fipa_query_if':
+        chatState.pendingPerformative = 'query-if';
+        inputRouter.setMode('chat');
+        compositor.draw();
+        break;
+
+      case 'fipa_query_ref':
+        chatState.pendingPerformative = 'query-ref';
+        inputRouter.setMode('chat');
+        compositor.draw();
+        break;
+
+      case 'fipa_cfp':
+        chatState.pendingPerformative = 'cfp';
+        inputRouter.setMode('chat');
+        compositor.draw();
+        break;
+
+      case 'fipa_propose':
+        chatState.pendingPerformative = 'propose';
+        inputRouter.setMode('chat');
+        compositor.draw();
+        break;
+
+      case 'fipa_agree':
+        chatState.pendingPerformative = 'agree';
+        inputRouter.setMode('chat');
+        compositor.draw();
+        break;
+
+      case 'fipa_refuse':
+        chatState.pendingPerformative = 'refuse';
+        inputRouter.setMode('chat');
+        compositor.draw();
+        break;
+
+      case 'fipa_subscribe':
+        chatState.pendingPerformative = 'subscribe';
+        inputRouter.setMode('chat');
+        compositor.draw();
+        break;
+
+      // Chat mode actions
+      case 'chat_char':
+        chatState.inputBuffer += result.char;
+        compositor.draw();
+        break;
+
+      case 'chat_backspace':
+        chatState.inputBuffer = chatState.inputBuffer.slice(0, -1);
+        compositor.draw();
+        break;
+
+      case 'chat_delete_word':
+        chatState.inputBuffer = chatState.inputBuffer.replace(/\S*\s*$/, '');
+        compositor.draw();
+        break;
+
+      case 'chat_clear':
+        chatState.inputBuffer = '';
+        compositor.draw();
+        break;
+
+      case 'chat_exit':
+        chatState.inputBuffer = '';
+        chatState.selectedAgent = null;
+        inputRouter.setMode('insert');
+        compositor.draw();
+        break;
+
+      case 'chat_cycle_agent': {
+        const agents = session.getAllAgents();
+        if (agents.length === 0) break;
+        const currentIdx = chatState.selectedAgent
+          ? agents.findIndex(a => a.id === chatState.selectedAgent)
+          : -1;
+        const nextIdx = (currentIdx + 1) % agents.length;
+        chatState.selectedAgent = agents[nextIdx].id;
+        compositor.draw();
+        break;
+      }
+
+      case 'chat_cycle_agent_back': {
+        const agents = session.getAllAgents();
+        if (agents.length === 0) break;
+        const currentIdx = chatState.selectedAgent
+          ? agents.findIndex(a => a.id === chatState.selectedAgent)
+          : 0;
+        const prevIdx = currentIdx <= 0 ? agents.length - 1 : currentIdx - 1;
+        chatState.selectedAgent = agents[prevIdx].id;
+        compositor.draw();
+        break;
+      }
+
+      case 'chat_cycle_performative': {
+        const performatives = ['inform', 'request', 'query-if', 'query-ref', 'cfp', 'propose', 'agree', 'refuse', 'subscribe'];
+        const currentIdx = performatives.indexOf(chatState.pendingPerformative);
+        const nextIdx = (currentIdx + 1) % performatives.length;
+        chatState.pendingPerformative = performatives[nextIdx];
+        compositor.draw();
+        break;
+      }
+
+      case 'chat_scroll_up':
+        chatPane.scrollUp(3);
+        compositor.draw();
+        break;
+
+      case 'chat_scroll_down':
+        chatPane.scrollDown(3);
+        compositor.draw();
+        break;
+
+      case 'chat_prev_conversation':
+        chatPane.prevConversation();
+        compositor.draw();
+        break;
+
+      case 'chat_next_conversation':
+        chatPane.nextConversation();
+        compositor.draw();
+        break;
+
+      case 'chat_send': {
+        // Send FIPA message from focused agent to selected agent
+        const fromAgent = focusedAgent;
+        const toAgentId = chatState.selectedAgent;
+        const content = chatState.inputBuffer.trim();
+
+        if (!fromAgent || !toAgentId || !content) {
+          // Need to select target agent first
+          if (!toAgentId) {
+            chatState.showAgentPicker = true;
+          }
+          compositor.draw();
+          break;
+        }
+
+        // Get the target agent
+        const toAgent = session.getAgent(toAgentId);
+        if (!toAgent) break;
+
+        // Send via FIPAHub based on performative
+        const perf = chatState.pendingPerformative;
+        switch (perf) {
+          case 'request':
+            fipaHub.request(fromAgent.id, toAgent.id, content);
+            break;
+          case 'inform':
+            fipaHub.inform(fromAgent.id, toAgent.id, content);
+            break;
+          case 'query-if':
+            fipaHub.queryIf(fromAgent.id, toAgent.id, content);
+            break;
+          case 'query-ref':
+            fipaHub.queryRef(fromAgent.id, toAgent.id, content);
+            break;
+          case 'cfp':
+            // CFP broadcasts to all agents except sender
+            const otherAgents = session.getAllAgents()
+              .filter(a => a.id !== fromAgent.id)
+              .map(a => a.id);
+            fipaHub.cfp(fromAgent.id, otherAgents, { task: content });
+            break;
+          case 'subscribe':
+            fipaHub.subscribe(fromAgent.id, toAgent.id, { topic: content });
+            break;
+          default:
+            // For propose, agree, refuse - use inform as fallback
+            fipaHub.inform(fromAgent.id, toAgent.id, { [perf]: content });
+        }
+
+        // Clear input after sending
+        chatState.inputBuffer = '';
+        compositor.draw();
+        break;
+      }
+
+      // ========================================
+      // ACL Send Mode Actions (overlay-based)
+      // ========================================
+
+      case 'acl_send_start': {
+        // Extract selected text if in visual mode
+        let text = '';
+        if (vimState.mode === 'visual' || vimState.mode === 'vline') {
+          text = extractSelectedText(focusedAgent);
+        }
+
+        aclState.active = true;
+        aclState.selectedText = text;
+        aclState.sourceAgent = focusedAgent?.id || null;
+        aclState.performative = result.performative || 'inform';
+
+        // Get terminal dimensions for centering
+        const cols = process.stdout.columns || 80;
+        const rows = process.stdout.rows || 24;
+        const overlayWidth = Math.min(60, cols - 10);
+        const overlayHeight = Math.min(12, rows - 6);
+
+        // Show ACL input overlay centered on screen
+        const overlay = overlayManager.show({
+          id: 'acl-input',
+          type: 'acl-input',
+          x: Math.floor((cols - overlayWidth) / 2),
+          y: Math.floor((rows - overlayHeight) / 2),
+          width: overlayWidth,
+          height: overlayHeight,
+          performative: aclState.performative,
+          sourceAgent: focusedAgent?.id,
+          targetAgent: aclState.targetAgent,
+          content: text,
+          agents: session.getAllAgents().map(a => ({ id: a.id, name: a.name, type: a.type }))
+        });
+
+        aclState.overlayId = overlay.id;
+        inputRouter.setMode('acl-send');
+        vimState.mode = 'insert';  // Exit visual mode
+        compositor.draw();
+        break;
+      }
+
+      case 'acl_target_direction': {
+        // Find agent in that direction
+        const targetPane = layoutManager.findPaneInDirection(result.dir);
+        if (targetPane) {
+          const agent = session.getAgent(targetPane.agentId);
+          if (agent) {
+            aclState.targetAgent = agent.id;
+
+            // Update overlay
+            const overlay = overlayManager.get(aclState.overlayId);
+            if (overlay) {
+              overlay.setTarget(agent.id);
+            }
+            compositor.draw();
+          }
+        } else {
+          // No pane in that direction -> show agent picker
+          const overlay = overlayManager.get(aclState.overlayId);
+          if (overlay && overlay.showAgentPicker) {
+            overlay.showAgentPicker(session.getAllAgents().map(a => ({
+              id: a.id,
+              name: a.name,
+              type: a.type
+            })));
+            aclState.agentPickerActive = true;
+            compositor.draw();
+          }
+        }
+        break;
+      }
+
+      case 'acl_cycle_agent': {
+        const agents = session.getAllAgents().filter(a => a.id !== aclState.sourceAgent);
+        if (agents.length === 0) break;
+
+        const currentIdx = aclState.targetAgent
+          ? agents.findIndex(a => a.id === aclState.targetAgent)
+          : -1;
+        const nextIdx = (currentIdx + 1) % agents.length;
+        aclState.targetAgent = agents[nextIdx].id;
+
+        // Update overlay
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (overlay) {
+          overlay.setTarget(aclState.targetAgent);
+        }
+        compositor.draw();
+        break;
+      }
+
+      case 'acl_cycle_agent_back': {
+        const agents = session.getAllAgents().filter(a => a.id !== aclState.sourceAgent);
+        if (agents.length === 0) break;
+
+        const currentIdx = aclState.targetAgent
+          ? agents.findIndex(a => a.id === aclState.targetAgent)
+          : 0;
+        const prevIdx = currentIdx <= 0 ? agents.length - 1 : currentIdx - 1;
+        aclState.targetAgent = agents[prevIdx].id;
+
+        // Update overlay
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (overlay) {
+          overlay.setTarget(aclState.targetAgent);
+        }
+        compositor.draw();
+        break;
+      }
+
+      case 'acl_cycle_performative': {
+        const performatives = ['inform', 'request', 'query-if', 'query-ref', 'cfp', 'propose', 'agree', 'refuse', 'subscribe'];
+        const currentIdx = performatives.indexOf(aclState.performative);
+        const nextIdx = (currentIdx + 1) % performatives.length;
+        aclState.performative = performatives[nextIdx];
+
+        // Update overlay
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (overlay) {
+          overlay.setPerformative(aclState.performative);
+        }
+        compositor.draw();
+        break;
+      }
+
+      case 'acl_send': {
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (!overlay) break;
+
+        if (!aclState.targetAgent) {
+          // Need to select target agent first - show picker
+          if (overlay.showAgentPicker) {
+            overlay.showAgentPicker(session.getAllAgents().map(a => ({
+              id: a.id,
+              name: a.name,
+              type: a.type
+            })));
+            aclState.agentPickerActive = true;
+          }
+          compositor.draw();
+          break;
+        }
+
+        const content = overlay.inputBuffer;
+        if (!content.trim()) {
+          compositor.draw();
+          break;
+        }
+
+        // Get the target agent
+        const toAgent = session.getAgent(aclState.targetAgent);
+        if (!toAgent) break;
+
+        // Send via FIPAHub based on performative
+        const perf = aclState.performative;
+        const fromId = aclState.sourceAgent;
+
+        switch (perf) {
+          case 'request':
+            fipaHub.request(fromId, toAgent.id, content);
+            break;
+          case 'inform':
+            fipaHub.inform(fromId, toAgent.id, content);
+            break;
+          case 'query-if':
+            fipaHub.queryIf(fromId, toAgent.id, content);
+            break;
+          case 'query-ref':
+            fipaHub.queryRef(fromId, toAgent.id, content);
+            break;
+          case 'cfp':
+            // CFP broadcasts to all agents except sender
+            const otherAgents = session.getAllAgents()
+              .filter(a => a.id !== fromId)
+              .map(a => a.id);
+            fipaHub.cfp(fromId, otherAgents, { task: content });
+            break;
+          case 'subscribe':
+            fipaHub.subscribe(fromId, toAgent.id, { topic: content });
+            break;
+          default:
+            // For propose, agree, refuse - use inform as fallback
+            fipaHub.inform(fromId, toAgent.id, { [perf]: content });
+        }
+
+        // Cleanup
+        overlayManager.hide(aclState.overlayId);
+        aclState.active = false;
+        aclState.overlayId = null;
+        aclState.targetAgent = null;
+        aclState.selectedText = '';
+        inputRouter.setMode('insert');
+        compositor.draw();
+        break;
+      }
+
+      case 'acl_cancel': {
+        // Close overlay without sending
+        if (aclState.overlayId) {
+          overlayManager.hide(aclState.overlayId);
+        }
+        aclState.active = false;
+        aclState.overlayId = null;
+        aclState.targetAgent = null;
+        aclState.selectedText = '';
+        aclState.agentPickerActive = false;
+        compositor.draw();
+        break;
+      }
+
+      case 'acl_char': {
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (overlay) {
+          overlay.addChar(result.char);
+          compositor.draw();
+        }
+        break;
+      }
+
+      case 'acl_backspace': {
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (overlay) {
+          overlay.backspace();
+          compositor.draw();
+        }
+        break;
+      }
+
+      case 'acl_delete_word': {
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (overlay) {
+          overlay.deleteWord();
+          compositor.draw();
+        }
+        break;
+      }
+
+      case 'acl_clear': {
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (overlay) {
+          overlay.clear();
+          compositor.draw();
+        }
+        break;
+      }
+
+      case 'acl_cursor_left': {
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (overlay) {
+          overlay.cursorLeft();
+          compositor.draw();
+        }
+        break;
+      }
+
+      case 'acl_cursor_right': {
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (overlay) {
+          overlay.cursorRight();
+          compositor.draw();
+        }
+        break;
+      }
+
+      case 'acl_need_target': {
+        // Show agent picker overlay
+        const overlay = overlayManager.get(aclState.overlayId);
+        if (overlay && overlay.showAgentPicker) {
+          overlay.showAgentPicker(session.getAllAgents().map(a => ({
+            id: a.id,
+            name: a.name,
+            type: a.type
+          })));
+          aclState.agentPickerActive = true;
+          compositor.draw();
+        }
         break;
       }
     }
@@ -1526,6 +2098,7 @@ process.on('SIGCONT', () => {
   // Signal handlers
   process.on('SIGINT', () => {
     cleanup();
+    if (mcpServer) mcpServer.stop();
     if (ipcHub) ipcHub.stop();
     if (fipaHub) fipaHub.shutdown();
     session.destroy();
@@ -1534,6 +2107,7 @@ process.on('SIGCONT', () => {
 
   process.on('SIGTERM', () => {
     cleanup();
+    if (mcpServer) mcpServer.stop();
     if (ipcHub) ipcHub.stop();
     if (fipaHub) fipaHub.shutdown();
     session.destroy();

@@ -2,3 +2,4 @@ node_modules/
 debug.log
 prompt.txt
 crossterm-src/
+public/
