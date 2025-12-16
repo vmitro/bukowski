@@ -59,9 +59,19 @@ class InputRouter {
         this.mode = 'normal';
         return { action: 'visual_cancel' };
       }
+      if (this.mode === 'acl-send') {
+        this.mode = 'insert';
+        return { action: 'acl_cancel' };
+      }
       if (this.mode === 'normal') {
         this.mode = 'insert';
         return { action: 'mode_change', mode: 'insert' };
+      }
+
+      // In insert mode, pass ESC through to the agent
+      // (agents like Claude Code, vim, etc. need ESC to work)
+      if (this.mode === 'insert') {
+        return this.passToAgent(data);
       }
 
       return { action: 'noop' };
@@ -117,6 +127,9 @@ class InputRouter {
       case 'chat':
         return this.handleChatMode(data);
 
+      case 'acl-send':
+        return this.handleACLSendMode(data);
+
       default:
         return this.passToAgent(data);
     }
@@ -168,6 +181,13 @@ class InputRouter {
       case 'c':
         this.mode = 'chat';
         return { action: 'mode_change', mode: 'chat' };
+
+      // ACL send mode - uses visual selection if present
+      case 's':
+        return { action: 'acl_send_start', performative: 'inform' };
+
+      case 'S':
+        return { action: 'acl_send_start', performative: 'request' };
 
       // Tab switching (1-9)
       case '1': case '2': case '3': case '4': case '5':
@@ -333,11 +353,122 @@ class InputRouter {
 
   /**
    * Handle chat mode input
+   * Chat mode allows composing FIPA ACL messages to other agents
    */
   handleChatMode(data) {
-    // For now, just a placeholder. This will be expanded to handle
-    // chat-specific commands like switching conversations, sending messages, etc.
-    return { action: 'chat_input', key: data };
+    // Enter sends the message
+    if (data === '\r' || data === '\n') {
+      return { action: 'chat_send' };
+    }
+
+    // ESC exits chat mode
+    if (data === '\x1b') {
+      this.mode = 'insert';
+      return { action: 'chat_exit' };
+    }
+
+    // Backspace
+    if (data === '\x7f' || data === '\b') {
+      return { action: 'chat_backspace' };
+    }
+
+    // Ctrl+W: delete word
+    if (data === '\x17') {
+      return { action: 'chat_delete_word' };
+    }
+
+    // Ctrl+U: clear input
+    if (data === '\x15') {
+      return { action: 'chat_clear' };
+    }
+
+    // Tab: cycle target agent
+    if (data === '\t') {
+      return { action: 'chat_cycle_agent' };
+    }
+
+    // Shift+Tab (usually ESC [ Z): cycle agent backwards
+    if (data === '\x1b[Z') {
+      return { action: 'chat_cycle_agent_back' };
+    }
+
+    // Ctrl+P: cycle performative
+    if (data === '\x10') {
+      return { action: 'chat_cycle_performative' };
+    }
+
+    // Up arrow: scroll chat up
+    if (data === '\x1b[A') {
+      return { action: 'chat_scroll_up' };
+    }
+
+    // Down arrow: scroll chat down
+    if (data === '\x1b[B') {
+      return { action: 'chat_scroll_down' };
+    }
+
+    // Left/Right arrows: prev/next conversation
+    if (data === '\x1b[D') {
+      return { action: 'chat_prev_conversation' };
+    }
+    if (data === '\x1b[C') {
+      return { action: 'chat_next_conversation' };
+    }
+
+    // Regular character - add to input buffer
+    if (data.length === 1 && data.charCodeAt(0) >= 32) {
+      return { action: 'chat_char', char: data };
+    }
+
+    // Unknown - ignore
+    return { action: 'noop' };
+  }
+
+  /**
+   * Handle ACL send mode - overlay-based message composition
+   * Directional targeting with hjkl, Tab cycling, Ctrl+P performative cycling
+   */
+  handleACLSendMode(data) {
+    // hjkl - target agent by direction
+    if (data === 'h') return { action: 'acl_target_direction', dir: 'left' };
+    if (data === 'j') return { action: 'acl_target_direction', dir: 'down' };
+    if (data === 'k') return { action: 'acl_target_direction', dir: 'up' };
+    if (data === 'l') return { action: 'acl_target_direction', dir: 'right' };
+
+    // Tab - cycle target agent
+    if (data === '\t') return { action: 'acl_cycle_agent' };
+
+    // Shift+Tab - cycle agent backwards
+    if (data === '\x1b[Z') return { action: 'acl_cycle_agent_back' };
+
+    // Ctrl+P - cycle performative
+    if (data === '\x10') return { action: 'acl_cycle_performative' };
+
+    // Enter - send message
+    if (data === '\r' || data === '\n') return { action: 'acl_send' };
+
+    // ESC - cancel (handled in main handle())
+    // This case won't be reached since ESC is handled at the top
+
+    // Backspace
+    if (data === '\x7f' || data === '\b') return { action: 'acl_backspace' };
+
+    // Ctrl+W - delete word
+    if (data === '\x17') return { action: 'acl_delete_word' };
+
+    // Ctrl+U - clear input
+    if (data === '\x15') return { action: 'acl_clear' };
+
+    // Arrow keys for cursor movement within overlay
+    if (data === '\x1b[D') return { action: 'acl_cursor_left' };
+    if (data === '\x1b[C') return { action: 'acl_cursor_right' };
+
+    // Regular printable character - add to input buffer
+    if (data.length === 1 && data.charCodeAt(0) >= 32) {
+      return { action: 'acl_char', char: data };
+    }
+
+    return { action: 'noop' };
   }
 
   /**

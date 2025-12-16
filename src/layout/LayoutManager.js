@@ -566,6 +566,51 @@ class LayoutManager {
   isZoomed() {
     return this.zoomedPaneId !== null;
   }
+
+  /**
+   * Find pane in direction WITHOUT focusing it (for ACL targeting)
+   * @param {string} dir - 'left' | 'right' | 'up' | 'down'
+   * @returns {Pane|null} - The pane in that direction, or null if none
+   */
+  findPaneInDirection(dir) {
+    const panes = this.getAllPanes();
+    const current = this.findPane(this.focusedPaneId);
+    if (!current || panes.length < 2) return null;
+
+    const cx = current.bounds.x + current.bounds.width / 2;
+    const cy = current.bounds.y + current.bounds.height / 2;
+
+    let best = null;
+    let bestDist = Infinity;
+
+    for (const pane of panes) {
+      if (pane.id === current.id) continue;
+
+      const px = pane.bounds.x + pane.bounds.width / 2;
+      const py = pane.bounds.y + pane.bounds.height / 2;
+
+      const dx = px - cx;
+      const dy = py - cy;
+
+      let valid = false;
+      switch (dir) {
+        case 'left':  valid = dx < 0 && Math.abs(dx) > Math.abs(dy); break;
+        case 'right': valid = dx > 0 && Math.abs(dx) > Math.abs(dy); break;
+        case 'up':    valid = dy < 0 && Math.abs(dy) > Math.abs(dx); break;
+        case 'down':  valid = dy > 0 && Math.abs(dy) > Math.abs(dx); break;
+      }
+
+      if (valid) {
+        const dist = Math.abs(dx) + Math.abs(dy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = pane;
+        }
+      }
+    }
+
+    return best;
+  }
 }
 
 module.exports = { LayoutManager };

@@ -213,16 +213,18 @@ class FIPAHub extends EventEmitter {
       ? message.replyBy - Date.now()
       : 30000;
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const timeoutHandle = setTimeout(() => {
         this.pendingFIPA.delete(message.replyWith || message._id);
-        reject(new Error(`FIPA request timeout: ${message.performative} to ${to}`));
+        // Don't reject - just resolve with null and emit timeout event
+        this.emit('timeout', { message, to });
+        resolve(null);
       }, timeout);
 
       const waitId = message.replyWith || message._id;
       this.pendingFIPA.set(waitId, {
         resolve,
-        reject,
+        reject: () => {}, // No-op reject to avoid crashes
         timeout: timeoutHandle,
         message,
       });
