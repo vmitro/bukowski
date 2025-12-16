@@ -7,9 +7,10 @@ const fs = require('fs');
 /**
  * Escape a path for Claude's project directory naming scheme
  * e.g., /home/user/foo → -home-user-foo
+ * Note: Claude keeps the leading dash from the root /
  */
 function escapePathForClaude(p) {
-  return p.replace(/\//g, '-').replace(/^-/, '');
+  return p.replace(/\//g, '-');
 }
 
 /**
@@ -114,44 +115,39 @@ function extractCreationTime(agentType, filename) {
 }
 
 /**
- * Find the current date directory for Codex sessions
+ * Find ALL Codex session directories (not just today's)
  * Codex organizes sessions as: ~/.codex/sessions/{year}/{month}/{day}/
+ * We need to search all directories because resumed sessions may be in older date folders
  * @param {string} baseDir - Base sessions directory
- * @returns {Promise<string|null>} Path to today's session directory or null
+ * @returns {Promise<string[]>} Array of all date directory paths
  */
-async function findCodexDateDir(baseDir) {
-  const now = new Date();
-  const year = now.getFullYear().toString();
-  const month = (now.getMonth() + 1).toString().padStart(2, '0');
-  const day = now.getDate().toString().padStart(2, '0');
-
-  const todayDir = path.join(baseDir, year, month, day);
+async function findAllCodexDateDirs(baseDir) {
+  const dirs = [];
   try {
-    await fs.promises.access(todayDir);
-    return todayDir;
-  } catch {
-    // Today's dir doesn't exist, try to find most recent
-    try {
-      const years = await fs.promises.readdir(baseDir);
-      const sortedYears = years.sort().reverse();
-      for (const y of sortedYears) {
-        const yearPath = path.join(baseDir, y);
+    const years = await fs.promises.readdir(baseDir);
+    for (const year of years) {
+      const yearPath = path.join(baseDir, year);
+      try {
         const months = await fs.promises.readdir(yearPath);
-        const sortedMonths = months.sort().reverse();
-        for (const m of sortedMonths) {
-          const monthPath = path.join(yearPath, m);
-          const days = await fs.promises.readdir(monthPath);
-          const sortedDays = days.sort().reverse();
-          if (sortedDays.length > 0) {
-            return path.join(monthPath, sortedDays[0]);
+        for (const month of months) {
+          const monthPath = path.join(yearPath, month);
+          try {
+            const days = await fs.promises.readdir(monthPath);
+            for (const day of days) {
+              dirs.push(path.join(monthPath, day));
+            }
+          } catch {
+            // Ignore errors for individual month dirs
           }
         }
+      } catch {
+        // Ignore errors for individual year dirs
       }
-    } catch {
-      // Ignore errors
     }
+  } catch {
+    // Ignore errors
   }
-  return null;
+  return dirs;
 }
 
 /**
@@ -178,73 +174,106 @@ async function findGeminiChatDir(baseDir) {
 }
 
 /**
- * Find the first session file created after startTime
- * For Codex/Gemini, uses filename timestamp; for Claude, uses file mtime
+ * Extract full session ID from Gemini session file content
+ * @param {string} filepath - Path to session JSON file
+ * @returns {Promise<string|null>} Full session UUID or null
+ */
+async function extractGeminiSessionIdFromFile(filepath) {
+  try {
+    const content = await fs.promises.readFile(filepath, 'utf-8');
+    const data = JSON.parse(content);
+    return data.sessionId || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Find the most recently modified session file after startTime
+ * Searches all relevant directories for the agent type
  * @param {string} agentType - Agent type
  * @param {string} cwd - Current working directory
- * @param {number} startTime - Timestamp (ms) - only consider files created after this
+ * @param {number} startTime - Timestamp (ms) - only consider files modified after this
+ * @param {Set<string>} excludeIds - Session IDs to exclude (already assigned to other agents)
  * @returns {Promise<string|null>} Session UUID or null
  */
-async function findLatestSession(agentType, cwd, startTime) {
+async function findLatestSession(agentType, cwd, startTime, excludeIds = new Set()) {
   const baseDir = getSessionDir(agentType, cwd);
   if (!baseDir) return null;
 
-  let searchDir;
+  // Get all directories to search
+  let searchDirs;
   switch (agentType) {
     case 'claude':
-      searchDir = baseDir;
+      searchDirs = [baseDir];
       break;
     case 'codex':
-      searchDir = await findCodexDateDir(baseDir);
+      // Search ALL date directories - resumed sessions may be in older folders
+      searchDirs = await findAllCodexDateDirs(baseDir);
       break;
-    case 'gemini':
-      searchDir = await findGeminiChatDir(baseDir);
+    case 'gemini': {
+      const geminiDir = await findGeminiChatDir(baseDir);
+      searchDirs = geminiDir ? [geminiDir] : [];
       break;
+    }
     default:
       return null;
   }
 
-  if (!searchDir) return null;
+  if (searchDirs.length === 0) return null;
 
-  try {
-    const files = await fs.promises.readdir(searchDir);
-    let oldest = null;
-    let oldestTime = Infinity;
+  let newestFile = null;
+  let newestFilePath = null;
+  let newestMtime = 0;
 
-    for (const file of files) {
-      // Skip non-session files
-      if (agentType === 'claude' && !file.endsWith('.jsonl')) continue;
-      if (agentType === 'codex' && !file.endsWith('.jsonl')) continue;
-      if (agentType === 'gemini' && !file.endsWith('.json')) continue;
+  // Search all directories for the most recently modified session
+  for (const searchDir of searchDirs) {
+    try {
+      const files = await fs.promises.readdir(searchDir);
 
-      // Get creation time - from filename for Codex/Gemini, from mtime for Claude
-      let createTime;
-      if (agentType === 'codex' || agentType === 'gemini') {
-        createTime = extractCreationTime(agentType, file);
-      }
+      for (const file of files) {
+        // Skip non-session files
+        if (agentType === 'claude' && !file.endsWith('.jsonl')) continue;
+        if (agentType === 'codex' && !file.endsWith('.jsonl')) continue;
+        if (agentType === 'gemini' && !file.endsWith('.json')) continue;
 
-      if (!createTime) {
-        // Fallback to file mtime
+        // Extract session ID early to check exclusion
+        const sessionId = extractSessionId(agentType, file);
+        if (sessionId && excludeIds.has(sessionId)) continue;
+
+        // Use mtime (last modified) to find the active session
+        // This handles both new sessions AND resumed older sessions
         const filepath = path.join(searchDir, file);
+        let mtime;
         try {
           const stat = await fs.promises.stat(filepath);
-          createTime = stat.mtimeMs;
+          mtime = stat.mtimeMs;
         } catch {
           continue;
         }
-      }
 
-      // Find the FIRST (oldest) session created after startTime
-      if (createTime > startTime && createTime < oldestTime) {
-        oldestTime = createTime;
-        oldest = file;
+        // Find the session most recently MODIFIED after startTime
+        if (mtime > startTime && mtime > newestMtime) {
+          newestMtime = mtime;
+          newestFile = file;
+          newestFilePath = filepath;
+        }
       }
+    } catch {
+      // Ignore errors for individual directories
+      continue;
     }
-
-    return oldest ? extractSessionId(agentType, oldest) : null;
-  } catch {
-    return null;
   }
+
+  if (!newestFile) return null;
+
+  // For Gemini, read the file to get full UUID (filename only has short prefix)
+  if (agentType === 'gemini') {
+    return await extractGeminiSessionIdFromFile(newestFilePath);
+  }
+
+  // For Claude/Codex, extract from filename
+  return extractSessionId(agentType, newestFile);
 }
 
 module.exports = {
