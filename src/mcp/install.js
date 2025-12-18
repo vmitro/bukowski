@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execSync } = require('child_process');
 
 // Path to bridge script (relative to this file when installed)
 const BRIDGE_SCRIPT = path.resolve(__dirname, 'bukowski-mcp-bridge.js');
@@ -14,115 +15,6 @@ const CONFIG_PATHS = {
   codex: path.join(os.homedir(), '.codex', 'config.toml'),
   gemini: path.join(os.homedir(), '.gemini', 'settings.json')
 };
-
-/**
- * Parse TOML (minimal parser for codex config)
- * Only handles the subset needed for MCP servers
- */
-function parseTOML(content) {
-  const result = {};
-  let currentSection = null;
-
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-
-    // Skip empty lines and comments
-    if (!trimmed || trimmed.startsWith('#')) continue;
-
-    // Section header [section.subsection]
-    const sectionMatch = trimmed.match(/^\[([^\]]+)\]$/);
-    if (sectionMatch) {
-      const path = sectionMatch[1].split('.');
-      currentSection = path;
-
-      // Ensure path exists
-      let obj = result;
-      for (const part of path) {
-        if (!obj[part]) obj[part] = {};
-        obj = obj[part];
-      }
-      continue;
-    }
-
-    // Key = value
-    const kvMatch = trimmed.match(/^(\w+)\s*=\s*(.+)$/);
-    if (kvMatch && currentSection) {
-      const [, key, rawValue] = kvMatch;
-
-      // Parse value
-      let value;
-      if (rawValue.startsWith('"') && rawValue.endsWith('"')) {
-        value = rawValue.slice(1, -1);
-      } else if (rawValue.startsWith('[') && rawValue.endsWith(']')) {
-        // Array - parse as JSON with double quotes
-        value = JSON.parse(rawValue.replace(/'/g, '"'));
-      } else if (rawValue === 'true') {
-        value = true;
-      } else if (rawValue === 'false') {
-        value = false;
-      } else {
-        value = rawValue;
-      }
-
-      // Set in result
-      let obj = result;
-      for (const part of currentSection) {
-        obj = obj[part];
-      }
-      obj[key] = value;
-    }
-  }
-
-  return result;
-}
-
-/**
- * Serialize object to TOML (minimal)
- */
-function serializeTOML(obj, prefix = '') {
-  let result = '';
-
-  for (const [key, value] of Object.entries(obj)) {
-    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-      // Nested object - create section
-      const sectionPath = prefix ? `${prefix}.${key}` : key;
-      result += `[${sectionPath}]\n`;
-
-      // Add non-object properties
-      for (const [subKey, subValue] of Object.entries(value)) {
-        if (typeof subValue !== 'object' || Array.isArray(subValue)) {
-          result += formatTOMLValue(subKey, subValue);
-        }
-      }
-      result += '\n';
-
-      // Recurse for nested objects
-      for (const [subKey, subValue] of Object.entries(value)) {
-        if (typeof subValue === 'object' && !Array.isArray(subValue)) {
-          result += serializeTOML({ [subKey]: subValue }, sectionPath);
-        }
-      }
-    }
-  }
-
-  return result;
-}
-
-/**
- * Format a single TOML key-value pair
- */
-function formatTOMLValue(key, value) {
-  if (typeof value === 'string') {
-    return `${key} = "${value}"\n`;
-  } else if (Array.isArray(value)) {
-    const items = value.map(v => typeof v === 'string' ? `"${v}"` : v);
-    return `${key} = [${items.join(', ')}]\n`;
-  } else if (typeof value === 'boolean') {
-    return `${key} = ${value}\n`;
-  } else {
-    return `${key} = ${value}\n`;
-  }
-}
 
 /**
  * Read JSON config file
@@ -140,24 +32,22 @@ function readJSON(filepath) {
  * Write JSON config file
  */
 function writeJSON(filepath, data) {
-  // Ensure directory exists
   const dir = path.dirname(filepath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-
   fs.writeFileSync(filepath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
 }
 
 /**
- * Read TOML config file
+ * Check if a command exists
  */
-function readTOML(filepath) {
+function commandExists(cmd) {
   try {
-    const content = fs.readFileSync(filepath, 'utf-8');
-    return { content, parsed: parseTOML(content) };
+    execSync(`which ${cmd}`, { stdio: 'pipe' });
+    return true;
   } catch {
-    return { content: '', parsed: {} };
+    return false;
   }
 }
 
@@ -168,16 +58,15 @@ function installClaude() {
   const configPath = CONFIG_PATHS.claude;
   let config = readJSON(configPath) || {};
 
-  // Initialize mcpServers if not present
   if (!config.mcpServers) {
     config.mcpServers = {};
   }
 
-  // Add bukowski server
   config.mcpServers.bukowski = {
     type: 'stdio',
     command: 'node',
-    args: [BRIDGE_SCRIPT]
+    args: [BRIDGE_SCRIPT],
+    env: { BUKOWSKI_AGENT_TYPE: 'claude' }
   };
 
   writeJSON(configPath, config);
@@ -191,13 +80,12 @@ function uninstallClaude() {
   const configPath = CONFIG_PATHS.claude;
   const config = readJSON(configPath);
 
-  if (!config || !config.mcpServers || !config.mcpServers.bukowski) {
-    return false; // Not installed
+  if (!config?.mcpServers?.bukowski) {
+    return false;
   }
 
   delete config.mcpServers.bukowski;
 
-  // Clean up empty mcpServers
   if (Object.keys(config.mcpServers).length === 0) {
     delete config.mcpServers;
   }
@@ -208,32 +96,62 @@ function uninstallClaude() {
 
 /**
  * Install bukowski MCP server for Codex
+ * Uses `codex mcp add` CLI when available
  */
 function installCodex() {
-  const configPath = CONFIG_PATHS.codex;
-  const { content, parsed } = readTOML(configPath);
-
-  // Check if already installed
-  if (parsed.mcp_servers?.bukowski) {
-    // Update the args in case bridge path changed
-    const updatedContent = content.replace(
-      /\[mcp_servers\.bukowski\][\s\S]*?(?=\[|$)/,
-      `[mcp_servers.bukowski]\ncommand = "node"\nargs = ["${BRIDGE_SCRIPT}"]\n\n`
-    );
-    fs.writeFileSync(configPath, updatedContent, 'utf-8');
-    return true;
+  // First try to remove existing entry (in case of update)
+  try {
+    if (commandExists('codex')) {
+      execSync('codex mcp remove bukowski 2>/dev/null || true', { stdio: 'pipe' });
+    }
+  } catch {
+    // Ignore - might not exist
   }
 
-  // Append new config
-  const newConfig = `\n[mcp_servers.bukowski]\ncommand = "node"\nargs = ["${BRIDGE_SCRIPT}"]\n`;
+  // Try using codex CLI
+  if (commandExists('codex')) {
+    try {
+      execSync(
+        `codex mcp add bukowski --env BUKOWSKI_AGENT_TYPE=codex -- node "${BRIDGE_SCRIPT}"`,
+        { stdio: 'pipe' }
+      );
+      return true;
+    } catch {
+      // CLI failed, fall back to manual config
+    }
+  }
 
-  // Ensure directory exists
+  // Fallback: manual TOML editing
+  const configPath = CONFIG_PATHS.codex;
   const dir = path.dirname(configPath);
+
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  fs.appendFileSync(configPath, newConfig, 'utf-8');
+  let content = '';
+  try {
+    content = fs.readFileSync(configPath, 'utf-8');
+  } catch {
+    // File doesn't exist yet
+  }
+
+  // Remove existing bukowski section if present
+  content = content.replace(/\[mcp_servers\.bukowski\][\s\S]*?(?=\[|$)/g, '');
+  content = content.replace(/\n{3,}/g, '\n\n').trim();
+
+  // Append new config
+  const newSection = `
+[mcp_servers.bukowski]
+command = "node"
+args = ["${BRIDGE_SCRIPT}"]
+
+[mcp_servers.bukowski.env]
+BUKOWSKI_AGENT_TYPE = "codex"
+`;
+
+  content = content + '\n' + newSection;
+  fs.writeFileSync(configPath, content.trim() + '\n', 'utf-8');
   return true;
 }
 
@@ -241,22 +159,33 @@ function installCodex() {
  * Uninstall bukowski MCP server from Codex
  */
 function uninstallCodex() {
+  // Try using codex CLI
+  if (commandExists('codex')) {
+    try {
+      execSync('codex mcp remove bukowski', { stdio: 'pipe' });
+      return true;
+    } catch {
+      // CLI failed, fall back to manual removal
+    }
+  }
+
+  // Fallback: manual TOML editing
   const configPath = CONFIG_PATHS.codex;
 
   if (!fs.existsSync(configPath)) {
     return false;
   }
 
-  const content = fs.readFileSync(configPath, 'utf-8');
+  let content = fs.readFileSync(configPath, 'utf-8');
+  const hadBukowski = content.includes('[mcp_servers.bukowski]');
 
-  // Remove the [mcp_servers.bukowski] section
-  const updatedContent = content.replace(
-    /\[mcp_servers\.bukowski\][\s\S]*?(?=\[|$)/g,
-    ''
-  ).replace(/\n{3,}/g, '\n\n'); // Clean up extra newlines
+  // Remove the bukowski sections
+  content = content.replace(/\[mcp_servers\.bukowski\][\s\S]*?(?=\[|$)/g, '');
+  content = content.replace(/\[mcp_servers\.bukowski\.env\][\s\S]*?(?=\[|$)/g, '');
+  content = content.replace(/\n{3,}/g, '\n\n').trim();
 
-  fs.writeFileSync(configPath, updatedContent, 'utf-8');
-  return true;
+  fs.writeFileSync(configPath, content + '\n', 'utf-8');
+  return hadBukowski;
 }
 
 /**
@@ -266,15 +195,14 @@ function installGemini() {
   const configPath = CONFIG_PATHS.gemini;
   let config = readJSON(configPath) || {};
 
-  // Initialize mcpServers if not present
   if (!config.mcpServers) {
     config.mcpServers = {};
   }
 
-  // Add bukowski server
   config.mcpServers.bukowski = {
     command: 'node',
-    args: [BRIDGE_SCRIPT]
+    args: [BRIDGE_SCRIPT],
+    env: { BUKOWSKI_AGENT_TYPE: 'gemini' }
   };
 
   writeJSON(configPath, config);
@@ -288,13 +216,12 @@ function uninstallGemini() {
   const configPath = CONFIG_PATHS.gemini;
   const config = readJSON(configPath);
 
-  if (!config || !config.mcpServers || !config.mcpServers.bukowski) {
-    return false; // Not installed
+  if (!config?.mcpServers?.bukowski) {
+    return false;
   }
 
   delete config.mcpServers.bukowski;
 
-  // Clean up empty mcpServers
   if (Object.keys(config.mcpServers).length === 0) {
     delete config.mcpServers;
   }
@@ -305,7 +232,6 @@ function uninstallGemini() {
 
 /**
  * Install bukowski MCP server for all agents
- * @returns {Object} Installation results
  */
 function installAll() {
   const results = {
@@ -337,7 +263,6 @@ function installAll() {
 
 /**
  * Uninstall bukowski MCP server from all agents
- * @returns {Object} Uninstallation results
  */
 function uninstallAll() {
   const results = {
@@ -369,7 +294,6 @@ function uninstallAll() {
 
 /**
  * Check installation status for all agents
- * @returns {Object} Installation status
  */
 function checkStatus() {
   const status = {
@@ -384,9 +308,28 @@ function checkStatus() {
   const claudeConfig = readJSON(CONFIG_PATHS.claude);
   status.claude.installed = !!claudeConfig?.mcpServers?.bukowski;
 
-  // Check Codex
-  const { parsed: codexConfig } = readTOML(CONFIG_PATHS.codex);
-  status.codex.installed = !!codexConfig?.mcp_servers?.bukowski;
+  // Check Codex - try CLI first, then check file
+  if (commandExists('codex')) {
+    try {
+      const output = execSync('codex mcp list 2>/dev/null || true', { encoding: 'utf-8' });
+      status.codex.installed = output.includes('bukowski');
+    } catch {
+      // Fall back to file check
+      try {
+        const content = fs.readFileSync(CONFIG_PATHS.codex, 'utf-8');
+        status.codex.installed = content.includes('[mcp_servers.bukowski]');
+      } catch {
+        status.codex.installed = false;
+      }
+    }
+  } else {
+    try {
+      const content = fs.readFileSync(CONFIG_PATHS.codex, 'utf-8');
+      status.codex.installed = content.includes('[mcp_servers.bukowski]');
+    } catch {
+      status.codex.installed = false;
+    }
+  }
 
   // Check Gemini
   const geminiConfig = readJSON(CONFIG_PATHS.gemini);
