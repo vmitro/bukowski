@@ -431,6 +431,7 @@ process.on('SIGCONT', () => {
 
   // Search state
   const searchState = {
+    previousMode: 'normal',       // Mode before search started (for extending visual selection)
     active: false,
     pattern: '',
     matches: [],    // [{line, col, length}, ...]
@@ -1699,6 +1700,7 @@ process.on('SIGCONT', () => {
 
       // Search actions
       case 'search_start':
+        searchState.previousMode = vimState.mode;  // Remember mode for visual extension
         searchState.active = true;
         searchState.pattern = '';
         searchState.direction = result.direction || 'forward';
@@ -1732,6 +1734,15 @@ process.on('SIGCONT', () => {
       case 'search_confirm':
         searchState.active = false;
         executeSearch();
+        // If we were in visual mode, extend selection to match
+        if ((searchState.previousMode === 'visual' || searchState.previousMode === 'vline') &&
+            searchState.matches.length > 0) {
+          const match = searchState.matches[searchState.index];
+          vimState.mode = searchState.previousMode;  // Restore visual mode
+          vimState.visualCursor.line = match.line;
+          vimState.visualCursor.col = match.col;
+          ensureLineVisible(match.line);
+        }
         break;
 
       case 'search_cancel':

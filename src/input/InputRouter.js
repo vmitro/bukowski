@@ -838,6 +838,14 @@ class InputRouter {
       case '\x04': return { action: 'extend_half_page', dir: 'down', line: isLine };
       case '\x15': return { action: 'extend_half_page', dir: 'up', line: isLine };
 
+      // Search (extend selection to match)
+      case '/':
+        this.mode = 'search';
+        return { action: 'search_start', direction: 'forward' };
+      case '?':
+        this.mode = 'search';
+        return { action: 'search_start', direction: 'backward' };
+
       // Jump to position
       case 'g':
         this.pendingMotion = 'g';
