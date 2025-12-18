@@ -301,8 +301,8 @@ class Compositor {
             }
           }
 
-          // Insert mode: show agent's actual cursor (blinking)
-          if ((!this.visualState || this.visualState.mode === 'insert') && this.cursorBlinkVisible) {
+          // Insert mode: show agent's actual cursor (blinking) - only for agents that need it
+          if (agent.needsFakeCursor && (!this.visualState || this.visualState.mode === 'insert') && this.cursorBlinkVisible) {
             const cursorPos = agent.getCursorPosition();
             if (cursorPos && bufferLine === cursorPos.line) {
               lineContent = this.insertCursorMarker(lineContent, plainLine, cursorPos.col);

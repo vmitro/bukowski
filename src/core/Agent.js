@@ -22,6 +22,9 @@ class Agent {
     this.socketPath = null;  // IPC socket path
     this.exitCode = null;
     this.spawnedAt = null;   // Timestamp when spawned (for session discovery)
+
+    // Codex needs fake cursor (its cursor doesn't survive PTY), others render their own
+    this.needsFakeCursor = config.needsFakeCursor ?? (this.type === 'codex');
   }
 
   spawn(cols = 80, rows = 24) {
