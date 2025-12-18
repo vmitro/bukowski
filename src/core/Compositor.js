@@ -342,15 +342,15 @@ class Compositor {
     const { x, y, width, height } = node.bounds;
     const isHorizontal = node.orientation === 'horizontal';
 
-    let offset = 0;
+    // Use child bounds directly instead of recalculating from ratios
+    // This avoids rounding errors that can clip pane content
     for (let i = 0; i < node.children.length - 1; i++) {
-      const ratio = node.ratios[i] || (1 / node.children.length);
-      const size = Math.floor((isHorizontal ? width : height) * ratio);
-      offset += size;
+      const child = node.children[i];
+      const cb = child.bounds;
 
       if (isHorizontal) {
-        // Vertical border
-        const borderX = x + offset;
+        // Vertical border at right edge of child
+        const borderX = cb.x + cb.width;
         for (let row = y; row < y + height; row++) {
           const screenY = row + 1; // 1-indexed
           const screenX = borderX + 1;
@@ -359,8 +359,8 @@ class Compositor {
           }
         }
       } else {
-        // Horizontal border
-        const borderY = y + offset;
+        // Horizontal border at bottom edge of child
+        const borderY = cb.y + cb.height;
         const screenY = borderY + 1;
         if (screenY > 0 && screenY < this.rows) {
           for (let col = x; col < x + width; col++) {
