@@ -6,7 +6,35 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execSync } = require('child_process');
 
+/**
+ * Get ancestor PIDs (for matching to session agent PTY PID)
+ * Walks up the process tree up to 10 levels
+ */
+function getAncestorPids() {
+  const ancestors = [];
+  let pid = process.ppid;
+
+  for (let i = 0; i < 10 && pid > 1; i++) {
+    ancestors.push(pid);
+    try {
+      // Read parent PID from /proc/[pid]/stat
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8');
+      // Field 4 is ppid (format: "pid (comm) state ppid ...")
+      const match = stat.match(/^\d+\s+\([^)]+\)\s+\S+\s+(\d+)/);
+      if (match) {
+        pid = parseInt(match[1], 10);
+      } else {
+        break;
+      }
+    } catch {
+      break;
+    }
+  }
+
+  return ancestors;
+}
 
 // Discovery file location
 const SOCKET_FILE = path.join(os.homedir(), '.bukowski-mcp-socket');
@@ -109,13 +137,15 @@ function tryConnectToBukowski() {
     const sessionAgentId = process.env.BUKOWSKI_AGENT_ID || null;
 
     // Send init message (fire and forget - don't block)
+    // Include ancestor PIDs so MCPServer can match to session agent by PTY PID
     const initMsg = JSON.stringify({
       jsonrpc: '2.0',
       id: '__init__',
       method: 'initialize',
       params: {
         agentType,
-        agentId: sessionAgentId  // null if external, set if session agent
+        agentId: sessionAgentId,      // null if external, set if session agent
+        ancestorPids: getAncestorPids() // For session agent matching
       }
     }) + '\n';
     socket.write(initMsg);

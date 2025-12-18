@@ -61,12 +61,17 @@ function getSessionDir(agentType, cwd) {
  */
 function extractSessionId(agentType, filename) {
   switch (agentType) {
-    case 'claude':
-      // {uuid}.jsonl → uuid
+    case 'claude': {
+      // {uuid}.jsonl → uuid (validate UUID format)
       if (filename.endsWith('.jsonl')) {
-        return path.basename(filename, '.jsonl');
+        const id = path.basename(filename, '.jsonl');
+        // Validate it's a proper UUID
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+          return id;
+        }
       }
       return null;
+    }
 
     case 'codex':
       // rollout-2025-09-03T10-24-19-{uuid}.jsonl → uuid

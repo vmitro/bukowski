@@ -311,38 +311,39 @@ class MCPServer extends EventEmitter {
 
     // Handle MCP protocol methods
     switch (method) {
-      case 'initialize':
+      case 'initialize': {
         // Agent identifies itself
-        // Priority: provided agentId (session agent) > generate from agentType (external) > null
+        // Priority: agentId > ppid match > agentType (external) > null
+        let assignedId = null;
+
         if (params?.agentId) {
-          // Session agent running inside bukowski - use its ID directly
-          clientState.agentId = params.agentId;
-          this._sendResult(socket, id, {
-            protocolVersion: '2024-11-05',
-            capabilities: { tools: {} },
-            serverInfo: { name: 'bukowski-mcp', version: '1.0.0' },
-            assignedAgentId: params.agentId
-          });
-        } else if (params?.agentType) {
-          // External agent via bridge - assign a unique ID
-          const assignedId = this._assignAgentId(params.agentType, socket);
-          clientState.agentId = assignedId;
-          this._sendResult(socket, id, {
-            protocolVersion: '2024-11-05',
-            capabilities: { tools: {} },
-            serverInfo: { name: 'bukowski-mcp', version: '1.0.0' },
-            assignedAgentId: assignedId
-          });
-        } else {
-          // Legacy or direct connection
-          clientState.agentId = null;
-          this._sendResult(socket, id, {
-            protocolVersion: '2024-11-05',
-            capabilities: { tools: {} },
-            serverInfo: { name: 'bukowski-mcp', version: '1.0.0' }
-          });
+          // Explicit session agent ID (from BUKOWSKI_AGENT_ID env)
+          assignedId = params.agentId;
+        } else if (params?.ancestorPids?.length) {
+          // Try to match ancestor PIDs to a session agent's PTY PID
+          const ancestorSet = new Set(params.ancestorPids);
+          const sessionAgent = this.session.getAllAgents().find(
+            a => a.pty && ancestorSet.has(a.pty.pid)
+          );
+          if (sessionAgent) {
+            assignedId = sessionAgent.id;
+          }
         }
+
+        if (!assignedId && params?.agentType) {
+          // External agent via bridge - assign a unique ID
+          assignedId = this._assignAgentId(params.agentType, socket);
+        }
+
+        clientState.agentId = assignedId;
+        this._sendResult(socket, id, {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'bukowski-mcp', version: '1.0.0' },
+          assignedAgentId: assignedId
+        });
         break;
+      }
 
       case 'tools/list':
         this._sendResult(socket, id, { tools: this.tools });

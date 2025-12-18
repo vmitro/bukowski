@@ -51,7 +51,8 @@ class Agent {
         ...process.env,
         ...this.env,
         FORCE_COLOR: '1',
-        BUKOWSKI_AGENT_ID: this.id  // For MCP bridge to use session agent ID
+        BUKOWSKI_AGENT_ID: this.id,    // For MCP bridge to use session agent ID
+        BUKOWSKI_AGENT_TYPE: this.type // For MCP bridge to know agent type
       }
     });
 
@@ -229,12 +230,26 @@ class Agent {
   }
 
   toJSON() {
+    // Strip resume args from saved config - we add them dynamically from agentSessionId
+    let cleanArgs = [...this.args];
+
+    // Claude: --resume <id> or -r <id>
+    const resumeIdx = cleanArgs.findIndex(a => a === '--resume' || a === '-r');
+    if (resumeIdx !== -1 && resumeIdx < cleanArgs.length - 1) {
+      cleanArgs.splice(resumeIdx, 2);
+    }
+
+    // Codex: resume <id> as first arg
+    if (cleanArgs[0] === 'resume' && cleanArgs.length > 1) {
+      cleanArgs.splice(0, 2);
+    }
+
     return {
       id: this.id,
       name: this.name,
       type: this.type,
       command: this.command,
-      args: this.args,
+      args: cleanArgs,
       env: this.env,
       autostart: this.autostart,
       agentSessionId: this.agentSessionId

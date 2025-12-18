@@ -981,7 +981,10 @@ process.on('SIGCONT', () => {
         const typeConfig = AGENT_TYPES[agent.type];
         if (typeConfig) {
           const baseArgs = typeConfig.args || [];
-          const resumeArgs = typeConfig.getResumeArgs?.(agent.agentSessionId) || [];
+          // Validate session ID is a proper UUID before using it
+          const sessionId = agent.agentSessionId;
+          const isValidUuid = sessionId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId);
+          const resumeArgs = typeConfig.getResumeArgs?.(isValidUuid ? sessionId : null) || [];
           const combinedArgs = [...baseArgs, ...resumeArgs];
           const fipaArgs = getFIPAPromptArgs(agent.type, combinedArgs);
           agent.args = [...combinedArgs, ...fipaArgs];

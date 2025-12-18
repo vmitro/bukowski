@@ -109,10 +109,11 @@ function installCodex() {
   }
 
   // Try using codex CLI
+  // No --env: let bridge inherit BUKOWSKI_AGENT_ID and BUKOWSKI_AGENT_TYPE from parent process
   if (commandExists('codex')) {
     try {
       execSync(
-        `codex mcp add bukowski --env BUKOWSKI_AGENT_TYPE=codex -- node "${BRIDGE_SCRIPT}"`,
+        `codex mcp add bukowski -- node "${BRIDGE_SCRIPT}"`,
         { stdio: 'pipe' }
       );
       return true;
@@ -140,14 +141,11 @@ function installCodex() {
   content = content.replace(/\[mcp_servers\.bukowski\][\s\S]*?(?=\[|$)/g, '');
   content = content.replace(/\n{3,}/g, '\n\n').trim();
 
-  // Append new config
+  // Append new config (no env section - inherit from parent process)
   const newSection = `
 [mcp_servers.bukowski]
 command = "node"
 args = ["${BRIDGE_SCRIPT}"]
-
-[mcp_servers.bukowski.env]
-BUKOWSKI_AGENT_TYPE = "codex"
 `;
 
   content = content + '\n' + newSection;
