@@ -1405,6 +1405,66 @@ process.on('SIGCONT', () => {
         break;
       }
 
+      case 'yank_to_start': {
+        // ygg - yank from current line to buffer start
+        if (!focusedAgent) break;
+        const lines = [];
+        for (let i = 0; i <= vimState.normalCursor.line; i++) {
+          lines.push(focusedAgent.getLineText(i));
+        }
+        const text = lines.join('\n');
+        if (!text) break;
+        const reg = result.register?.toLowerCase();
+        const append = result.register && /[A-Z]/.test(result.register);
+        if (reg === '+' || reg === '*') {
+          registerManager.setClipboard(text);
+        } else {
+          registerManager.yank(focusedAgent.id, text, 'line', reg, append);
+          if (!result.register) {
+            const b64 = Buffer.from(text).toString('base64');
+            process.stdout.write(`\x1b]52;c;${b64}\x07`);
+          }
+        }
+        break;
+      }
+
+      case 'yank_to_end': {
+        // yG - yank from current line to buffer end
+        if (!focusedAgent) break;
+        const contentHeight = focusedAgent.getContentHeight();
+        const lines = [];
+        for (let i = vimState.normalCursor.line; i < contentHeight; i++) {
+          lines.push(focusedAgent.getLineText(i));
+        }
+        const text = lines.join('\n');
+        if (!text) break;
+        const reg = result.register?.toLowerCase();
+        const append = result.register && /[A-Z]/.test(result.register);
+        if (reg === '+' || reg === '*') {
+          registerManager.setClipboard(text);
+        } else {
+          registerManager.yank(focusedAgent.id, text, 'line', reg, append);
+          if (!result.register) {
+            const b64 = Buffer.from(text).toString('base64');
+            process.stdout.write(`\x1b]52;c;${b64}\x07`);
+          }
+        }
+        break;
+      }
+
+      // Delete operators - in read-only terminal, just yank
+      case 'delete_lines':
+      case 'delete_word':
+      case 'delete_word_end':
+      case 'delete_to_eol':
+      case 'delete_to_bol':
+      case 'delete_to_first_nonblank':
+      case 'delete_to_start':
+      case 'delete_to_end':
+        // Remap delete to equivalent yank action
+        // (We're in a read-only terminal viewer)
+        break;
+
       case 'paste':
         pasteFromRegister(result.after, result.register);
         break;
@@ -2361,7 +2421,12 @@ process.on('SIGCONT', () => {
   compositor.draw();
 
   // Periodic refresh for cursor blink / idle updates
-  setInterval(() => compositor.scheduleDraw(), 100);
+  // Skip when overlay is active to prevent flicker
+  setInterval(() => {
+    if (!overlayManager.hasActiveOverlay()) {
+      compositor.scheduleDraw();
+    }
+  }, 100);
 
   // Signal handlers
   process.on('SIGINT', () => {

@@ -522,35 +522,48 @@ class InputRouter {
         }
         break;
 
-      // yw - yank word
-      case 'w':
-        return { action: `${operator}_word`, count, register };
+      // yw - yank word / dw - delete word
+      case 'w': {
+        const actionPrefix = operator === 'y' ? 'yank' : 'delete';
+        return { action: `${actionPrefix}_word`, count, register };
+      }
 
       // ye - yank to end of word
-      case 'e':
-        return { action: `${operator}_word_end`, count, register };
+      case 'e': {
+        const actionPrefix = operator === 'y' ? 'yank' : 'delete';
+        return { action: `${actionPrefix}_word_end`, count, register };
+      }
 
       // y$ - yank to end of line
-      case '$':
-        return { action: `${operator}_to_eol`, count, register };
+      case '$': {
+        const actionPrefix = operator === 'y' ? 'yank' : 'delete';
+        return { action: `${actionPrefix}_to_eol`, count, register };
+      }
 
       // y0 - yank to start of line
-      case '0':
-        return { action: `${operator}_to_bol`, count, register };
+      case '0': {
+        const actionPrefix = operator === 'y' ? 'yank' : 'delete';
+        return { action: `${actionPrefix}_to_bol`, count, register };
+      }
 
       // y^ - yank to first non-blank
-      case '^':
-        return { action: `${operator}_to_first_nonblank`, count, register };
+      case '^': {
+        const actionPrefix = operator === 'y' ? 'yank' : 'delete';
+        return { action: `${actionPrefix}_to_first_nonblank`, count, register };
+      }
 
       // yG - yank to end of buffer
-      case 'G':
-        return { action: `${operator}_to_end`, count, register };
+      case 'G': {
+        const actionPrefix = operator === 'y' ? 'yank' : 'delete';
+        return { action: `${actionPrefix}_to_end`, count, register };
+      }
 
       // ygg - yank to start of buffer (needs another g)
       case 'g':
-        // Store pending motion for gg
+        // Store pending motion for gg - set pendingMotion so second 'g' is caught
         this.pendingOperator = operator;
         this.selectedRegister = register;
+        this.pendingMotion = 'g';  // Will be checked before pendingOperator
         return { action: 'await_motion', pending: `${operator}g` };
 
       // ESC cancels
@@ -580,19 +593,29 @@ class InputRouter {
       return this.handleRegisterSelection(data);
     }
 
-    // Handle operator-pending mode (after y, d, etc.)
-    if (this.pendingOperator) {
-      return this.handleOperatorMotion(data);
-    }
-
-    // Handle pending motion (g for gg)
+    // Handle pending motion (g for gg) - check BEFORE pendingOperator for ygg/dgg
     if (this.pendingMotion === 'g') {
       this.pendingMotion = null;
       if (data === 'g') {
+        // If there's a pending operator, this is ygg/dgg
+        if (this.pendingOperator) {
+          const operator = this.pendingOperator;
+          const register = this.selectedRegister;
+          this.pendingOperator = null;
+          this.selectedRegister = null;
+          const actionPrefix = operator === 'y' ? 'yank' : 'delete';
+          return { action: `${actionPrefix}_to_start`, register };
+        }
+        // Standalone gg
         return { action: 'scroll_to_top' };
       }
       // Unknown g-motion, ignore
       return { action: 'noop' };
+    }
+
+    // Handle operator-pending mode (after y, d, etc.)
+    if (this.pendingOperator) {
+      return this.handleOperatorMotion(data);
     }
 
     // Handle pending find (f/F/t/T waiting for character)
