@@ -709,9 +709,9 @@ class Compositor {
       i++;
     }
 
-    if (col >= plainLine.length) {
-      // Pad with spaces to reach cursor position
-      const padding = col - plainLine.length;
+    if (col >= plainIdx) {
+      // Pad with spaces to reach cursor position (use plainIdx, not plainLine.length)
+      const padding = col - plainIdx;
       result += ' '.repeat(padding);
       result += `\x1b[4;7m \x1b[24;27m`;
     }
