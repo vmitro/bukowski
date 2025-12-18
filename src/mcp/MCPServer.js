@@ -350,10 +350,12 @@ class MCPServer extends EventEmitter {
 
       case 'tools/call':
         try {
+          // Use clientState.agentId, or fallback to _callerAgentId from bridge
+          const callerAgentId = clientState.agentId || params.arguments?._callerAgentId || 'unknown';
           const result = await this._handleToolCall(
             params.name,
             params.arguments,
-            clientState.agentId
+            callerAgentId
           );
           this._sendResult(socket, id, {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
@@ -477,9 +479,10 @@ class MCPServer extends EventEmitter {
       throw new Error('FIPA Hub not available');
     }
 
-    // Validate target agent exists
-    const targetAgent = this.session.getAgent(to);
-    if (!targetAgent) {
+    // Validate target agent exists (session or external)
+    const sessionAgent = this.session.getAgent(to);
+    const externalAgent = this.externalAgents.get(to);
+    if (!sessionAgent && !externalAgent) {
       throw new Error(`Unknown agent: ${to}`);
     }
 
