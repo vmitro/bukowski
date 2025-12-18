@@ -35,6 +35,13 @@ class Compositor {
     }
   }
 
+  resetCursorBlink() {
+    // Keep cursor visible and restart timer (for keystroke feedback)
+    this.stopCursorBlink();
+    this.cursorBlinkVisible = true;
+    this.startCursorBlink();
+  }
+
   /**
    * Schedule a throttled draw (exactly like index.js pattern)
    */

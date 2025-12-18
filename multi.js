@@ -1889,6 +1889,7 @@ process.on('SIGCONT', () => {
       // Passthrough handled directly
       case 'passthrough':
         // Already written to agent in InputRouter
+        compositor.resetCursorBlink();
         break;
 
       // FIPA Actions - set performative and switch to chat mode
