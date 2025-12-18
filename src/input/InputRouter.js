@@ -18,6 +18,7 @@ class InputRouter {
     this.awaitingRegister = false;  // Waiting for register name (after ")
     this.selectedRegister = null;   // Currently selected register
     this.pendingOperator = null;    // Pending operator: 'y' | 'd' | null
+    this.pendingMotion = null;      // Pending motion: 'g' for gg
 
     // Command mode state
     this.commandBuffer = '';        // Store typed command
@@ -46,6 +47,7 @@ class InputRouter {
       this.awaitingRegister = false;
       this.selectedRegister = null;
       this.pendingOperator = null;
+      this.pendingMotion = null;
       this.commandBuffer = '';
 
       if (this.mode === 'command') {
@@ -578,6 +580,16 @@ class InputRouter {
       return this.handleOperatorMotion(data);
     }
 
+    // Handle pending motion (g for gg)
+    if (this.pendingMotion === 'g') {
+      this.pendingMotion = null;
+      if (data === 'g') {
+        return { action: 'scroll_to_top' };
+      }
+      // Unknown g-motion, ignore
+      return { action: 'noop' };
+    }
+
     // Numeric prefix for counts (e.g., "5j" for 5 lines down)
     if (data >= '0' && data <= '9' && (this.pendingCount || data !== '0')) {
       this.pendingCount += data;
@@ -598,6 +610,19 @@ class InputRouter {
       case 'h': return { action: 'cursor_left', count };
       case 'l': return { action: 'cursor_right', count };
 
+      // Word movements
+      case 'w': return { action: 'word_forward', count, bigWord: false };
+      case 'W': return { action: 'word_forward', count, bigWord: true };
+      case 'e': return { action: 'word_end', count, bigWord: false };
+      case 'E': return { action: 'word_end', count, bigWord: true };
+      case 'b': return { action: 'word_backward', count, bigWord: false };
+      case 'B': return { action: 'word_backward', count, bigWord: true };
+
+      // Line position
+      case '0': return { action: 'cursor_line_start' };
+      case '$': return { action: 'cursor_line_end' };
+      case '^': return { action: 'cursor_first_nonblank' };
+
       // Page navigation
       case '\x04': // Ctrl+D
         return { action: 'scroll_half_down' };
@@ -610,6 +635,7 @@ class InputRouter {
 
       // Jump to position
       case 'g':
+        this.pendingMotion = 'g';
         return { action: 'await_motion', pending: 'g' };
       case 'G':
         return { action: 'scroll_to_bottom' };
@@ -693,19 +719,52 @@ class InputRouter {
       return this.handleRegisterSelection(data);
     }
 
+    // Handle pending motion (g for gg)
+    if (this.pendingMotion === 'g') {
+      this.pendingMotion = null;
+      if (data === 'g') {
+        return { action: 'extend_to_top', line: isLine };
+      }
+      return { action: 'noop' };
+    }
+
+    // Numeric prefix for counts
+    if (data >= '0' && data <= '9' && (this.pendingCount || data !== '0')) {
+      this.pendingCount += data;
+      return { action: 'count_pending', count: this.pendingCount };
+    }
+
+    const count = parseInt(this.pendingCount) || 1;
+    this.pendingCount = '';
+
     switch (data) {
       // Extend selection
-      case 'j': return { action: 'extend_selection', dir: 'down', line: isLine };
-      case 'k': return { action: 'extend_selection', dir: 'up', line: isLine };
-      case 'h': return { action: isLine ? 'noop' : 'extend_selection', dir: 'left' };
-      case 'l': return { action: isLine ? 'noop' : 'extend_selection', dir: 'right' };
+      case 'j': return { action: 'extend_selection', dir: 'down', count, line: isLine };
+      case 'k': return { action: 'extend_selection', dir: 'up', count, line: isLine };
+      case 'h': return { action: isLine ? 'noop' : 'extend_selection', dir: 'left', count };
+      case 'l': return { action: isLine ? 'noop' : 'extend_selection', dir: 'right', count };
+
+      // Word movements
+      case 'w': return { action: 'extend_word_forward', count, bigWord: false, line: isLine };
+      case 'W': return { action: 'extend_word_forward', count, bigWord: true, line: isLine };
+      case 'e': return { action: 'extend_word_end', count, bigWord: false, line: isLine };
+      case 'E': return { action: 'extend_word_end', count, bigWord: true, line: isLine };
+      case 'b': return { action: 'extend_word_backward', count, bigWord: false, line: isLine };
+      case 'B': return { action: 'extend_word_backward', count, bigWord: true, line: isLine };
+
+      // Line position
+      case '0': return { action: isLine ? 'noop' : 'extend_line_start' };
+      case '$': return { action: isLine ? 'noop' : 'extend_line_end' };
+      case '^': return { action: isLine ? 'noop' : 'extend_first_nonblank' };
 
       // Page navigation while selecting
       case '\x04': return { action: 'extend_half_page', dir: 'down', line: isLine };
       case '\x15': return { action: 'extend_half_page', dir: 'up', line: isLine };
 
       // Jump to position
-      case 'g': return { action: 'extend_to_top', line: isLine };
+      case 'g':
+        this.pendingMotion = 'g';
+        return { action: 'await_motion', pending: 'g' };
       case 'G': return { action: 'extend_to_bottom', line: isLine };
 
       // Yank selection

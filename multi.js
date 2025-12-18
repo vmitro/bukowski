@@ -671,6 +671,94 @@ process.on('SIGCONT', () => {
     return lineText.slice(0, col + 1);
   }
 
+  // Check if character is a word character
+  // word = letters, digits, underscores
+  // WORD = any non-whitespace
+  function isWordChar(char, bigWord) {
+    if (!char) return false;
+    if (bigWord) return !/\s/.test(char);
+    return /\w/.test(char);
+  }
+
+  // Move cursor forward to start of next word
+  function moveWordForward(agent, cursor, bigWord) {
+    const contentHeight = agent.getContentHeight();
+    let { line, col } = cursor;
+    let lineText = agent.getLineText(line) || '';
+
+    // Skip current word
+    while (col < lineText.length && isWordChar(lineText[col], bigWord)) {
+      col++;
+    }
+    // Skip whitespace/non-word chars
+    while (true) {
+      while (col < lineText.length && !isWordChar(lineText[col], bigWord)) {
+        col++;
+      }
+      if (col < lineText.length || line >= contentHeight - 1) break;
+      // Move to next line
+      line++;
+      col = 0;
+      lineText = agent.getLineText(line) || '';
+    }
+
+    cursor.line = line;
+    cursor.col = Math.min(col, Math.max(0, lineText.length - 1));
+  }
+
+  // Move cursor forward to end of word
+  function moveWordEnd(agent, cursor, bigWord) {
+    const contentHeight = agent.getContentHeight();
+    let { line, col } = cursor;
+    let lineText = agent.getLineText(line) || '';
+
+    // Move at least one position
+    col++;
+    // Skip whitespace/non-word chars
+    while (true) {
+      while (col < lineText.length && !isWordChar(lineText[col], bigWord)) {
+        col++;
+      }
+      if (col < lineText.length || line >= contentHeight - 1) break;
+      line++;
+      col = 0;
+      lineText = agent.getLineText(line) || '';
+    }
+    // Skip to end of word
+    while (col < lineText.length - 1 && isWordChar(lineText[col + 1], bigWord)) {
+      col++;
+    }
+
+    cursor.line = line;
+    cursor.col = Math.min(col, Math.max(0, lineText.length - 1));
+  }
+
+  // Move cursor backward to start of word
+  function moveWordBackward(agent, cursor, bigWord) {
+    let { line, col } = cursor;
+    let lineText = agent.getLineText(line) || '';
+
+    // Move at least one position
+    col--;
+    // Skip whitespace/non-word chars
+    while (true) {
+      while (col >= 0 && !isWordChar(lineText[col], bigWord)) {
+        col--;
+      }
+      if (col >= 0 || line <= 0) break;
+      line--;
+      lineText = agent.getLineText(line) || '';
+      col = lineText.length - 1;
+    }
+    // Skip to start of word
+    while (col > 0 && isWordChar(lineText[col - 1], bigWord)) {
+      col--;
+    }
+
+    cursor.line = line;
+    cursor.col = Math.max(0, col);
+  }
+
   // Yank selection to register
   function yankSelection(targetRegister = null) {
     const focusedPane = layoutManager.getFocusedPane();
@@ -1149,6 +1237,56 @@ process.on('SIGCONT', () => {
         }
         break;
 
+      // Visual mode line position
+      case 'extend_line_start':
+        if (vimState.mode === 'visual') {
+          vimState.visualCursor.col = 0;
+        }
+        break;
+
+      case 'extend_line_end':
+        if (vimState.mode === 'visual' && focusedAgent) {
+          const lineText = focusedAgent.getLineText(vimState.visualCursor.line) || '';
+          vimState.visualCursor.col = Math.max(0, lineText.length - 1);
+        }
+        break;
+
+      case 'extend_first_nonblank':
+        if (vimState.mode === 'visual' && focusedAgent) {
+          const lineText = focusedAgent.getLineText(vimState.visualCursor.line) || '';
+          const match = lineText.match(/^\s*/);
+          vimState.visualCursor.col = match ? match[0].length : 0;
+        }
+        break;
+
+      // Visual mode word movements
+      case 'extend_word_forward':
+        if ((vimState.mode === 'visual' || vimState.mode === 'vline') && focusedAgent) {
+          for (let i = 0; i < (result.count || 1); i++) {
+            moveWordForward(focusedAgent, vimState.visualCursor, result.bigWord);
+          }
+          ensureLineVisible(vimState.visualCursor.line);
+        }
+        break;
+
+      case 'extend_word_end':
+        if ((vimState.mode === 'visual' || vimState.mode === 'vline') && focusedAgent) {
+          for (let i = 0; i < (result.count || 1); i++) {
+            moveWordEnd(focusedAgent, vimState.visualCursor, result.bigWord);
+          }
+          ensureLineVisible(vimState.visualCursor.line);
+        }
+        break;
+
+      case 'extend_word_backward':
+        if ((vimState.mode === 'visual' || vimState.mode === 'vline') && focusedAgent) {
+          for (let i = 0; i < (result.count || 1); i++) {
+            moveWordBackward(focusedAgent, vimState.visualCursor, result.bigWord);
+          }
+          ensureLineVisible(vimState.visualCursor.line);
+        }
+        break;
+
       case 'yank_selection':
         yankSelection(result.register);
         break;
@@ -1441,6 +1579,64 @@ process.on('SIGCONT', () => {
 
       case 'scroll_to_bottom':
         compositor.scrollFocusedTo('bottom');
+        if (focusedAgent) {
+          vimState.normalCursor.line = focusedAgent.getContentHeight() - 1;
+          vimState.normalCursor.col = 0;
+        }
+        break;
+
+      case 'scroll_to_top':
+        compositor.scrollFocusedTo('top');
+        vimState.normalCursor.line = 0;
+        vimState.normalCursor.col = 0;
+        break;
+
+      // Line position movements
+      case 'cursor_line_start':
+        vimState.normalCursor.col = 0;
+        break;
+
+      case 'cursor_line_end':
+        if (focusedAgent) {
+          const lineText = focusedAgent.getLineText(vimState.normalCursor.line) || '';
+          vimState.normalCursor.col = Math.max(0, lineText.length - 1);
+        }
+        break;
+
+      case 'cursor_first_nonblank':
+        if (focusedAgent) {
+          const lineText = focusedAgent.getLineText(vimState.normalCursor.line) || '';
+          const match = lineText.match(/^\s*/);
+          vimState.normalCursor.col = match ? match[0].length : 0;
+        }
+        break;
+
+      // Word movements in normal mode
+      case 'word_forward':
+        if (focusedAgent) {
+          for (let i = 0; i < (result.count || 1); i++) {
+            moveWordForward(focusedAgent, vimState.normalCursor, result.bigWord);
+          }
+          ensureLineVisible(vimState.normalCursor.line);
+        }
+        break;
+
+      case 'word_end':
+        if (focusedAgent) {
+          for (let i = 0; i < (result.count || 1); i++) {
+            moveWordEnd(focusedAgent, vimState.normalCursor, result.bigWord);
+          }
+          ensureLineVisible(vimState.normalCursor.line);
+        }
+        break;
+
+      case 'word_backward':
+        if (focusedAgent) {
+          for (let i = 0; i < (result.count || 1); i++) {
+            moveWordBackward(focusedAgent, vimState.normalCursor, result.bigWord);
+          }
+          ensureLineVisible(vimState.normalCursor.line);
+        }
         break;
 
       // Search actions
