@@ -187,6 +187,8 @@ class FIPAHub extends EventEmitter {
           payload,
           this._getSummary(message)
         );
+        // Emit for MCP message queue (external agents)
+        this.emit('fipa:sent', { message, to: receivers[0], conversation });
         return null;
       }
     } else {
@@ -199,6 +201,8 @@ class FIPAHub extends EventEmitter {
           payload,
           this._getSummary(message)
         );
+        // Emit for MCP message queue (external agents)
+        this.emit('fipa:sent', { message, to: receiver, conversation });
       }
       return null;
     }

@@ -382,10 +382,10 @@ process.on('SIGCONT', () => {
   const mcpServer = new MCPServer(session, fipaHub, ipcHub);
   try {
     const socketPath = await mcpServer.start();
-    // Wire FIPAHub messages to MCP message queue
-    fipaHub.on('message', (msg) => {
-      if (msg.to) {
-        mcpServer.queueMessage(msg.to, msg);
+    // Wire FIPAHub messages to MCP message queue (for external agents)
+    fipaHub.on('fipa:sent', ({ message, to }) => {
+      if (to) {
+        mcpServer.queueMessage(to, message);
       }
     });
 

@@ -47,7 +47,12 @@ class Agent {
       cols,
       rows: virtualRows,
       cwd: process.cwd(),
-      env: { ...process.env, ...this.env, FORCE_COLOR: '1' }
+      env: {
+        ...process.env,
+        ...this.env,
+        FORCE_COLOR: '1',
+        BUKOWSKI_AGENT_ID: this.id  // For MCP bridge to use session agent ID
+      }
     });
 
     this.pty.onData(data => {

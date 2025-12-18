@@ -105,14 +105,25 @@ function tryConnectToBukowski() {
     connecting = false;
     agentType = detectAgentType();
 
+    // Use session agent ID if running inside bukowski, otherwise generate external ID
+    const sessionAgentId = process.env.BUKOWSKI_AGENT_ID || null;
+
     // Send init message (fire and forget - don't block)
     const initMsg = JSON.stringify({
       jsonrpc: '2.0',
       id: '__init__',
       method: 'initialize',
-      params: { agentType }
+      params: {
+        agentType,
+        agentId: sessionAgentId  // null if external, set if session agent
+      }
     }) + '\n';
     socket.write(initMsg);
+
+    // If we have a session ID, use it directly
+    if (sessionAgentId) {
+      agentId = sessionAgentId;
+    }
   });
 
   socket.on('data', (data) => {

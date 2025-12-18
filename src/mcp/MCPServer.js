@@ -312,34 +312,34 @@ class MCPServer extends EventEmitter {
     // Handle MCP protocol methods
     switch (method) {
       case 'initialize':
-        // Agent identifies itself - may come from bridge with agentType
-        if (params?.agentType) {
+        // Agent identifies itself
+        // Priority: provided agentId (session agent) > generate from agentType (external) > null
+        if (params?.agentId) {
+          // Session agent running inside bukowski - use its ID directly
+          clientState.agentId = params.agentId;
+          this._sendResult(socket, id, {
+            protocolVersion: '2024-11-05',
+            capabilities: { tools: {} },
+            serverInfo: { name: 'bukowski-mcp', version: '1.0.0' },
+            assignedAgentId: params.agentId
+          });
+        } else if (params?.agentType) {
           // External agent via bridge - assign a unique ID
           const assignedId = this._assignAgentId(params.agentType, socket);
           clientState.agentId = assignedId;
           this._sendResult(socket, id, {
             protocolVersion: '2024-11-05',
-            capabilities: {
-              tools: {}
-            },
-            serverInfo: {
-              name: 'bukowski-mcp',
-              version: '1.0.0'
-            },
+            capabilities: { tools: {} },
+            serverInfo: { name: 'bukowski-mcp', version: '1.0.0' },
             assignedAgentId: assignedId
           });
         } else {
           // Legacy or direct connection
-          clientState.agentId = params?.agentId || null;
+          clientState.agentId = null;
           this._sendResult(socket, id, {
             protocolVersion: '2024-11-05',
-            capabilities: {
-              tools: {}
-            },
-            serverInfo: {
-              name: 'bukowski-mcp',
-              version: '1.0.0'
-            }
+            capabilities: { tools: {} },
+            serverInfo: { name: 'bukowski-mcp', version: '1.0.0' }
           });
         }
         break;
