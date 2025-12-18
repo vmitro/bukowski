@@ -759,6 +759,42 @@ process.on('SIGCONT', () => {
     cursor.col = Math.max(0, col);
   }
 
+  // Find character on line (f/F/t/T motions)
+  // Returns new column position or -1 if not found
+  function findCharOnLine(lineText, startCol, char, type, count = 1) {
+    const forward = type === 'f' || type === 't';
+    const til = type === 't' || type === 'T';
+    let col = startCol;
+    let found = 0;
+
+    if (forward) {
+      for (let i = startCol + 1; i < lineText.length; i++) {
+        if (lineText[i] === char) {
+          found++;
+          col = i;
+          if (found >= count) break;
+        }
+      }
+    } else {
+      for (let i = startCol - 1; i >= 0; i--) {
+        if (lineText[i] === char) {
+          found++;
+          col = i;
+          if (found >= count) break;
+        }
+      }
+    }
+
+    if (found < count) return -1;  // Not found enough times
+
+    // Adjust for til (t/T) - stop before/after the character
+    if (til) {
+      col = forward ? col - 1 : col + 1;
+    }
+
+    return col;
+  }
+
   // Yank selection to register
   function yankSelection(targetRegister = null) {
     const focusedPane = layoutManager.getFocusedPane();
@@ -1636,6 +1672,28 @@ process.on('SIGCONT', () => {
             moveWordBackward(focusedAgent, vimState.normalCursor, result.bigWord);
           }
           ensureLineVisible(vimState.normalCursor.line);
+        }
+        break;
+
+      // Character find (f/F/t/T) in normal mode
+      case 'find_char':
+        if (focusedAgent) {
+          const lineText = focusedAgent.getLineText(vimState.normalCursor.line) || '';
+          const newCol = findCharOnLine(lineText, vimState.normalCursor.col, result.char, result.type, result.count || 1);
+          if (newCol >= 0) {
+            vimState.normalCursor.col = newCol;
+          }
+        }
+        break;
+
+      // Character find in visual mode
+      case 'extend_find_char':
+        if ((vimState.mode === 'visual' || vimState.mode === 'vline') && focusedAgent) {
+          const lineText = focusedAgent.getLineText(vimState.visualCursor.line) || '';
+          const newCol = findCharOnLine(lineText, vimState.visualCursor.col, result.char, result.type, result.count || 1);
+          if (newCol >= 0) {
+            vimState.visualCursor.col = newCol;
+          }
         }
         break;
 

@@ -20,6 +20,10 @@ class InputRouter {
     this.pendingOperator = null;    // Pending operator: 'y' | 'd' | null
     this.pendingMotion = null;      // Pending motion: 'g' for gg
 
+    // Character find state (f/F/t/T)
+    this.pendingFind = null;        // 'f' | 'F' | 't' | 'T' | null
+    this.lastFind = null;           // { type: 'f'|'F'|'t'|'T', char: string } for ; and ,
+
     // Command mode state
     this.commandBuffer = '';        // Store typed command
   }
@@ -48,6 +52,7 @@ class InputRouter {
       this.selectedRegister = null;
       this.pendingOperator = null;
       this.pendingMotion = null;
+      this.pendingFind = null;
       this.commandBuffer = '';
 
       if (this.mode === 'command') {
@@ -590,6 +595,15 @@ class InputRouter {
       return { action: 'noop' };
     }
 
+    // Handle pending find (f/F/t/T waiting for character)
+    if (this.pendingFind) {
+      const findType = this.pendingFind;
+      this.pendingFind = null;
+      // Store for ; and , repeat
+      this.lastFind = { type: findType, char: data };
+      return { action: 'find_char', type: findType, char: data, count: parseInt(this.pendingCount) || 1 };
+    }
+
     // Numeric prefix for counts (e.g., "5j" for 5 lines down)
     if (data >= '0' && data <= '9' && (this.pendingCount || data !== '0')) {
       this.pendingCount += data;
@@ -622,6 +636,34 @@ class InputRouter {
       case '0': return { action: 'cursor_line_start' };
       case '$': return { action: 'cursor_line_end' };
       case '^': return { action: 'cursor_first_nonblank' };
+
+      // Character find (f/F/t/T)
+      case 'f':
+        this.pendingFind = 'f';
+        return { action: 'await_char', find: 'f' };
+      case 'F':
+        this.pendingFind = 'F';
+        return { action: 'await_char', find: 'F' };
+      case 't':
+        this.pendingFind = 't';
+        return { action: 'await_char', find: 't' };
+      case 'T':
+        this.pendingFind = 'T';
+        return { action: 'await_char', find: 'T' };
+
+      // Repeat last find
+      case ';':
+        if (this.lastFind) {
+          return { action: 'find_char', type: this.lastFind.type, char: this.lastFind.char, count };
+        }
+        return { action: 'noop' };
+      case ',':
+        if (this.lastFind) {
+          // Reverse the direction
+          const reverseType = { f: 'F', F: 'f', t: 'T', T: 't' }[this.lastFind.type];
+          return { action: 'find_char', type: reverseType, char: this.lastFind.char, count };
+        }
+        return { action: 'noop' };
 
       // Page navigation
       case '\x04': // Ctrl+D
@@ -728,6 +770,14 @@ class InputRouter {
       return { action: 'noop' };
     }
 
+    // Handle pending find (f/F/t/T waiting for character)
+    if (this.pendingFind) {
+      const findType = this.pendingFind;
+      this.pendingFind = null;
+      this.lastFind = { type: findType, char: data };
+      return { action: 'extend_find_char', type: findType, char: data, count: parseInt(this.pendingCount) || 1, line: isLine };
+    }
+
     // Numeric prefix for counts
     if (data >= '0' && data <= '9' && (this.pendingCount || data !== '0')) {
       this.pendingCount += data;
@@ -756,6 +806,33 @@ class InputRouter {
       case '0': return { action: isLine ? 'noop' : 'extend_line_start' };
       case '$': return { action: isLine ? 'noop' : 'extend_line_end' };
       case '^': return { action: isLine ? 'noop' : 'extend_first_nonblank' };
+
+      // Character find (f/F/t/T)
+      case 'f':
+        this.pendingFind = 'f';
+        return { action: 'await_char', find: 'f' };
+      case 'F':
+        this.pendingFind = 'F';
+        return { action: 'await_char', find: 'F' };
+      case 't':
+        this.pendingFind = 't';
+        return { action: 'await_char', find: 't' };
+      case 'T':
+        this.pendingFind = 'T';
+        return { action: 'await_char', find: 'T' };
+
+      // Repeat last find
+      case ';':
+        if (this.lastFind) {
+          return { action: 'extend_find_char', type: this.lastFind.type, char: this.lastFind.char, count, line: isLine };
+        }
+        return { action: 'noop' };
+      case ',':
+        if (this.lastFind) {
+          const reverseType = { f: 'F', F: 'f', t: 'T', T: 't' }[this.lastFind.type];
+          return { action: 'extend_find_char', type: reverseType, char: this.lastFind.char, count, line: isLine };
+        }
+        return { action: 'noop' };
 
       // Page navigation while selecting
       case '\x04': return { action: 'extend_half_page', dir: 'down', line: isLine };
