@@ -106,6 +106,15 @@ class Agent {
     return buffer.baseY + buffer.cursorY + 1;
   }
 
+  getCursorPosition() {
+    const buffer = this.getBuffer();
+    if (!buffer) return null;
+    return {
+      line: buffer.baseY + buffer.cursorY,
+      col: buffer.cursorX
+    };
+  }
+
   getLine(index) {
     const buffer = this.getBuffer();
     if (!buffer || index < 0 || index >= buffer.length) return '';

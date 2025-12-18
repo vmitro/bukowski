@@ -425,6 +425,7 @@ process.on('SIGCONT', () => {
 
   // Create compositor
   const compositor = new Compositor(session, layoutManager, tabBar, chatPane, conversationList, overlayManager);
+  compositor.startCursorBlink();
 
   // Wire up global references for signal handlers
   activeSession = session;

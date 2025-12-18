@@ -16,6 +16,23 @@ class Compositor {
     this.drawScheduled = false;     // Throttle like index.js scheduleDraw()
     this.searchState = null; // Will be set from multi.js
     this.visualState = null; // Will be set from multi.js - {mode, visualAnchor, visualCursor}
+    this.cursorBlinkVisible = true;
+    this.cursorBlinkInterval = null;
+  }
+
+  startCursorBlink() {
+    if (this.cursorBlinkInterval) return;
+    this.cursorBlinkInterval = setInterval(() => {
+      this.cursorBlinkVisible = !this.cursorBlinkVisible;
+      this.scheduleDraw();
+    }, 530);
+  }
+
+  stopCursorBlink() {
+    if (this.cursorBlinkInterval) {
+      clearInterval(this.cursorBlinkInterval);
+      this.cursorBlinkInterval = null;
+    }
   }
 
   /**
@@ -281,6 +298,14 @@ class Compositor {
           if (this.visualState?.mode === 'normal' && this.visualState.normalCursor) {
             if (bufferLine === this.visualState.normalCursor.line) {
               lineContent = this.insertCursorMarker(lineContent, plainLine, this.visualState.normalCursor.col);
+            }
+          }
+
+          // Insert mode: show agent's actual cursor (blinking)
+          if ((!this.visualState || this.visualState.mode === 'insert') && this.cursorBlinkVisible) {
+            const cursorPos = agent.getCursorPosition();
+            if (cursorPos && bufferLine === cursorPos.line) {
+              lineContent = this.insertCursorMarker(lineContent, plainLine, cursorPos.col);
             }
           }
         }
