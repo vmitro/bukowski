@@ -2,10 +2,10 @@
   "name": "bukowski",
   "version": "1.1.0",
   "description": "Multi-agent terminal orchestration for LLM coding assistants",
-  "main": "index.js",
+  "main": "multi.js",
   "bin": {
-    "bukowski": "./index.js",
-    "bukowski-multi": "./multi.js"
+    "bukowski": "./multi.js",
+    "bukowski-single": "./single.js"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"

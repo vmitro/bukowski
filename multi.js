@@ -153,12 +153,15 @@ function parseArgs() {
   const result = {
     restore: null,       // Session ID/name to restore, or 'latest'
     sessionName: null,   // New session name
+    single: false,       // Single-pane mode (legacy)
     agentArgs: []        // Args to pass to initial agent
   };
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '--restore' || arg === '--resume' || arg === '-r') {
+    if (arg === '--single' || arg === '-1') {
+      result.single = true;
+    } else if (arg === '--restore' || arg === '--resume' || arg === '-r') {
       // Check if next arg exists and is not a flag
       const nextArg = args[i + 1];
       if (nextArg && !nextArg.startsWith('-')) {
@@ -179,6 +182,7 @@ function parseArgs() {
 Usage: bukowski [options] [-- agent-args...]
 
 Options:
+  -1, --single             Single-pane mode (legacy, no splits)
   -r, --restore [id|name]  Restore a saved session (default: latest)
       --resume             Alias for --restore
   -s, --session <name>     Set session name
@@ -192,7 +196,8 @@ Session Commands (in normal mode, type :):
   :name <name>             Rename current session
 
 Examples:
-  bukowski                           Start new session
+  bukowski                           Start new session (multi-pane)
+  bukowski --single                  Start single-pane mode
   bukowski --restore                 Restore most recent session
   bukowski --restore myproject       Restore session named "myproject"
   bukowski -s "My Project"           Start new session with name
@@ -210,6 +215,18 @@ Examples:
 }
 
 const cliArgs = parseArgs();
+
+// Single-pane mode: exec single.js and exit
+if (cliArgs.single) {
+  const singlePath = path.join(__dirname, 'single.js');
+  const { spawnSync } = require('child_process');
+  const result = spawnSync(process.execPath, [singlePath, ...cliArgs.agentArgs], {
+    stdio: 'inherit',
+    cwd: process.cwd(),
+    env: process.env
+  });
+  process.exit(result.status || 0);
+}
 
 // Cleanup function - exit alt screen, restore cursor, disable mouse
 function cleanup() {
