@@ -535,6 +535,9 @@ class MCPServer extends EventEmitter {
     if (queue.length > 100) {
       queue.shift();
     }
+
+    // Send notification to the agent
+    this.notifyNewMessage(agentId, message);
   }
 
   /**
@@ -601,6 +604,60 @@ class MCPServer extends EventEmitter {
       error: { code, message }
     }) + '\n';
     socket.write(response);
+  }
+
+  /**
+   * Find the socket for a given agent ID
+   * @private
+   */
+  _findSocketForAgent(agentId) {
+    // Check session agents (via clients map)
+    for (const [socket, state] of this.clients) {
+      if (state.agentId === agentId) {
+        return socket;
+      }
+    }
+    // Check external agents
+    const external = this.externalAgents.get(agentId);
+    if (external?.socket) {
+      return external.socket;
+    }
+    return null;
+  }
+
+  /**
+   * Send MCP notification to a socket
+   * @private
+   */
+  _sendNotification(socket, method, params) {
+    if (!socket || socket.destroyed) return;
+    const notification = JSON.stringify({
+      jsonrpc: '2.0',
+      method,
+      params
+    }) + '\n';
+    try {
+      socket.write(notification);
+    } catch (err) {
+      // Socket might be closed, ignore
+    }
+  }
+
+  /**
+   * Notify an agent that they have a new message
+   * @param {string} agentId
+   * @param {Object} message - The FIPA message
+   */
+  notifyNewMessage(agentId, message) {
+    const socket = this._findSocketForAgent(agentId);
+    if (socket) {
+      this._sendNotification(socket, 'notifications/message', {
+        agentId,
+        from: message.sender?.name || 'unknown',
+        performative: message.performative,
+        preview: (message.content || '').substring(0, 100)
+      });
+    }
   }
 }
 
