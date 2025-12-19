@@ -32,9 +32,9 @@ class Agent {
 
     this.spawnedAt = Date.now();
 
-    // Use large virtual terminal (like index.js) to reduce scroll churn
-    // The pane height determines the viewport, not the terminal rows
-    const virtualRows = parseInt(process.env.BUKOWSKI_ROWS) || 500;
+    // Use pane height as virtual terminal size (agents adapt output to fit)
+    // BUKOWSKI_ROWS env var can override for testing
+    const virtualRows = parseInt(process.env.BUKOWSKI_ROWS) || rows;
 
     this.terminal = new Terminal({
       cols,
@@ -88,9 +88,8 @@ class Agent {
   }
 
   resize(cols, rows) {
-    // Keep virtual rows constant (like index.js), only resize columns
-    // The pane height is used by Compositor for viewport calculation
-    const virtualRows = parseInt(process.env.BUKOWSKI_ROWS) || 500;
+    // Use pane height as virtual terminal size
+    const virtualRows = parseInt(process.env.BUKOWSKI_ROWS) || rows;
     if (this.pty) this.pty.resize(cols, virtualRows);
     if (this.terminal) this.terminal.resize(cols, virtualRows);
   }

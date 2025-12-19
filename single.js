@@ -65,7 +65,7 @@ showSplash();
 class Viewport {
   constructor() {
     const cols = process.stdout.columns || 80;
-    const rows = parseInt(process.env.BUKOWSKI_ROWS) || 500;  // Virtual terminal height
+    const rows = parseInt(process.env.BUKOWSKI_ROWS) || (process.stdout.rows || 24);
 
     this.term = new Terminal({
       cols,
@@ -530,7 +530,7 @@ process.on('exit', cleanup);
 
 // Delay startup to show splash
 const SPLASH_DURATION = 2000;  // 2 seconds
-const VIRTUAL_ROWS = parseInt(process.env.BUKOWSKI_ROWS) || 500;
+const VIRTUAL_ROWS = parseInt(process.env.BUKOWSKI_ROWS) || (process.stdout.rows || 24);
 
 setTimeout(() => {
   const vp = new Viewport();
