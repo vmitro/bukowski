@@ -189,6 +189,25 @@ class MCPServer extends EventEmitter {
   }
 
   /**
+   * Get tools list with dynamic pending message count for agent
+   * @private
+   */
+  _getToolsForAgent(agentId) {
+    const pendingCount = (this.messageQueues.get(agentId) || []).length;
+
+    // Return tools with dynamic description for get_pending_messages
+    return this.tools.map(tool => {
+      if (tool.name === 'get_pending_messages' && pendingCount > 0) {
+        return {
+          ...tool,
+          description: `Get pending FIPA messages for this agent (${pendingCount} pending)`
+        };
+      }
+      return tool;
+    });
+  }
+
+  /**
    * Get socket path for this server
    */
   getSocketPath() {
@@ -338,7 +357,7 @@ class MCPServer extends EventEmitter {
         clientState.agentId = assignedId;
         this._sendResult(socket, id, {
           protocolVersion: '2024-11-05',
-          capabilities: { tools: {} },
+          capabilities: { tools: { listChanged: true } },
           serverInfo: { name: 'bukowski-mcp', version: '1.0.0' },
           assignedAgentId: assignedId
         });
@@ -346,7 +365,7 @@ class MCPServer extends EventEmitter {
       }
 
       case 'tools/list':
-        this._sendResult(socket, id, { tools: this.tools });
+        this._sendResult(socket, id, { tools: this._getToolsForAgent(clientState.agentId) });
         break;
 
       case 'tools/call':
@@ -645,18 +664,15 @@ class MCPServer extends EventEmitter {
 
   /**
    * Notify an agent that they have a new message
+   * Uses tools/list_changed notification - clients will re-fetch tools
    * @param {string} agentId
    * @param {Object} message - The FIPA message
    */
   notifyNewMessage(agentId, message) {
     const socket = this._findSocketForAgent(agentId);
     if (socket) {
-      this._sendNotification(socket, 'notifications/message', {
-        agentId,
-        from: message.sender?.name || 'unknown',
-        performative: message.performative,
-        preview: (message.content || '').substring(0, 100)
-      });
+      // Send standard MCP notification that clients know how to handle
+      this._sendNotification(socket, 'notifications/tools/list_changed', {});
     }
   }
 }
