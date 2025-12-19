@@ -106,7 +106,9 @@ class Agent {
   getContentHeight() {
     const buffer = this.getBuffer();
     if (!buffer) return 0;
-    return buffer.baseY + buffer.cursorY + 1;
+    // Use buffer.length to include content below cursor (e.g., Codex status line)
+    // buffer.length = baseY + number of visible rows with content
+    return buffer.length;
   }
 
   getCursorPosition() {
