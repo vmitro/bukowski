@@ -18,6 +18,17 @@ class Compositor {
     this.visualState = null; // Will be set from multi.js - {mode, visualAnchor, visualCursor}
     this.cursorBlinkVisible = true;
     this.cursorBlinkInterval = null;
+
+    // Resize state machine - single source of truth for resize handling
+    // Phases: 'idle' | 'cached' | 'reflowing'
+    //   idle     - normal operation, live rendering from xterm.js
+    //   cached   - using cached frames during resize debounce (prevents ugly-wrap)
+    //   reflowing - waiting for agent output to stabilize after SIGWINCH
+    this.resizePhase = 'idle';
+
+    // Resize data (only valid when resizePhase !== 'idle')
+    this.resizeCache = new Map();  // paneId -> { scrollY, atBottom }
+    this.frameCache = new Map();   // paneId -> { lines: string[], width: number }
   }
 
   startCursorBlink() {
@@ -50,11 +61,15 @@ class Compositor {
       this.drawScheduled = true;
       setTimeout(() => {
         this.drawScheduled = false;
-        if (this.followTail.get(this.layoutManager.focusedPaneId) !== false) {
-          this.scrollFocusedToBottom();
+        // Skip auto-scroll during resize phases
+        // Positions will be restored after resize completes
+        if (this.resizePhase === 'idle') {
+          if (this.followTail.get(this.layoutManager.focusedPaneId) !== false) {
+            this.scrollFocusedToBottom();
+          }
+          // Also update other panes that are following tail
+          this.updateFollowTailScrolls();
         }
-        // Also update other panes that are following tail
-        this.updateFollowTailScrolls();
         this.draw();
       }, 16);
     }
@@ -95,7 +110,11 @@ class Compositor {
     }
   }
 
-  resize(cols, rows) {
+  /**
+   * Update compositor and layout bounds only (no scroll caching)
+   * Used for two-phase resize: update bounds → draw cropped → reflow → draw final
+   */
+  updateBounds(cols, rows) {
     this.cols = cols;
     this.rows = rows;
     // Reserve: 1 row for tab bar, 1 row for status bar
@@ -103,9 +122,118 @@ class Compositor {
   }
 
   /**
+   * Cache scroll positions before terminal reflow
+   * Call this AFTER updateBounds but BEFORE agent.resize()
+   */
+  cacheScrollPositions() {
+    for (const pane of this.layoutManager.getAllPanes()) {
+      const scrollY = this.scrollOffsets.get(pane.id) || 0;
+      const agent = this.session.getAgent(pane.agentId);
+      if (agent) {
+        const contentHeight = agent.getContentHeight();
+        const maxScroll = Math.max(0, contentHeight - pane.bounds.height);
+        // Only detect atBottom when there's scrollable content
+        // Otherwise preserve current followTail state
+        const currentFollowTail = this.followTail.get(pane.id);
+        const atBottom = maxScroll > 0
+          ? (scrollY >= maxScroll - 1)
+          : (currentFollowTail !== false);
+
+        this.resizeCache.set(pane.id, { scrollY, atBottom });
+      }
+    }
+  }
+
+  /**
+   * Combined resize (for backward compatibility)
+   */
+  resize(cols, rows) {
+    this.cacheScrollPositions();
+    this.updateBounds(cols, rows);
+  }
+
+  /**
+   * Restore scroll positions after resize/reflow
+   * Uses cached state to preserve user's scroll position
+   */
+  restoreScrollPositions() {
+    for (const [paneId, cached] of this.resizeCache) {
+      const pane = this.layoutManager.findPane(paneId);
+      if (!pane) continue;
+
+      const agent = this.session.getAgent(pane.agentId);
+      if (!agent) continue;
+
+      const contentHeight = agent.getContentHeight();
+      const newMaxScroll = Math.max(0, contentHeight - pane.bounds.height);
+
+      if (cached.atBottom) {
+        // Was following tail → stay at bottom
+        this.scrollOffsets.set(paneId, newMaxScroll);
+        this.followTail.set(paneId, true);
+      } else {
+        // Was scrolled up → preserve position (clamped to valid range)
+        const newScrollY = Math.min(cached.scrollY, newMaxScroll);
+        this.scrollOffsets.set(paneId, Math.max(0, newScrollY));
+        this.followTail.set(paneId, false);
+      }
+    }
+
+    this.resizeCache.clear();
+  }
+
+  /**
+   * Capture current visible frames for all panes (true double-buffering)
+   * Call this BEFORE any resize to snapshot current display
+   */
+  captureFrames() {
+    for (const pane of this.layoutManager.getAllPanes()) {
+      const agent = this.session.getAgent(pane.agentId);
+      if (!agent) continue;
+
+      const { width, height } = pane.bounds;
+      const scrollY = this.scrollOffsets.get(pane.id) || 0;
+      const contentHeight = agent.getContentHeight();
+
+      // Capture visible lines
+      const lines = [];
+      for (let row = 0; row < height; row++) {
+        const bufferLine = scrollY + row;
+        if (bufferLine < contentHeight) {
+          lines.push(agent.getLine(bufferLine));
+        } else {
+          lines.push('');  // Empty line beyond content
+        }
+      }
+
+      this.frameCache.set(pane.id, { lines, width });
+    }
+    this.resizePhase = 'cached';
+  }
+
+  /**
+   * Transition to 'reflowing' phase (after SIGWINCH sent, waiting for output to stabilize)
+   */
+  startReflowing() {
+    this.resizePhase = 'reflowing';
+  }
+
+  /**
+   * Clear frame cache and return to live rendering (idle phase)
+   */
+  clearFrameCache() {
+    this.frameCache.clear();
+    this.resizePhase = 'idle';
+  }
+
+  /**
    * Main draw function - renders directly like index.js
    */
   draw() {
+    // During 'reflowing' phase, skip draws to avoid showing intermediate states
+    // (agents are processing SIGWINCH and producing transitional output)
+    if (this.resizePhase === 'reflowing') return;
+
     const mode = this.inputRouter?.getMode();
 
     if (mode === 'chat') {
@@ -256,18 +384,39 @@ class Compositor {
    * Render a single pane's content (like index.js draw())
    */
   renderPaneContent(pane, isFocused) {
+    const { x, y, width, height } = pane.bounds;
+
+    // TRUE DOUBLE-BUFFERING: During 'cached' phase, render from cached frame
+    // This prevents "ugly-wrap" artifacts from reading xterm.js mid-reflow
+    if (this.resizePhase === 'cached') {
+      const cached = this.frameCache.get(pane.id);
+      if (cached) {
+        let result = '';
+        for (let row = 0; row < height; row++) {
+          const screenY = y + row + 1;
+          result += `\x1b[${screenY};${x + 1}H`;
+
+          // Get cached line (or empty if beyond cached content)
+          const lineContent = row < cached.lines.length ? cached.lines[row] : '';
+
+          // Crop or pad cached line to new width
+          result += this.fitToWidth(lineContent, width);
+        }
+        return result;
+      }
+    }
+
     const agent = this.session.getAgent(pane.agentId);
     if (!agent) return '';
 
-    const { x, y, width, height } = pane.bounds;
     let scrollY = this.scrollOffsets.get(pane.id) || 0;
     const contentHeight = agent.getContentHeight();
     const maxScroll = Math.max(0, contentHeight - height);
 
-    // Clamp scroll
+    // Clamp scroll locally for render only - don't modify state during render
+    // (state modification during render causes race conditions / visual flicker)
     if (scrollY > maxScroll) {
       scrollY = maxScroll;
-      this.scrollOffsets.set(pane.id, scrollY);
     }
 
     let result = '';

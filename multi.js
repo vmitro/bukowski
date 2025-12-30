@@ -98,6 +98,8 @@ Available tools (via MCP):
 When you're unsure about something outside your expertise, consider asking another agent.`;
 
 // Agent type configurations
+const FIPA_REMINDER_INLINE = FIPA_REMINDER.replace(/\n+/g, '. ');
+
 const AGENT_TYPES = {
   claude: {
     command: 'node',
@@ -120,7 +122,8 @@ const AGENT_TYPES = {
   },
   gemini: {
     command: 'gemini',
-    args: [],
+    // Use interactive prompt mode so Gemini doesn't default to one-shot.
+    args: ['-i', FIPA_REMINDER_INLINE],
     name: 'Gemini',
     promptFlag: null,  // Gemini uses positional arg - skip for now
     getResumeArgs: (sessionId) => sessionId
@@ -137,7 +140,14 @@ const AGENT_TYPES = {
  */
 function getFIPAPromptArgs(agentType, existingArgs) {
   const config = AGENT_TYPES[agentType];
-  if (!config || !config.promptFlag) return [];
+  if (!config) return [];
+
+  if (agentType === 'gemini') {
+    // Gemini uses positional prompts; skip injection to avoid CLI incompatibility.
+    return [];
+  }
+
+  if (!config.promptFlag) return [];
 
   // Don't inject if user already provided this flag
   if (existingArgs.includes(config.promptFlag)) {
@@ -865,22 +875,75 @@ process.on('SIGCONT', () => {
     agent.write(entry.content);
   }
 
+  // Debounce timer for terminal resize (prevents flooding agents with SIGWINCH)
+  let terminalResizeTimer = null;
+
+  // Smart reflow detection - wait for output to stabilize instead of fixed timeout
+  let reflowSilenceTimer = null;
+  let reflowMaxTimer = null;
+  const REFLOW_SILENCE_MS = 20;   // Consider reflow complete after 20ms of no output
+  const REFLOW_MAX_MS = 100;      // Max wait in case agent produces no output
+
+  function onReflowComplete() {
+    if (compositor.resizePhase !== 'reflowing') return;
+
+    clearTimeout(reflowSilenceTimer);
+    clearTimeout(reflowMaxTimer);
+    reflowSilenceTimer = null;
+    reflowMaxTimer = null;
+
+    compositor.restoreScrollPositions();
+    compositor.clearFrameCache();  // Also sets resizePhase = 'idle'
+    compositor.draw();
+  }
+
+  function onAgentOutputDuringReflow() {
+    if (compositor.resizePhase !== 'reflowing') return;
+    // Reset silence timer - agent is still producing output
+    clearTimeout(reflowSilenceTimer);
+    reflowSilenceTimer = setTimeout(onReflowComplete, REFLOW_SILENCE_MS);
+  }
+
   // Handle terminal resize
   function handleResize() {
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
-    compositor.resize(cols, rows);
 
-    // Resize all agents
-    for (const pane of layoutManager.getAllPanes()) {
-      const agent = session.getAgent(pane.agentId);
-      if (agent && agent.pty) {
-        agent.resize(pane.bounds.width, pane.bounds.height);
-      }
+    // At START of resize sequence: capture current frames AND scroll positions
+    // This is TRUE double-buffering - we show cached frames during resize
+    if (compositor.resizePhase === 'idle') {
+      compositor.captureFrames();       // Snapshot current display (sets phase='cached')
+      compositor.cacheScrollPositions(); // Remember scroll state
     }
 
-    // Redraw with new dimensions
-    compositor.draw();
+    // Update bounds and draw from CACHED frames (cropped/padded)
+    // NOT reading from xterm.js - avoids ugly-wrap artifacts
+    compositor.updateBounds(cols, rows);
+    compositor.draw();  // Uses frameCache, not live xterm content
+
+    // Debounce actual terminal resize (SIGWINCH to agents)
+    // This prevents Claude from redrawing dozens of times during mousewheel resize
+    clearTimeout(terminalResizeTimer);
+    terminalResizeTimer = setTimeout(() => {
+      terminalResizeTimer = null;
+
+      // Transition to 'reflowing' phase - skip draws during SIGWINCH processing
+      compositor.startReflowing();
+
+      // Now resize all terminals (triggers reflow + SIGWINCH)
+      for (const pane of layoutManager.getAllPanes()) {
+        const agent = session.getAgent(pane.agentId);
+        if (agent && agent.pty) {
+          agent.resize(pane.bounds.width, pane.bounds.height);
+        }
+      }
+
+      // Smart reflow detection: wait for agent output to stabilize
+      // Max timeout fallback (in case agent produces no output)
+      reflowMaxTimer = setTimeout(onReflowComplete, REFLOW_MAX_MS);
+      // Start silence timer (will be reset by agent output)
+      reflowSilenceTimer = setTimeout(onReflowComplete, REFLOW_SILENCE_MS);
+    }, 100);  // Wait 100ms after last resize event
   }
 
   // Execute ex-command
@@ -1164,9 +1227,20 @@ process.on('SIGCONT', () => {
     if (!agent.pty) return;
 
     // Connect data handler to scheduleDraw for proper throttled rendering
-    agent.pty.onData(() => compositor.scheduleDraw());
+    agent.pty.onData(() => {
+      onAgentOutputDuringReflow();  // Smart reflow detection
+      compositor.scheduleDraw();
+    });
 
     agent.pty.onExit(({ exitCode }) => {
+      if (exitCode !== 0) {
+        // Keep the pane open on errors so the user can see the failure.
+        const msg = `\r\n\x1b[31m[process exited with code ${exitCode}]\x1b[0m\r\n`;
+        agent.terminal?.write(msg);
+        compositor.scheduleDraw();
+        return;
+      }
+
       // Find and close the pane for this agent
       const pane = layoutManager.findPaneByAgent(agent.id);
       if (pane) {
@@ -2432,7 +2506,10 @@ process.on('SIGCONT', () => {
   // Render on agent output - use scheduleDraw for throttled drawing (like index.js)
   for (const agent of session.getAllAgents()) {
     if (agent.pty) {
-      agent.pty.onData(() => compositor.scheduleDraw());
+      agent.pty.onData(() => {
+        onAgentOutputDuringReflow();  // Smart reflow detection
+        compositor.scheduleDraw();
+      });
     }
   }
 
