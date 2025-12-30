@@ -19,13 +19,15 @@ npm link  # optional, makes `bukowski` available globally
 node multi.js          # or `bukowski` if linked
 ```
 
-**Input modes**: insert (default), normal, visual, search, command
+**Input modes**: insert (default), normal, visual, search, command, chat
 **Prefix key**: `Ctrl+Space` followed by:
 - `w` - layout operations (split, resize, zoom, close)
 - `a` - IPC operations
 - `f` - FIPA ACL messaging
+- `c` - chat mode (full-screen inter-agent messaging)
 
 **Navigation**: vim-style (`hjkl`, `gg`, `G`, `/` search)
+**Mouse**: scroll wheel, `Ctrl+scroll` vertical resize, `Alt+scroll` horizontal resize
 
 ## Limitations
 
