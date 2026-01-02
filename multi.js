@@ -7,6 +7,7 @@ const { execSync } = require('child_process');
 
 const { Session } = require('./src/core/Session');
 const { Agent } = require('./src/core/Agent');
+const { ChatAgent } = require('./src/core/ChatAgent');
 const { LayoutManager } = require('./src/layout/LayoutManager');
 const { Compositor } = require('./src/core/Compositor');
 const { InputRouter } = require('./src/input/InputRouter');
@@ -15,6 +16,7 @@ const { FIPAHub } = require('./src/acl/FIPAHub');
 const { TabBar } = require('./src/ui/TabBar');
 const { ChatPane } = require('./src/ui/ChatPane');
 const { ConversationList } = require('./src/ui/ConversationList');
+const { ConversationPicker } = require('./src/ui/ConversationPicker');
 const { LayoutNode } = require('./src/layout/LayoutNode');
 const { RegisterManager } = require('./src/input/RegisterManager');
 const { findLatestSession } = require('./src/utils/agentSessions');
@@ -409,14 +411,20 @@ process.on('SIGCONT', () => {
   const mcpServer = new MCPServer(session, fipaHub, ipcHub);
   try {
     const socketPath = await mcpServer.start();
+
+    // Set socket path in process.env so spawned agents inherit it
+    // This ensures agents connect to THIS instance's MCP server, not another instance's
+    process.env.BUKOWSKI_MCP_SOCKET = socketPath;
+
     // Wire FIPAHub messages to MCP message queue (for external agents)
     fipaHub.on('fipa:sent', ({ message, to }) => {
+      console.error(`[FIPA] Message queued: ${message.sender?.name} -> ${to} (${message.performative})`);
       if (to) {
         mcpServer.queueMessage(to, message);
       }
     });
 
-    // Write socket path to discovery file for MCP bridge
+    // Write socket path to discovery file for MCP bridge (fallback for external tools)
     try {
       fs.writeFileSync(SOCKET_DISCOVERY_FILE, socketPath, 'utf-8');
     } catch {
@@ -883,6 +891,8 @@ process.on('SIGCONT', () => {
   let reflowMaxTimer = null;
   const REFLOW_SILENCE_MS = 20;   // Consider reflow complete after 20ms of no output
   const REFLOW_MAX_MS = 100;      // Max wait in case agent produces no output
+  let outputSilenceMs = parseInt(process.env.BUKOWSKI_OUTPUT_SILENCE_DURATION, 10) || 16;
+  const outputTimers = new Map();
 
   function onReflowComplete() {
     if (compositor.resizePhase !== 'reflowing') return;
@@ -958,8 +968,8 @@ process.on('SIGCONT', () => {
   }
 
   // Capture agent session IDs from filesystem before saving
-  // Always recapture - user might have run /resume inside the agent
-  // Track already-assigned IDs to avoid giving same session to multiple agents
+  // Only capture for agents that don't already have a session ID
+  // (Prevents overwriting with wrong session when multiple bukowski instances are running)
   async function captureAgentSessions() {
     const cwd = process.cwd();
     const assignedIds = new Set();
@@ -968,6 +978,13 @@ process.on('SIGCONT', () => {
     const agents = session.getAllAgents().sort((a, b) => (a.spawnedAt || 0) - (b.spawnedAt || 0));
 
     for (const agent of agents) {
+      // If agent already has a session ID, preserve it and add to exclusion set
+      if (agent.agentSessionId) {
+        assignedIds.add(agent.agentSessionId);
+        continue;
+      }
+
+      // Only capture for agents without an existing session ID
       if (agent.spawnedAt) {
         try {
           const sessionId = await findLatestSession(agent.type, cwd, agent.spawnedAt, assignedIds);
@@ -1045,6 +1062,40 @@ process.on('SIGCONT', () => {
         if (agentType) {
           const extraArgs = args.slice(1);
           handleAction({ action: 'split_vertical', agentType, extraArgs });
+        }
+        break;
+      }
+
+      case 'set': {
+        // :set key=value (runtime tuning)
+        if (!args.length) break;
+        const assignment = args.join(' ');
+        let key;
+        let value;
+        if (assignment.includes('=')) {
+          const parts = assignment.split('=');
+          key = parts[0];
+          value = parts.slice(1).join('=');
+        } else {
+          key = args[0];
+          value = args[1];
+        }
+
+        key = (key || '').trim().toLowerCase();
+        value = (value || '').trim();
+        if (!key || !value) break;
+
+        if (['output_silence', 'output_silence_ms', 'output-silence', 'output_silence_duration'].includes(key)) {
+          const ms = Math.max(0, parseInt(value, 10));
+          if (!Number.isNaN(ms)) {
+            outputSilenceMs = ms;
+            process.env.BUKOWSKI_OUTPUT_SILENCE_DURATION = String(ms);
+          }
+        } else if (key === 'scrollback') {
+          const sb = Math.max(0, parseInt(value, 10));
+          if (!Number.isNaN(sb)) {
+            process.env.BUKOWSKI_SCROLLBACK = String(sb);
+          }
         }
         break;
       }
@@ -1226,10 +1277,37 @@ process.on('SIGCONT', () => {
   function setupAgentHandlers(agent) {
     if (!agent.pty) return;
 
-    // Connect data handler to scheduleDraw for proper throttled rendering
-    agent.pty.onData(() => {
-      onAgentOutputDuringReflow();  // Smart reflow detection
-      compositor.scheduleDraw();
+    // Coalesce PTY output to avoid mid-update flicker on wrapped content.
+    agent.pty.onData((data) => {
+      if (compositor.resizePhase === 'reflowing') {
+        onAgentOutputDuringReflow();  // Smart reflow detection
+        return;
+      }
+
+      const pane = layoutManager.findPaneByAgent(agent.id);
+      if (pane) {
+        // Detect full refresh sequences - these indicate major redraw
+        // \x1b[2J = clear screen, \x1b[H\x1b[J = cursor home + clear below
+        if (data.includes('\x1b[2J') || data.includes('\x1b[H\x1b[J')) {
+          compositor.enterOutputReflow(pane.id);
+        }
+
+        // Check for output reflow (large buffer churn near scrollback limit)
+        compositor.checkOutputReflow(pane.id, agent);
+
+        // Skip regular scheduling if this pane just entered output reflow
+        if (compositor.paneReflowPhases.get(pane.id) === 'reflowing') {
+          return;
+        }
+      }
+
+      const existing = outputTimers.get(agent.id);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(() => {
+        outputTimers.delete(agent.id);
+        compositor.scheduleDraw();
+      }, outputSilenceMs);
+      outputTimers.set(agent.id, timer);
     });
 
     agent.pty.onExit(({ exitCode }) => {
@@ -1256,7 +1334,9 @@ process.on('SIGCONT', () => {
           process.exit(exitCode);
         } else {
           // Close just this pane
+          const paneId = pane.id;
           layoutManager.closePane();
+          compositor.cleanupPane(paneId);  // Clear reflow timers and state
           session.removeAgent(agent.id);
           handleResize();
         }
@@ -1300,6 +1380,85 @@ process.on('SIGCONT', () => {
     return newAgent;
   }
 
+  // Pending chat split direction (set when conversation picker is shown)
+  let pendingChatSplit = null;
+
+  // Create a ChatAgent for a conversation and add it to a pane
+  function createChatPane(conversationId, splitDir = 'horizontal') {
+    // Create ChatAgent
+    const chatAgent = new ChatAgent(conversationId, fipaHub.conversations, fipaHub);
+    chatAgent.setAvailableAgents(session.getAllAgents().filter(a => a.type !== 'chat'));
+
+    // Add to session
+    session.addAgent(chatAgent);
+
+    // Create pane
+    let newPane;
+    if (splitDir === 'horizontal') {
+      newPane = layoutManager.splitHorizontal(chatAgent.id);
+    } else {
+      newPane = layoutManager.splitVertical(chatAgent.id);
+    }
+
+    if (newPane) {
+      chatAgent.resize(newPane.bounds.width, newPane.bounds.height);
+
+      // Listen for chat agent output
+      chatAgent.on('data', () => compositor.scheduleDraw());
+    }
+
+    handleResize();
+    return chatAgent;
+  }
+
+  // Show conversation picker overlay
+  function showConversationPicker(splitDir = 'horizontal') {
+    pendingChatSplit = splitDir;
+
+    const conversations = ConversationPicker.getConversationList(fipaHub.conversations);
+    const agents = session.getAllAgents().filter(a => a.type !== 'chat');
+
+    const cols = process.stdout.columns || 80;
+    const rows = process.stdout.rows || 24;
+    const overlayWidth = Math.min(50, cols - 4);
+    const overlayHeight = Math.min(conversations.length + 4, 15);
+
+    overlayManager.show({
+      id: 'conversation-picker',
+      type: 'conversation-picker',
+      x: Math.floor((cols - overlayWidth) / 2),
+      y: Math.floor((rows - overlayHeight) / 2),
+      width: overlayWidth,
+      height: overlayHeight,
+      title: 'Select Conversation',
+      conversations,
+      conversationManager: fipaHub.conversations,
+      agents
+    });
+
+    compositor.draw();
+  }
+
+  // Focus or create chat pane (for Ctrl+Space c)
+  function focusOrCreateChatPane() {
+    // Ensure we're not in legacy chat mode (pane-based now)
+    if (inputRouter.getMode() === 'chat') {
+      inputRouter.setMode('insert');
+    }
+
+    // Find existing chat panes
+    const chatPanes = layoutManager.getAllPanes().filter(p => p.agentId.startsWith('chat-'));
+
+    if (chatPanes.length > 0) {
+      // Focus the most recent chat pane
+      layoutManager.focusPane(chatPanes[chatPanes.length - 1].id);
+      compositor.draw();
+    } else {
+      // No chat panes - show conversation picker to create one
+      showConversationPicker('horizontal');
+    }
+  }
+
   // Handle input actions from InputRouter
   function handleAction(result) {
     const focusedPane = layoutManager.getFocusedPane();
@@ -1310,7 +1469,7 @@ process.on('SIGCONT', () => {
       case 'mode_change':
         if (result.mode === 'normal' && focusedAgent) {
           // Initialize normal cursor to agent's cursor position
-          const buffer = focusedAgent.getBuffer();
+          const buffer = focusedAgent.getBuffer?.();
           if (buffer) {
             vimState.normalCursor.line = buffer.baseY + buffer.cursorY;
             vimState.normalCursor.col = buffer.cursorX;
@@ -1327,6 +1486,11 @@ process.on('SIGCONT', () => {
           const prevMode = vimState.mode;
           enterVisualMode('vline', prevMode);
         }
+        break;
+
+      // Focus or create chat pane (Ctrl+Space c)
+      case 'focus_chat':
+        focusOrCreateChatPane();
         break;
 
       // Visual mode actions
@@ -1598,26 +1762,38 @@ process.on('SIGCONT', () => {
       case 'split_horizontal': {
         const agentType = result.agentType || 'claude';
         const extraArgs = result.extraArgs || [];
-        const newAgent = createNewAgent(agentType, extraArgs);
-        const newPane = layoutManager.splitHorizontal(newAgent.id);
-        if (newPane) {
-          newAgent.spawn(newPane.bounds.width, newPane.bounds.height);
-          setupAgentHandlers(newAgent);
+
+        if (agentType === 'chat') {
+          // Chat split - show conversation picker
+          showConversationPicker('horizontal');
+        } else {
+          const newAgent = createNewAgent(agentType, extraArgs);
+          const newPane = layoutManager.splitHorizontal(newAgent.id);
+          if (newPane) {
+            newAgent.spawn(newPane.bounds.width, newPane.bounds.height);
+            setupAgentHandlers(newAgent);
+          }
+          handleResize();
         }
-        handleResize();
         break;
       }
 
       case 'split_vertical': {
         const agentType = result.agentType || 'claude';
         const extraArgs = result.extraArgs || [];
-        const newAgent = createNewAgent(agentType, extraArgs);
-        const newPane = layoutManager.splitVertical(newAgent.id);
-        if (newPane) {
-          newAgent.spawn(newPane.bounds.width, newPane.bounds.height);
-          setupAgentHandlers(newAgent);
+
+        if (agentType === 'chat') {
+          // Chat split - show conversation picker
+          showConversationPicker('vertical');
+        } else {
+          const newAgent = createNewAgent(agentType, extraArgs);
+          const newPane = layoutManager.splitVertical(newAgent.id);
+          if (newPane) {
+            newAgent.spawn(newPane.bounds.width, newPane.bounds.height);
+            setupAgentHandlers(newAgent);
+          }
+          handleResize();
         }
-        handleResize();
         break;
       }
 
@@ -1625,8 +1801,10 @@ process.on('SIGCONT', () => {
       case 'close_pane': {
         const paneToClose = layoutManager.getFocusedPane();
         if (paneToClose) {
+          const paneId = paneToClose.id;
           const agentToKill = session.getAgent(paneToClose.agentId);
           if (layoutManager.closePane()) {
+            compositor.cleanupPane(paneId);  // Clear reflow timers and state
             if (agentToKill) {
               session.removeAgent(agentToKill.id);
             }
@@ -1966,62 +2144,48 @@ process.on('SIGCONT', () => {
         compositor.resetCursorBlink();
         break;
 
-      // FIPA Actions - set performative and switch to chat mode
+      // FIPA Actions - open chat pane with specific performative
       case 'fipa_request':
-        chatState.pendingPerformative = 'request';
-        inputRouter.setMode('chat');
-        compositor.draw();
-        break;
-
       case 'fipa_inform':
-        chatState.pendingPerformative = 'inform';
-        inputRouter.setMode('chat');
-        compositor.draw();
-        break;
-
       case 'fipa_query_if':
-        chatState.pendingPerformative = 'query-if';
-        inputRouter.setMode('chat');
-        compositor.draw();
-        break;
-
       case 'fipa_query_ref':
-        chatState.pendingPerformative = 'query-ref';
-        inputRouter.setMode('chat');
-        compositor.draw();
-        break;
-
       case 'fipa_cfp':
-        chatState.pendingPerformative = 'cfp';
-        inputRouter.setMode('chat');
-        compositor.draw();
-        break;
-
       case 'fipa_propose':
-        chatState.pendingPerformative = 'propose';
-        inputRouter.setMode('chat');
-        compositor.draw();
-        break;
-
       case 'fipa_agree':
-        chatState.pendingPerformative = 'agree';
-        inputRouter.setMode('chat');
-        compositor.draw();
-        break;
-
       case 'fipa_refuse':
-        chatState.pendingPerformative = 'refuse';
-        inputRouter.setMode('chat');
+      case 'fipa_subscribe': {
+        // Map action to performative
+        const perfMap = {
+          'fipa_request': 'request',
+          'fipa_inform': 'inform',
+          'fipa_query_if': 'query-if',
+          'fipa_query_ref': 'query-ref',
+          'fipa_cfp': 'cfp',
+          'fipa_propose': 'propose',
+          'fipa_agree': 'agree',
+          'fipa_refuse': 'refuse',
+          'fipa_subscribe': 'subscribe'
+        };
+        const performative = perfMap[result.action] || 'inform';
+
+        // Find or create chat pane
+        const chatPanes = layoutManager.getAllPanes().filter(p => p.agentId.startsWith('chat-'));
+        if (chatPanes.length > 0) {
+          // Focus existing chat pane and set performative
+          layoutManager.focusPane(chatPanes[chatPanes.length - 1].id);
+          const chatAgent = session.getAgent(chatPanes[chatPanes.length - 1].agentId);
+          if (chatAgent) chatAgent.performative = performative;
+        } else {
+          // Create new chat pane with this performative
+          showConversationPicker('horizontal');
+          // Store performative to apply after pane creation
+          chatState.pendingPerformative = performative;
+        }
         compositor.draw();
         break;
+      }
 
-      case 'fipa_subscribe':
-        chatState.pendingPerformative = 'subscribe';
-        inputRouter.setMode('chat');
-        compositor.draw();
-        break;
-
-      // Chat mode actions
+      // Chat mode actions (legacy - now handled by ChatAgent)
       case 'chat_char':
         chatState.inputBuffer += result.char;
         compositor.draw();
@@ -2498,6 +2662,49 @@ process.on('SIGCONT', () => {
       return;
     }
 
+    // Handle overlay input first (if overlay is active)
+    if (overlayManager.hasActiveOverlay()) {
+      const overlay = overlayManager.getFocused();
+      if (overlay && typeof overlay.handleInput === 'function') {
+        const result = overlay.handleInput(str);
+
+        if (result.action === 'conversation_new') {
+          // Start new conversation - create new one and open chat pane
+          overlayManager.hide(overlay.id);
+          const conversationId = fipaHub.conversations.createConversation?.() || Date.now().toString();
+          createChatPane(conversationId, pendingChatSplit || 'horizontal');
+          pendingChatSplit = null;
+          compositor.draw();
+          return;
+        }
+
+        if (result.action === 'conversation_select') {
+          // Select existing conversation
+          overlayManager.hide(overlay.id);
+          createChatPane(result.conversationId, pendingChatSplit || 'horizontal');
+          pendingChatSplit = null;
+          compositor.draw();
+          return;
+        }
+
+        if (result.action === 'picker_cancel') {
+          overlayManager.hide(overlay.id);
+          pendingChatSplit = null;
+          compositor.draw();
+          return;
+        }
+
+        if (result.action === 'picker_move') {
+          compositor.draw();
+          return;
+        }
+
+        // Other overlay actions just redraw
+        compositor.draw();
+        return;
+      }
+    }
+
     // Route input
     const result = inputRouter.handle(str);
     handleAction(result);
@@ -2506,8 +2713,18 @@ process.on('SIGCONT', () => {
   // Render on agent output - use scheduleDraw for throttled drawing (like index.js)
   for (const agent of session.getAllAgents()) {
     if (agent.pty) {
-      agent.pty.onData(() => {
+      agent.pty.onData((data) => {
         onAgentOutputDuringReflow();  // Smart reflow detection
+
+        const pane = layoutManager.findPaneByAgent(agent.id);
+        if (pane) {
+          // Detect full refresh sequences
+          if (data.includes('\x1b[2J') || data.includes('\x1b[H\x1b[J')) {
+            compositor.enterOutputReflow(pane.id);
+          }
+          compositor.checkOutputReflow(pane.id, agent);
+        }
+
         compositor.scheduleDraw();
       });
     }
@@ -2557,7 +2774,9 @@ process.on('SIGCONT', () => {
             session.destroy();
             process.exit(exitCode);
           } else {
+            const paneId = pane.id;
             layoutManager.closePane();
+            compositor.cleanupPane(paneId);  // Clear reflow timers and state
             session.removeAgent(agent.id);
             handleResize();
           }

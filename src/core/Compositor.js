@@ -13,6 +13,7 @@ class Compositor {
     this.rows = 24;
     this.scrollOffsets = new Map(); // paneId -> scrollY
     this.followTail = new Map();    // paneId -> boolean (whether to auto-scroll)
+    this.scrollAnchors = new Map(); // paneId -> linesFromBottom (viewport stability when scrolled up)
     this.drawScheduled = false;     // Throttle like index.js scheduleDraw()
     this.searchState = null; // Will be set from multi.js
     this.visualState = null; // Will be set from multi.js - {mode, visualAnchor, visualCursor}
@@ -29,6 +30,15 @@ class Compositor {
     // Resize data (only valid when resizePhase !== 'idle')
     this.resizeCache = new Map();  // paneId -> { scrollY, atBottom }
     this.frameCache = new Map();   // paneId -> { lines: string[], width: number }
+
+    // Per-pane output reflow state machine - gates rendering during large output bursts
+    // Prevents "infinite scroll" when xterm.js buffer is trimming old lines rapidly
+    // Per-pane so one churning agent doesn't freeze others
+    this.paneReflowPhases = new Map();   // paneId -> 'idle' | 'reflowing'
+    this.reflowTimers = new Map();       // paneId -> silence timer (40ms = stabilized)
+    this.reflowMaxTimers = new Map();    // paneId -> max timeout (200ms)
+    this.lastContentHeights = new Map();   // paneId -> lastHeight (for delta detection)
+    this.stableContentHeights = new Map(); // paneId -> stable height (for status bar)
   }
 
   startCursorBlink() {
@@ -55,23 +65,29 @@ class Compositor {
 
   /**
    * Schedule a throttled draw (exactly like index.js pattern)
+   * Default 33ms (~30 FPS) to reduce VS Code terminal scrollback accumulation
    */
   scheduleDraw() {
     if (!this.drawScheduled) {
       this.drawScheduled = true;
+      const frameInterval = parseInt(process.env.BUKOWSKI_FRAME_INTERVAL) || 33;
       setTimeout(() => {
         this.drawScheduled = false;
-        // Skip auto-scroll during resize phases
-        // Positions will be restored after resize completes
+        // Skip auto-scroll during resize phase
+        // For reflow, check per-pane in the scroll functions
         if (this.resizePhase === 'idle') {
-          if (this.followTail.get(this.layoutManager.focusedPaneId) !== false) {
-            this.scrollFocusedToBottom();
+          const focusedPaneId = this.layoutManager.focusedPaneId;
+          // Only auto-scroll focused pane if it's not reflowing
+          if (this.paneReflowPhases.get(focusedPaneId) !== 'reflowing') {
+            if (this.followTail.get(focusedPaneId) !== false) {
+              this.scrollFocusedToBottom();
+            }
           }
-          // Also update other panes that are following tail
+          // Also update other panes that are following tail (per-pane reflow check inside)
           this.updateFollowTailScrolls();
         }
         this.draw();
-      }, 16);
+      }, frameInterval);
     }
   }
 
@@ -86,7 +102,12 @@ class Compositor {
     const agent = this.session.getAgent(pane.agentId);
     if (!agent) return;
 
-    const contentHeight = agent.getContentHeight();
+    // Use stable height only during reflow to prevent scroll churn
+    // Otherwise use live height for accurate positioning
+    const isReflowing = this.paneReflowPhases.get(paneId) === 'reflowing';
+    const contentHeight = isReflowing
+      ? (this.stableContentHeights.get(paneId) || agent.getContentHeight())
+      : agent.getContentHeight();
     const maxScroll = Math.max(0, contentHeight - pane.bounds.height);
     this.scrollOffsets.set(paneId, maxScroll);
   }
@@ -99,10 +120,14 @@ class Compositor {
       const paneId = pane.id;
       if (paneId === this.layoutManager.focusedPaneId) continue; // Already handled
 
+      // Skip panes in reflow - don't update scroll while buffer is churning
+      if (this.paneReflowPhases.get(paneId) === 'reflowing') continue;
+
       if (this.followTail.get(paneId) !== false) {
         const agent = this.session.getAgent(pane.agentId);
         if (!agent) continue;
 
+        // Use live height - we already skip reflowing panes above
         const contentHeight = agent.getContentHeight();
         const maxScroll = Math.max(0, contentHeight - pane.bounds.height);
         this.scrollOffsets.set(paneId, maxScroll);
@@ -227,19 +252,129 @@ class Compositor {
   }
 
   /**
+   * Clean up all state for a closed pane
+   * Call this when removing a pane to prevent stale timers/maps
+   */
+  cleanupPane(paneId) {
+    // Clear reflow timers
+    const timer = this.reflowTimers.get(paneId);
+    const maxTimer = this.reflowMaxTimers.get(paneId);
+    if (timer) clearTimeout(timer);
+    if (maxTimer) clearTimeout(maxTimer);
+
+    // Clear all per-pane state
+    this.paneReflowPhases.delete(paneId);
+    this.reflowTimers.delete(paneId);
+    this.reflowMaxTimers.delete(paneId);
+    this.lastContentHeights.delete(paneId);
+    this.stableContentHeights.delete(paneId);
+    this.scrollOffsets.delete(paneId);
+    this.followTail.delete(paneId);
+    this.scrollAnchors.delete(paneId);
+    this.resizeCache.delete(paneId);
+    this.frameCache.delete(paneId);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // OUTPUT REFLOW DETECTION (PER-PANE)
+  // Prevents rendering during large output bursts (e.g., near scrollback limit)
+  // Per-pane so one churning agent doesn't freeze others
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Check if output reflow is occurring (large buffer churn)
+   * Call this on each PTY data event
+   */
+  checkOutputReflow(paneId, agent) {
+    const currentHeight = agent.getContentHeight();
+    const lastHeight = this.lastContentHeights.get(paneId) || currentHeight;
+    const delta = Math.abs(currentHeight - lastHeight);
+    const pane = this.layoutManager.findPane(paneId);
+    const threshold = pane ? pane.bounds.height : 50;
+
+    this.lastContentHeights.set(paneId, currentHeight);
+
+    // Large delta = buffer reflow in progress (trimming old lines + adding new)
+    if (delta > threshold) {
+      this.enterOutputReflow(paneId);
+    } else if (this.paneReflowPhases.get(paneId) === 'reflowing') {
+      // Small delta during reflow = reset silence timer
+      this.resetReflowTimer(paneId);
+    }
+
+    // Cache stable height when not reflowing
+    if (this.paneReflowPhases.get(paneId) !== 'reflowing') {
+      this.stableContentHeights.set(paneId, currentHeight);
+    }
+  }
+
+  /**
+   * Enter output reflow phase for a specific pane
+   */
+  enterOutputReflow(paneId) {
+    this.paneReflowPhases.set(paneId, 'reflowing');
+
+    // Clear any existing timers for this pane
+    const existingTimer = this.reflowTimers.get(paneId);
+    const existingMaxTimer = this.reflowMaxTimers.get(paneId);
+    if (existingTimer) clearTimeout(existingTimer);
+    if (existingMaxTimer) clearTimeout(existingMaxTimer);
+
+    // Silence timer: 40ms of no large output = stabilized
+    this.reflowTimers.set(paneId, setTimeout(() => this.exitOutputReflow(paneId), 40));
+
+    // Maximum timeout: never block for more than 200ms
+    this.reflowMaxTimers.set(paneId, setTimeout(() => this.exitOutputReflow(paneId), 200));
+  }
+
+  /**
+   * Reset the silence timer for a pane (called when small output continues during reflow)
+   */
+  resetReflowTimer(paneId) {
+    const existingTimer = this.reflowTimers.get(paneId);
+    if (existingTimer) clearTimeout(existingTimer);
+    this.reflowTimers.set(paneId, setTimeout(() => this.exitOutputReflow(paneId), 40));
+  }
+
+  /**
+   * Exit output reflow phase for a specific pane
+   */
+  exitOutputReflow(paneId) {
+    if (this.paneReflowPhases.get(paneId) !== 'reflowing') return;
+
+    this.paneReflowPhases.set(paneId, 'idle');
+
+    // Clear timers for this pane
+    const timer = this.reflowTimers.get(paneId);
+    const maxTimer = this.reflowMaxTimers.get(paneId);
+    if (timer) clearTimeout(timer);
+    if (maxTimer) clearTimeout(maxTimer);
+    this.reflowTimers.delete(paneId);
+    this.reflowMaxTimers.delete(paneId);
+
+    // Update stable height for this pane
+    const pane = this.layoutManager.findPane(paneId);
+    if (pane) {
+      const agent = this.session.getAgent(pane.agentId);
+      if (agent) {
+        this.stableContentHeights.set(paneId, agent.getContentHeight());
+      }
+    }
+
+    // Force redraw now that this pane's output is stable
+    this.draw();
+  }
+
+  /**
    * Main draw function - renders directly like index.js
    */
   draw() {
-    // During 'reflowing' phase, skip draws to avoid showing intermediate states
+    // During resize 'reflowing' phase, skip ALL draws to avoid showing intermediate states
     // (agents are processing SIGWINCH and producing transitional output)
+    // NOTE: Output reflow is now per-pane, handled in renderPaneContent()
     if (this.resizePhase === 'reflowing') return;
 
-    const mode = this.inputRouter?.getMode();
-
-    if (mode === 'chat') {
-      this.drawChat();
-      return;
-    }
+    // Note: Legacy fullscreen chat mode removed - chat now uses ChatAgent panes
 
     const panes = this.layoutManager.getAllPanes();
     const focusedPaneId = this.layoutManager.focusedPaneId;
@@ -409,12 +544,27 @@ class Compositor {
     const agent = this.session.getAgent(pane.agentId);
     if (!agent) return '';
 
-    let scrollY = this.scrollOffsets.get(pane.id) || 0;
-    const contentHeight = agent.getContentHeight();
+    // Use stable contentHeight during reflow to prevent scroll churn
+    // This is critical for anchor stability - live height oscillates during buffer trim
+    const isReflowing = this.paneReflowPhases.get(pane.id) === 'reflowing';
+    const contentHeight = isReflowing
+      ? (this.stableContentHeights.get(pane.id) || agent.getContentHeight())
+      : agent.getContentHeight();
     const maxScroll = Math.max(0, contentHeight - height);
 
-    // Clamp scroll locally for render only - don't modify state during render
-    // (state modification during render causes race conditions / visual flicker)
+    // Compute scrollY - use anchor (distance from bottom) for viewport stability
+    // when user is scrolled up, otherwise use stored offset
+    let scrollY;
+    const anchor = this.scrollAnchors.get(pane.id);
+    if (anchor !== undefined && this.followTail.get(pane.id) === false) {
+      // Maintain distance from bottom - viewport stays on same content
+      // Don't modify scrollOffsets here - state modification during render causes flicker
+      scrollY = Math.max(0, maxScroll - anchor);
+    } else {
+      scrollY = this.scrollOffsets.get(pane.id) || 0;
+    }
+
+    // Clamp scroll locally for render only
     if (scrollY > maxScroll) {
       scrollY = maxScroll;
     }
@@ -650,7 +800,9 @@ class Compositor {
 
     if (focusedPane && focusedAgent) {
       const scrollY = this.scrollOffsets.get(focusedPane.id) || 0;
-      const contentHeight = focusedAgent.getContentHeight();
+      // Use stable height to prevent oscillation during output reflow
+      const contentHeight = this.stableContentHeights.get(focusedPane.id)
+                         || focusedAgent.getContentHeight();
       const viewHeight = focusedPane.bounds.height;
       const maxScroll = Math.max(0, contentHeight - viewHeight);
 
@@ -886,7 +1038,16 @@ class Compositor {
     this.scrollOffsets.set(paneId, scrollY);
 
     // Update followTail like index.js
-    this.followTail.set(paneId, scrollY >= maxScroll);
+    const atBottom = scrollY >= maxScroll;
+    this.followTail.set(paneId, atBottom);
+
+    // Track scroll anchor (distance from bottom) for viewport stability
+    // When user is scrolled up, we maintain this distance as new content arrives
+    if (atBottom) {
+      this.scrollAnchors.delete(paneId);  // Clear anchor when at bottom
+    } else {
+      this.scrollAnchors.set(paneId, maxScroll - scrollY);  // Distance from bottom
+    }
 
     if (scrollY !== oldScroll) {
       this.draw();
@@ -911,14 +1072,19 @@ class Compositor {
     const agent = this.session.getAgent(pane.agentId);
     if (!agent) return;
 
+    const contentHeight = agent.getContentHeight();
+    const maxScroll = Math.max(0, contentHeight - pane.bounds.height);
+
     if (position === 'top') {
       this.scrollOffsets.set(paneId, 0);
       this.followTail.set(paneId, false);
+      // Set anchor to maintain position at top (full distance from bottom)
+      this.scrollAnchors.set(paneId, maxScroll);
     } else if (position === 'bottom') {
-      const contentHeight = agent.getContentHeight();
-      const maxScroll = Math.max(0, contentHeight - pane.bounds.height);
       this.scrollOffsets.set(paneId, maxScroll);
       this.followTail.set(paneId, true);
+      // Clear anchor when at bottom
+      this.scrollAnchors.delete(paneId);
     }
     this.draw();
   }
