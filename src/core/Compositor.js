@@ -30,6 +30,7 @@ class Compositor {
     // Resize data (only valid when resizePhase !== 'idle')
     this.resizeCache = new Map();  // paneId -> { scrollY, atBottom }
     this.frameCache = new Map();   // paneId -> { lines: string[], width: number }
+    this.paneFrameCache = new Map(); // paneId -> { lines: string[] }
 
     // Per-pane output reflow state machine - gates rendering during large output bursts
     // Prevents "infinite scroll" when xterm.js buffer is trimming old lines rapidly
@@ -552,6 +553,21 @@ class Compositor {
       : agent.getContentHeight();
     const maxScroll = Math.max(0, contentHeight - height);
 
+    // During output reflow, keep the previous frame for this pane.
+    if (isReflowing) {
+      const cached = this.paneFrameCache.get(pane.id);
+      if (!cached) return '';
+
+      let result = '';
+      for (let row = 0; row < height; row++) {
+        const screenY = y + row + 1;
+        result += `\x1b[${screenY};${x + 1}H`;
+        const lineContent = row < cached.lines.length ? cached.lines[row] : '';
+        result += this.fitToWidth(lineContent, width);
+      }
+      return result;
+    }
+
     // Compute scrollY - use anchor (distance from bottom) for viewport stability
     // when user is scrolled up, otherwise use stored offset
     let scrollY;
@@ -570,6 +586,7 @@ class Compositor {
     }
 
     let result = '';
+    const visibleLines = [];
 
     // Render visible lines (like index.js visible[] building)
     for (let row = 0; row < height; row++) {
@@ -617,10 +634,12 @@ class Compositor {
         }
       }
 
+      visibleLines.push(lineContent);
       // Truncate/pad to pane width and output
       result += this.fitToWidth(lineContent, width);
     }
 
+    this.paneFrameCache.set(pane.id, { lines: visibleLines });
     return result;
   }
 
