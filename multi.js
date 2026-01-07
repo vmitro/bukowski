@@ -1017,6 +1017,9 @@ process.on('SIGCONT', () => {
         const agent = session.getAgent(pane.agentId);
         if (agent && agent.pty) {
           agent.resize(pane.bounds.width, pane.bounds.height);
+        } else if (agent && agent.type === 'chat') {
+          // ChatAgent has no PTY but needs resize for text reflow
+          agent.resize(pane.bounds.width, pane.bounds.height);
         }
       }
 

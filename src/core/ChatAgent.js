@@ -32,7 +32,7 @@ class ChatAgent extends EventEmitter {
     this.plainLines = [];      // Plain text lines (for search)
     this.width = 80;
     this.showTimestamps = true;
-    this.maxNickWidth = 12;
+    this.maxNickWidth = 8;     // Dynamic: recalculated from participants
 
     // Message history for this conversation
     this.messages = [];
@@ -197,6 +197,9 @@ class ChatAgent extends EventEmitter {
     this.lines = [];
     this.plainLines = [];
 
+    // Calculate dynamic nick width from participants
+    this._updateNickWidth();
+
     // Header
     this._renderHeader();
 
@@ -207,6 +210,31 @@ class ChatAgent extends EventEmitter {
 
     // Input line
     this._renderInputLine();
+  }
+
+  /**
+   * Calculate max nick width from all participants + available agents
+   */
+  _updateNickWidth() {
+    let maxLen = 4; // minimum "user"
+
+    // From messages
+    for (const msg of this.messages) {
+      if (msg.sender && msg.sender.length > maxLen) {
+        maxLen = msg.sender.length;
+      }
+    }
+
+    // From available agents
+    const agents = this._getAvailableAgents();
+    for (const agent of agents) {
+      if (agent.id && agent.id.length > maxLen) {
+        maxLen = agent.id.length;
+      }
+    }
+
+    // Add padding, cap at reasonable max
+    this.maxNickWidth = Math.min(maxLen + 1, 16);
   }
 
   _renderHeader() {
@@ -226,9 +254,9 @@ class ChatAgent extends EventEmitter {
     const sender = msg.sender.slice(0, this.maxNickWidth).padEnd(this.maxNickWidth);
     const style = msg.style;
 
-    // Calculate content width
+    // Calculate content width - use full available width
     const prefixWidth = time.length + this.maxNickWidth + 3; // " │ "
-    const contentWidth = Math.max(20, this.width - prefixWidth - 2);
+    const contentWidth = Math.max(20, this.width - prefixWidth);
 
     // Wrap content
     const contentLines = this._wrapText(msg.content, contentWidth);
@@ -278,12 +306,12 @@ class ChatAgent extends EventEmitter {
       ? `\x1b[36m${targetDisplay}\x1b[0m: `
       : '\x1b[2m<Tab:agent>\x1b[0m ';
 
-    // Add separator before input
-    this.lines.push('\x1b[90m' + '─'.repeat(Math.min(this.width, 60)) + '\x1b[0m');
-    this.plainLines.push('─'.repeat(Math.min(this.width, 60)));
+    // Add separator before input (full width)
+    this.lines.push('\x1b[90m' + '─'.repeat(this.width) + '\x1b[0m');
+    this.plainLines.push('─'.repeat(this.width));
 
-    // Calculate available width for input text
-    const availableWidth = Math.max(10, this.width - prefixLen - 2);
+    // Calculate available width for input text (full width minus prefix)
+    const availableWidth = Math.max(10, this.width - prefixLen);
 
     // Wrap input with cursor tracking
     const { lines: wrappedLines, cursorLine, cursorCol } =
@@ -732,12 +760,36 @@ class ChatAgent extends EventEmitter {
   }
 
   setAvailableAgents(agents) {
-    this._availableAgents = agents.filter(a => a.type !== 'chat');
+    const newAgents = agents.filter(a => a.type !== 'chat');
+    const oldIds = new Set((this._availableAgents || []).map(a => a.id));
+
+    // Detect newly joined agents
+    for (const agent of newAgents) {
+      if (!oldIds.has(agent.id)) {
+        this._addSystemMessage(`${agent.id} joined the chat`);
+      }
+    }
+
+    this._availableAgents = newAgents;
+
     // Auto-select first target if none
     if (!this.targetAgent && this._availableAgents.length > 0) {
       this.targetAgent = this._availableAgents[0].id;
       this._render();
     }
+  }
+
+  _addSystemMessage(text) {
+    this.messages.push({
+      id: `sys-${Date.now()}`,
+      timestamp: new Date(),
+      sender: '***',
+      performative: 'system',
+      content: text,
+      style: { fg: '\x1b[90m' }  // dim gray
+    });
+    this._render();
+    this.emit('data');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
