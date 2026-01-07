@@ -3,7 +3,20 @@
 
 const path = require('path');
 const fs = require('fs');
-const { execSync } = require('child_process');
+
+// Bootstrap module
+const {
+  SOCKET_DISCOVERY_FILE,
+  FIPA_REMINDER,
+  findClaudePath,
+  findCodexPath,
+  createAgentTypes,
+  getFIPAPromptArgs,
+  resolveAgentType,
+  loadQuotes,
+  showSplash,
+  parseArgs
+} = require('./src/bootstrap');
 
 const { Session } = require('./src/core/Session');
 const { Agent } = require('./src/core/Agent');
@@ -22,209 +35,28 @@ const { RegisterManager } = require('./src/input/RegisterManager');
 const { findLatestSession } = require('./src/utils/agentSessions');
 const { OverlayManager } = require('./src/ui/OverlayManager');
 const { MCPServer } = require('./src/mcp/MCPServer');
-const os = require('os');
+const {
+  extractSelectedText,
+  extractLines,
+  extractWord,
+  extractToEndOfLine,
+  extractFromStartOfLine,
+  isWordChar,
+  moveWordForward,
+  moveWordEnd,
+  moveWordBackward,
+  findCharOnLine
+} = require('./src/utils/bufferText');
+const { TerminalManager } = require('./src/core/TerminalManager');
 
-// Socket discovery file for MCP bridge
-const SOCKET_DISCOVERY_FILE = path.join(os.homedir(), '.bukowski-mcp-socket');
+// Initialize agent types with discovered CLI paths
+const claudePath = findClaudePath();
+const codexPath = findCodexPath();
+const AGENT_TYPES = createAgentTypes(claudePath, codexPath);
 
-// Load quotes from quotes.txt
+// Load quotes for splash screen
 const quotesPath = path.join(__dirname, 'quotes.txt');
-let QUOTES = [];
-try {
-  const raw = fs.readFileSync(quotesPath, 'utf8');
-  QUOTES = raw.split(/\n\n+/).filter(Boolean).map(block => {
-    const lines = block.trim().split('\n');
-    const author = lines.pop().replace(/^—\s*/, '');
-    const text = lines.join(' ');
-    return { text, author };
-  });
-} catch {
-  QUOTES = [{ text: "Let there be light.", author: "bukowski" }];
-}
-
-function showSplash() {
-  const quote = QUOTES[Math.floor(Math.random() * QUOTES.length)];
-  const cols = process.stdout.columns || 80;
-  const rows = process.stdout.rows || 24;
-
-  const lines = quote.text.match(new RegExp(`.{1,${cols - 4}}(\\s|$)`, 'g')) || [quote.text];
-  const authorLine = `— ${quote.author}`;
-
-  const startRow = Math.floor((rows - lines.length - 2) / 2);
-
-  let frame = '\x1b[2J\x1b[H';
-  frame += '\x1b[?25l';
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    const col = Math.floor((cols - line.length) / 2);
-    frame += `\x1b[${startRow + i};${col}H\x1b[3m${line}\x1b[0m`;
-  }
-
-  const authorCol = Math.floor((cols - authorLine.length) / 2);
-  frame += `\x1b[${startRow + lines.length + 1};${authorCol}H\x1b[2m${authorLine}\x1b[0m`;
-
-  process.stdout.write(frame);
-}
-
-// Find Claude CLI
-let claudePath;
-try {
-  const claudeBin = execSync('readlink -f "$(which claude)"', { encoding: 'utf8' }).trim();
-  const claudeDir = path.dirname(claudeBin);
-  claudePath = path.join(claudeDir, 'cli.js');
-} catch {
-  claudePath = 'claude'; // Fallback
-}
-
-// Find Codex CLI
-let codexPath;
-try {
-  const codexBin = execSync('readlink -f "$(which codex)"', { encoding: 'utf8' }).trim();
-  codexPath = codexBin;
-} catch {
-  codexPath = null; // Not installed
-}
-
-// FIPA reminder prompt for agents
-const FIPA_REMINDER = `You are running inside bukowski, a multi-agent terminal. Other AI agents may be running alongside you.
-
-Available tools (via MCP):
-- list_agents: See other connected agents
-- fipa_request: Ask another agent to do something
-- fipa_inform: Share information with another agent
-- fipa_query_if: Ask a yes/no question
-- fipa_query_ref: Ask for specific information
-- get_pending_messages: Check for messages from other agents
-
-When you're unsure about something outside your expertise, consider asking another agent.`;
-
-// Agent type configurations
-const FIPA_REMINDER_INLINE = FIPA_REMINDER.replace(/\n+/g, '. ');
-
-const AGENT_TYPES = {
-  claude: {
-    command: 'node',
-    args: [claudePath],
-    name: 'Claude',
-    promptFlag: '--append-system-prompt',
-    // Generate resume args based on session ID
-    getResumeArgs: (sessionId) => sessionId
-      ? ['--resume', sessionId]
-      : ['--continue']  // fallback to latest
-  },
-  codex: {
-    command: 'node',
-    args: codexPath ? [codexPath] : [],
-    name: 'Codex',
-    promptFlag: null,  // Codex uses positional arg, tricky with resume - skip for now
-    getResumeArgs: (sessionId) => sessionId
-      ? ['resume', sessionId]
-      : ['resume', '--last']
-  },
-  gemini: {
-    command: 'gemini',
-    // Use interactive prompt mode so Gemini doesn't default to one-shot.
-    args: ['-i', FIPA_REMINDER_INLINE],
-    name: 'Gemini',
-    promptFlag: null,  // Gemini uses positional arg - skip for now
-    getResumeArgs: (sessionId) => sessionId
-      ? ['-r', sessionId]
-      : ['-r', 'latest']  // Fallback: latest in current project (Gemini is project-scoped)
-  }
-};
-
-/**
- * Get FIPA prompt args for an agent type
- * @param {string} agentType
- * @param {string[]} existingArgs
- * @returns {string[]} Args to append
- */
-function getFIPAPromptArgs(agentType, existingArgs) {
-  const config = AGENT_TYPES[agentType];
-  if (!config) return [];
-
-  if (agentType === 'gemini') {
-    // Gemini uses positional prompts; skip injection to avoid CLI incompatibility.
-    return [];
-  }
-
-  if (!config.promptFlag) return [];
-
-  // Don't inject if user already provided this flag
-  if (existingArgs.includes(config.promptFlag)) {
-    return [];
-  }
-
-  return [config.promptFlag, FIPA_REMINDER];
-}
-
-// Parse CLI arguments
-function parseArgs() {
-  const args = process.argv.slice(2);
-  const result = {
-    restore: null,       // Session ID/name to restore, or 'latest'
-    sessionName: null,   // New session name
-    single: false,       // Single-pane mode (legacy)
-    agentArgs: []        // Args to pass to initial agent
-  };
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === '--single' || arg === '-1') {
-      result.single = true;
-    } else if (arg === '--restore' || arg === '--resume' || arg === '-r') {
-      // Check if next arg exists and is not a flag
-      const nextArg = args[i + 1];
-      if (nextArg && !nextArg.startsWith('-')) {
-        result.restore = nextArg;
-        i++; // Skip next arg
-      } else {
-        result.restore = 'latest';
-      }
-    } else if (arg === '--session' || arg === '-s') {
-      const nextArg = args[i + 1];
-      if (nextArg && !nextArg.startsWith('-')) {
-        result.sessionName = nextArg;
-        i++;
-      }
-    } else if (arg === '--help' || arg === '-h') {
-      console.log(`bukowski - multi-agent terminal
-
-Usage: bukowski [options] [-- agent-args...]
-
-Options:
-  -1, --single             Single-pane mode (legacy, no splits)
-  -r, --restore [id|name]  Restore a saved session (default: latest)
-      --resume             Alias for --restore
-  -s, --session <name>     Set session name
-  -h, --help               Show this help
-
-Session Commands (in normal mode, type :):
-  :w [name]                Save session (optionally with new name)
-  :wq, :x                  Save and quit
-  :sessions                List saved sessions
-  :restore <id|name>       Show restore instructions
-  :name <name>             Rename current session
-
-Examples:
-  bukowski                           Start new session (multi-pane)
-  bukowski --single                  Start single-pane mode
-  bukowski --restore                 Restore most recent session
-  bukowski --restore myproject       Restore session named "myproject"
-  bukowski -s "My Project"           Start new session with name
-`);
-      process.exit(0);
-    } else if (arg === '--') {
-      result.agentArgs = args.slice(i + 1);
-      break;
-    } else {
-      result.agentArgs.push(arg);
-    }
-  }
-
-  return result;
-}
+const QUOTES = loadQuotes(quotesPath);
 
 const cliArgs = parseArgs();
 
@@ -240,79 +72,9 @@ if (cliArgs.single) {
   process.exit(result.status || 0);
 }
 
-// Cleanup function - exit alt screen, restore cursor, disable mouse
-function cleanup() {
-  process.stdout.write('\x1b[?1000l\x1b[?1006l'); // Disable mouse
-  process.stdout.write('\x1b[?25h');              // Show cursor
-  process.stdout.write('\x1b[?1049l');            // Exit alt screen
-
-  // Remove socket discovery file
-  try {
-    fs.unlinkSync(SOCKET_DISCOVERY_FILE);
-  } catch {
-    // Ignore - file may not exist
-  }
-}
-
-// Setup function - enter alt screen, enable mouse
-function setupTerminal() {
-  process.stdout.write('\x1b[?1049h');            // Enter alt screen
-  process.stdout.write('\x1b[?1000h\x1b[?1006h'); // Enable mouse (SGR mode)
-  process.stdout.write('\x1b[?25l');              // Hide cursor (compositor manages it)
-}
-
-process.on('exit', cleanup);
-
-// Track session globally for signal handlers
-let activeSession = null;
-let activeCompositor = null;
-
-// SIGTSTP handler (CTRL+Z) - suspend gracefully
-process.on('SIGTSTP', () => {
-  // 1. Clean up terminal state
-  cleanup();
-
-  // 2. Stop all child PTYs
-  if (activeSession) {
-    for (const agent of activeSession.getAllAgents()) {
-      if (agent.pty && agent.pty.pid) {
-        try {
-          process.kill(agent.pty.pid, 'SIGSTOP');
-        } catch {
-          // Process may have already exited
-        }
-      }
-    }
-  }
-
-  // 3. Actually suspend ourselves
-  // We need to re-send SIGTSTP with default handler to actually stop
-  process.kill(process.pid, 'SIGSTOP');
-});
-
-// SIGCONT handler - resume after suspend
-process.on('SIGCONT', () => {
-  // 1. Resume all child PTYs
-  if (activeSession) {
-    for (const agent of activeSession.getAllAgents()) {
-      if (agent.pty && agent.pty.pid) {
-        try {
-          process.kill(agent.pty.pid, 'SIGCONT');
-        } catch {
-          // Process may have already exited
-        }
-      }
-    }
-  }
-
-  // 2. Restore terminal state
-  setupTerminal();
-
-  // 3. Force full redraw (immediate)
-  if (activeCompositor) {
-    activeCompositor.draw();
-  }
-});
+// Terminal manager - handles setup/cleanup and signal handlers
+const terminal = new TerminalManager(SOCKET_DISCOVERY_FILE);
+terminal.registerSignalHandlers();
 
 // Main async startup
 (async () => {
@@ -320,7 +82,7 @@ process.on('SIGCONT', () => {
   process.stdout.write('\x1b[?1049h');
 
   // Show splash
-  showSplash();
+  showSplash(QUOTES);
 
   const SPLASH_DURATION = parseInt(process.env.BUKOWSKI_SPLASH) || 2000;
 
@@ -366,7 +128,7 @@ process.on('SIGCONT', () => {
     // Create initial Claude agent
     // Inject FIPA reminder if user didn't provide their own prompt
     const initialArgs = [claudePath, ...cliArgs.agentArgs];
-    const fipaArgs = getFIPAPromptArgs('claude', initialArgs);
+    const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, 'claude', initialArgs);
     const claude = new Agent({
       id: 'claude-1',
       name: 'Claude',
@@ -512,9 +274,9 @@ process.on('SIGCONT', () => {
   const compositor = new Compositor(session, layoutManager, tabBar, chatPane, conversationList, overlayManager);
   compositor.startCursorBlink();
 
-  // Wire up global references for signal handlers
-  activeSession = session;
-  activeCompositor = compositor;
+  // Wire up terminal manager for signal handlers
+  terminal.setSession(session);
+  terminal.setCompositor(compositor);
 
   // Create input router
   const inputRouter = new InputRouter(session, layoutManager, ipcHub, fipaHub);
@@ -710,207 +472,13 @@ process.on('SIGCONT', () => {
     ensureLineVisible(vimState.visualCursor.line);
   }
 
-  // Extract selected text from agent buffer
-  function extractSelectedText(agent) {
-    const anchor = vimState.visualAnchor;
-    const cursor = vimState.visualCursor;
-
-    // Determine start and end
-    let start, end;
-    if (anchor.line < cursor.line || (anchor.line === cursor.line && anchor.col <= cursor.col)) {
-      start = anchor;
-      end = cursor;
-    } else {
-      start = cursor;
-      end = anchor;
-    }
-
-    const lines = [];
-    for (let i = start.line; i <= end.line; i++) {
-      const lineText = agent.getLineText(i);
-
-      if (vimState.mode === 'vline') {
-        // Visual line: full lines
-        lines.push(lineText);
-      } else {
-        // Visual char: partial lines
-        if (i === start.line && i === end.line) {
-          lines.push(lineText.slice(start.col, end.col + 1));
-        } else if (i === start.line) {
-          lines.push(lineText.slice(start.col));
-        } else if (i === end.line) {
-          lines.push(lineText.slice(0, end.col + 1));
-        } else {
-          lines.push(lineText);
-        }
-      }
-    }
-
-    return lines.join('\n');
-  }
-
-  // Extract multiple lines from agent buffer
-  function extractLines(agent, startLine, count) {
-    const lines = [];
-    const contentHeight = agent.getContentHeight();
-    for (let i = startLine; i < startLine + count && i < contentHeight; i++) {
-      lines.push(agent.getLineText(i));
-    }
-    return lines.join('\n');
-  }
-
-  // Extract word at cursor position
-  function extractWord(agent, line, col) {
-    const lineText = agent.getLineText(line) || '';
-    let start = col, end = col;
-    while (start > 0 && /\w/.test(lineText[start - 1])) start--;
-    while (end < lineText.length && /\w/.test(lineText[end])) end++;
-    return { text: lineText.slice(start, end), startCol: start, endCol: end - 1 };
-  }
-
-  // Extract text from cursor to end of line
-  function extractToEndOfLine(agent, line, col) {
-    const lineText = agent.getLineText(line) || '';
-    return lineText.slice(col);
-  }
-
-  // Extract text from start of line to cursor
-  function extractFromStartOfLine(agent, line, col) {
-    const lineText = agent.getLineText(line) || '';
-    return lineText.slice(0, col + 1);
-  }
-
-  // Check if character is a word character
-  // word = letters, digits, underscores
-  // WORD = any non-whitespace
-  function isWordChar(char, bigWord) {
-    if (!char) return false;
-    if (bigWord) return !/\s/.test(char);
-    return /\w/.test(char);
-  }
-
-  // Move cursor forward to start of next word
-  function moveWordForward(agent, cursor, bigWord) {
-    const contentHeight = agent.getContentHeight();
-    let { line, col } = cursor;
-    let lineText = agent.getLineText(line) || '';
-
-    // Skip current word
-    while (col < lineText.length && isWordChar(lineText[col], bigWord)) {
-      col++;
-    }
-    // Skip whitespace/non-word chars
-    while (true) {
-      while (col < lineText.length && !isWordChar(lineText[col], bigWord)) {
-        col++;
-      }
-      if (col < lineText.length || line >= contentHeight - 1) break;
-      // Move to next line
-      line++;
-      col = 0;
-      lineText = agent.getLineText(line) || '';
-    }
-
-    cursor.line = line;
-    cursor.col = Math.min(col, Math.max(0, lineText.length - 1));
-  }
-
-  // Move cursor forward to end of word
-  function moveWordEnd(agent, cursor, bigWord) {
-    const contentHeight = agent.getContentHeight();
-    let { line, col } = cursor;
-    let lineText = agent.getLineText(line) || '';
-
-    // Move at least one position
-    col++;
-    // Skip whitespace/non-word chars
-    while (true) {
-      while (col < lineText.length && !isWordChar(lineText[col], bigWord)) {
-        col++;
-      }
-      if (col < lineText.length || line >= contentHeight - 1) break;
-      line++;
-      col = 0;
-      lineText = agent.getLineText(line) || '';
-    }
-    // Skip to end of word
-    while (col < lineText.length - 1 && isWordChar(lineText[col + 1], bigWord)) {
-      col++;
-    }
-
-    cursor.line = line;
-    cursor.col = Math.min(col, Math.max(0, lineText.length - 1));
-  }
-
-  // Move cursor backward to start of word
-  function moveWordBackward(agent, cursor, bigWord) {
-    let { line, col } = cursor;
-    let lineText = agent.getLineText(line) || '';
-
-    // Move at least one position
-    col--;
-    // Skip whitespace/non-word chars
-    while (true) {
-      while (col >= 0 && !isWordChar(lineText[col], bigWord)) {
-        col--;
-      }
-      if (col >= 0 || line <= 0) break;
-      line--;
-      lineText = agent.getLineText(line) || '';
-      col = lineText.length - 1;
-    }
-    // Skip to start of word
-    while (col > 0 && isWordChar(lineText[col - 1], bigWord)) {
-      col--;
-    }
-
-    cursor.line = line;
-    cursor.col = Math.max(0, col);
-  }
-
-  // Find character on line (f/F/t/T motions)
-  // Returns new column position or -1 if not found
-  function findCharOnLine(lineText, startCol, char, type, count = 1) {
-    const forward = type === 'f' || type === 't';
-    const til = type === 't' || type === 'T';
-    let col = startCol;
-    let found = 0;
-
-    if (forward) {
-      for (let i = startCol + 1; i < lineText.length; i++) {
-        if (lineText[i] === char) {
-          found++;
-          col = i;
-          if (found >= count) break;
-        }
-      }
-    } else {
-      for (let i = startCol - 1; i >= 0; i--) {
-        if (lineText[i] === char) {
-          found++;
-          col = i;
-          if (found >= count) break;
-        }
-      }
-    }
-
-    if (found < count) return -1;  // Not found enough times
-
-    // Adjust for til (t/T) - stop before/after the character
-    if (til) {
-      col = forward ? col - 1 : col + 1;
-    }
-
-    return col;
-  }
-
   // Yank selection to register
   function yankSelection(targetRegister = null) {
     const focusedPane = layoutManager.getFocusedPane();
     const agent = focusedPane ? session.getAgent(focusedPane.agentId) : null;
     if (!agent) return;
 
-    const text = extractSelectedText(agent);
+    const text = extractSelectedText(agent, vimState);
     if (!text) return;
 
     const type = vimState.mode === 'vline' ? 'line' : 'char';
@@ -1032,16 +600,6 @@ process.on('SIGCONT', () => {
   }
 
   // Execute ex-command
-  // Helper to resolve agent type from argument
-  function resolveAgentType(arg) {
-    if (!arg) return 'claude'; // default
-    const type = arg.toLowerCase();
-    if (AGENT_TYPES[type] && AGENT_TYPES[type].command) {
-      return type;
-    }
-    return null; // invalid type
-  }
-
   // Capture agent session IDs from filesystem before saving
   // Always refresh by finding most recently modified session for each agent's cwd
   // This handles cases where user runs /resume inside an agent to switch sessions
@@ -1091,7 +649,7 @@ process.on('SIGCONT', () => {
         // Close focused pane, or quit if last pane
         const panes = layoutManager.getAllPanes();
         if (panes.length === 1) {
-          cleanup();
+          terminal.cleanup();
           if (ipcHub) ipcHub.stop();
           session.destroy();
           process.exit(0);
@@ -1107,7 +665,7 @@ process.on('SIGCONT', () => {
       case 'qall':
       case 'qall!':
         // Force quit everything
-        cleanup();
+        terminal.cleanup();
         if (ipcHub) ipcHub.stop();
         session.destroy();
         process.exit(0);
@@ -1116,7 +674,7 @@ process.on('SIGCONT', () => {
       case 'e':
       case 'edit': {
         // :e [agent] [extra-args...] - new tab with agent (default: claude)
-        const agentType = resolveAgentType(args[0]);
+        const agentType = resolveAgentType(AGENT_TYPES, args[0]);
         if (agentType) {
           const extraArgs = args.slice(1);  // Additional CLI args like --continue
           handleAction({ action: 'new_tab', agentType, extraArgs });
@@ -1127,7 +685,7 @@ process.on('SIGCONT', () => {
       case 'sp':
       case 'split': {
         // :sp [agent] [extra-args...] - horizontal split (default: claude)
-        const agentType = resolveAgentType(args[0]);
+        const agentType = resolveAgentType(AGENT_TYPES, args[0]);
         if (agentType) {
           const extraArgs = args.slice(1);
           handleAction({ action: 'split_horizontal', agentType, extraArgs });
@@ -1139,7 +697,7 @@ process.on('SIGCONT', () => {
       case 'vsp':
       case 'vsplit': {
         // :vs [agent] [extra-args...] - vertical split (default: claude)
-        const agentType = resolveAgentType(args[0]);
+        const agentType = resolveAgentType(AGENT_TYPES, args[0]);
         if (agentType) {
           const extraArgs = args.slice(1);
           handleAction({ action: 'split_vertical', agentType, extraArgs });
@@ -1236,12 +794,12 @@ process.on('SIGCONT', () => {
         captureAgentSessions().then(() => {
           return session.save(undefined, fipaHub.conversations);
         }).then(() => {
-          cleanup();
+          terminal.cleanup();
           if (ipcHub) ipcHub.stop();
           session.destroy();
           process.exit(0);
         }).catch(() => {
-          cleanup();
+          terminal.cleanup();
           if (ipcHub) ipcHub.stop();
           session.destroy();
           process.exit(1);
@@ -1325,7 +883,7 @@ process.on('SIGCONT', () => {
           const isValidUuid = sessionId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId);
           const resumeArgs = typeConfig.getResumeArgs?.(isValidUuid ? sessionId : null) || [];
           const combinedArgs = [...baseArgs, ...resumeArgs];
-          const fipaArgs = getFIPAPromptArgs(agent.type, combinedArgs);
+          const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, agent.type, combinedArgs);
           agent.args = [...combinedArgs, ...fipaArgs];
         }
       }
@@ -1410,7 +968,7 @@ process.on('SIGCONT', () => {
         const allPanes = layoutManager.getAllPanes();
         if (allPanes.length === 1) {
           // Last pane - quit entirely
-          cleanup();
+          terminal.cleanup();
           if (ipcHub) ipcHub.stop();
           session.destroy();
           process.exit(exitCode);
@@ -1446,7 +1004,7 @@ process.on('SIGCONT', () => {
     // Combine base args with any extra CLI args (e.g., --continue)
     // Inject FIPA reminder if user didn't provide their own prompt
     const baseArgs = [...agentConfig.args, ...extraArgs];
-    const fipaArgs = getFIPAPromptArgs(type, baseArgs);
+    const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, type, baseArgs);
     const fullArgs = [...baseArgs, ...fipaArgs];
 
     const newAgent = new Agent({
@@ -2206,7 +1764,7 @@ process.on('SIGCONT', () => {
 
       // Quit
       case 'quit_force':
-        cleanup();
+        terminal.cleanup();
         if (ipcHub) ipcHub.stop();
         session.destroy();
         process.exit(0);
@@ -2214,7 +1772,7 @@ process.on('SIGCONT', () => {
 
       case 'quit_confirm':
         // For now, just quit
-        cleanup();
+        terminal.cleanup();
         if (ipcHub) ipcHub.stop();
         session.destroy();
         process.exit(0);
@@ -2411,7 +1969,7 @@ process.on('SIGCONT', () => {
         // Extract selected text if in visual mode
         let text = '';
         if (vimState.mode === 'visual' || vimState.mode === 'vline') {
-          text = extractSelectedText(focusedAgent);
+          text = extractSelectedText(focusedAgent, vimState);
         }
 
         aclState.active = true;
@@ -2824,23 +2382,12 @@ process.on('SIGCONT', () => {
     }
   }, 100);
 
-  // Signal handlers
-  process.on('SIGINT', () => {
-    cleanup();
+  // Register shutdown callbacks for SIGINT/SIGTERM
+  terminal.onShutdown(() => {
     if (mcpServer) mcpServer.stop();
     if (ipcHub) ipcHub.stop();
     if (fipaHub) fipaHub.shutdown();
     session.destroy();
-    process.exit(0);
-  });
-
-  process.on('SIGTERM', () => {
-    cleanup();
-    if (mcpServer) mcpServer.stop();
-    if (ipcHub) ipcHub.stop();
-    if (fipaHub) fipaHub.shutdown();
-    session.destroy();
-    process.exit(0);
   });
 
   // Handle agent exit for initial agents (onData already set up above)
@@ -2852,7 +2399,7 @@ process.on('SIGCONT', () => {
           layoutManager.focusPane(pane.id);
           const allPanes = layoutManager.getAllPanes();
           if (allPanes.length === 1) {
-            cleanup();
+            terminal.cleanup();
             if (ipcHub) ipcHub.stop();
             session.destroy();
             process.exit(exitCode);
