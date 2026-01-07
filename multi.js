@@ -330,11 +330,13 @@ process.on('SIGCONT', () => {
   // Continue with main initialization
   let session;
   let restoredSession = false;
+  let pendingSessionData = null; // Raw session data to restore after FIPAHub is created
 
   // Try to restore session if requested
   if (cliArgs.restore) {
     try {
       const { LayoutNode } = require('./src/layout/LayoutNode');
+      // Load session without conversations (will restore those after FIPAHub exists)
       if (cliArgs.restore === 'latest') {
         session = await Session.loadLatest(Agent, LayoutNode);
       } else {
@@ -342,6 +344,12 @@ process.on('SIGCONT', () => {
       }
       if (session) {
         restoredSession = true;
+        // Load raw data to get conversations
+        const sessionDir = Session.getSessionDir();
+        const filepath = path.join(sessionDir, `${session.id}.json`);
+        try {
+          pendingSessionData = JSON.parse(fs.readFileSync(filepath, 'utf-8'));
+        } catch { /* ignore */ }
       }
     } catch (err) {
       // Failed to restore, will create new session
@@ -401,8 +409,27 @@ process.on('SIGCONT', () => {
   // Start FIPA Hub
   const fipaHub = new FIPAHub(ipcHub);
   try {
-    // FIPA Hub does not need to be 'started' but we might listen to events etc
-    // For now, just instantiate and connect
+    // Restore conversations from saved session if available
+    if (pendingSessionData?.conversations) {
+      fipaHub.conversations.restoreFromJSON(pendingSessionData.conversations);
+    }
+
+    // Restore chat agents from saved session (they were skipped during initial load
+    // because FIPAHub didn't exist yet)
+    if (pendingSessionData?.agents) {
+      for (const agentData of pendingSessionData.agents) {
+        if (agentData.type === 'chat' && agentData.conversationId) {
+          // Check if we don't already have this agent
+          if (!session.getAgent(agentData.id)) {
+            const chatAgent = ChatAgent.fromJSON(agentData, fipaHub.conversations, fipaHub);
+            // Set available agents for target selection
+            const realAgents = session.getAllAgents().filter(a => a.type !== 'chat');
+            chatAgent.setAvailableAgents(realAgents);
+            session.addAgent(chatAgent);
+          }
+        }
+      }
+    }
   } catch (err) {
     console.error('Warning: FIPA hub failed to initialize:', err.message);
   }
@@ -416,13 +443,53 @@ process.on('SIGCONT', () => {
     // This ensures agents connect to THIS instance's MCP server, not another instance's
     process.env.BUKOWSKI_MCP_SOCKET = socketPath;
 
-    // Wire FIPAHub messages to MCP message queue (for external agents)
+    // Wire FIPAHub messages to MCP message queue and PTY injection
     fipaHub.on('fipa:sent', ({ message, to }) => {
-      console.error(`[FIPA] Message queued: ${message.sender?.name} -> ${to} (${message.performative})`);
-      if (to) {
-        mcpServer.queueMessage(to, message);
+      if (!to) return;
+
+      // Queue for MCP polling
+      mcpServer.queueMessage(to, message);
+
+      // For session agents with PTY, inject and auto-submit to trigger response
+      const agent = session.getAgent(to);
+      if (agent?.pty && message.sender?.name !== to) {
+        const prompt = formatFIPAForPTY(message);
+        // Small delay to not interrupt mid-output
+        setTimeout(() => {
+          agent.pty.write(prompt);
+          // Send \r separately after a tiny delay to trigger submit
+          setTimeout(() => {
+            agent.pty.write('\r');
+          }, 50);
+        }, 100);
+      } else if (agent?.type === 'chat') {
+        const prompt = formatFIPAForPTY(message);
+        agent.write(prompt);
       }
     });
+
+    // Format FIPA message for PTY injection (no trailing newline - sent separately)
+    // Short messages: include content. Long messages: just notify to check inbox.
+    function formatFIPAForPTY(message) {
+      const sender = message.sender?.name || 'unknown';
+      const perf = message.performative || 'inform';
+      const content = typeof message.content === 'string'
+        ? message.content
+        : JSON.stringify(message.content, null, 2);
+
+      // Escape newlines for single-line input
+      const escaped = content.replace(/\n/g, ' ');
+
+      // Short messages: include full content
+      // Long messages: just notify, tell them to check inbox
+      const MAX_INLINE = 200;
+      if (escaped.length <= MAX_INLINE) {
+        return `[FIPA ${perf} from ${sender}]: ${escaped}`;
+      } else {
+        const preview = escaped.slice(0, 80) + '...';
+        return `[FIPA ${perf} from ${sender}]: ${preview} (use get_pending_messages for full text)`;
+      }
+    }
 
     // Write socket path to discovery file for MCP bridge (fallback for external tools)
     try {
@@ -565,7 +632,7 @@ process.on('SIGCONT', () => {
       startCol = vimState.normalCursor.col;
     } else {
       // Start from agent's actual cursor
-      if (agent) {
+      if (agent && typeof agent.getBuffer === 'function') {
         const buffer = agent.getBuffer();
         if (buffer) {
           startLine = buffer.baseY + buffer.cursorY;
@@ -574,6 +641,11 @@ process.on('SIGCONT', () => {
           startLine = 0;
           startCol = 0;
         }
+      } else if (agent && typeof agent.getCursorPosition === 'function') {
+        // ChatAgent uses getCursorPosition instead
+        const pos = agent.getCursorPosition();
+        startLine = pos.line;
+        startCol = pos.col;
       } else {
         startLine = 0;
         startCol = 0;
@@ -968,8 +1040,8 @@ process.on('SIGCONT', () => {
   }
 
   // Capture agent session IDs from filesystem before saving
-  // Only capture for agents that don't already have a session ID
-  // (Prevents overwriting with wrong session when multiple bukowski instances are running)
+  // Always refresh by finding most recently modified session for each agent's cwd
+  // This handles cases where user runs /resume inside an agent to switch sessions
   async function captureAgentSessions() {
     const cwd = process.cwd();
     const assignedIds = new Set();
@@ -978,22 +1050,28 @@ process.on('SIGCONT', () => {
     const agents = session.getAllAgents().sort((a, b) => (a.spawnedAt || 0) - (b.spawnedAt || 0));
 
     for (const agent of agents) {
-      // If agent already has a session ID, preserve it and add to exclusion set
-      if (agent.agentSessionId) {
-        assignedIds.add(agent.agentSessionId);
+      if (!agent.spawnedAt) {
+        // Agent never spawned, preserve existing ID if any
+        if (agent.agentSessionId) {
+          assignedIds.add(agent.agentSessionId);
+        }
         continue;
       }
 
-      // Only capture for agents without an existing session ID
-      if (agent.spawnedAt) {
-        try {
-          const sessionId = await findLatestSession(agent.type, cwd, agent.spawnedAt, assignedIds);
-          if (sessionId) {
-            agent.agentSessionId = sessionId;
-            assignedIds.add(sessionId);
-          }
-        } catch {
-          // Ignore errors - session ID capture is best-effort
+      try {
+        // Always look for most recently modified session (handles /resume switches)
+        const sessionId = await findLatestSession(agent.type, cwd, agent.spawnedAt, assignedIds);
+        if (sessionId) {
+          agent.agentSessionId = sessionId;
+          assignedIds.add(sessionId);
+        } else if (agent.agentSessionId) {
+          // No new session found, preserve existing
+          assignedIds.add(agent.agentSessionId);
+        }
+      } catch {
+        // On error, preserve existing ID if any
+        if (agent.agentSessionId) {
+          assignedIds.add(agent.agentSessionId);
         }
       }
     }
@@ -1127,7 +1205,7 @@ process.on('SIGCONT', () => {
         }
         // Capture agent session IDs before saving
         captureAgentSessions().then(() => {
-          return session.save();
+          return session.save(undefined, fipaHub.conversations);
         }).then(filepath => {
           // Restore zoomed state after save
           if (wasZoomed) {
@@ -1153,7 +1231,7 @@ process.on('SIGCONT', () => {
         }
         // Capture agent session IDs before saving
         captureAgentSessions().then(() => {
-          return session.save();
+          return session.save(undefined, fipaHub.conversations);
         }).then(() => {
           cleanup();
           if (ipcHub) ipcHub.stop();
@@ -1230,7 +1308,8 @@ process.on('SIGCONT', () => {
   for (let i = 0; i < allPanes.length; i++) {
     const pane = allPanes[i];
     const agent = session.getAgent(pane.agentId);
-    if (agent && !agent.pty) {
+    // Skip chat agents (virtual, no PTY/spawn) and already-spawned agents
+    if (agent && !agent.pty && agent.type !== 'chat') {
       // If restoring a session, rebuild args from AGENT_TYPES + resume args
       // Don't use saved agent.args - they may contain old resume args
       // Also inject FIPA reminder prompt
@@ -2117,7 +2196,7 @@ process.on('SIGCONT', () => {
 
       // Session management
       case 'save_session':
-        session.save().then(filepath => {
+        session.save(undefined, fipaHub.conversations).then(filepath => {
           // Flash message would go here
         }).catch(() => {});
         break;
@@ -2671,7 +2750,8 @@ process.on('SIGCONT', () => {
         if (result.action === 'conversation_new') {
           // Start new conversation - create new one and open chat pane
           overlayManager.hide(overlay.id);
-          const conversationId = fipaHub.conversations.createConversation?.() || Date.now().toString();
+          const conversation = fipaHub.conversations.createConversation?.();
+          const conversationId = conversation?.id || Date.now().toString();
           createChatPane(conversationId, pendingChatSplit || 'horizontal');
           pendingChatSplit = null;
           compositor.draw();

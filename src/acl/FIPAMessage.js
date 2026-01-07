@@ -417,6 +417,60 @@ function subscribe(sender, receiver, subscription, options = {}) {
   });
 }
 
+/**
+ * Create a PROPOSE message (response to CFP)
+ * @param {AgentIdentifier} sender
+ * @param {AgentIdentifier} receiver
+ * @param {*} proposal - The proposal content
+ * @param {Object} [options]
+ * @returns {FIPAMessage}
+ */
+function propose(sender, receiver, proposal, options = {}) {
+  return new FIPAMessage({
+    performative: Performatives.PROPOSE,
+    sender,
+    receiver,
+    content: proposal,
+    ...options,
+  });
+}
+
+/**
+ * Create an AGREE message (accept a request)
+ * @param {AgentIdentifier} sender
+ * @param {AgentIdentifier} receiver
+ * @param {*} [content] - Optional confirmation content
+ * @param {Object} [options]
+ * @returns {FIPAMessage}
+ */
+function agree(sender, receiver, content = {}, options = {}) {
+  return new FIPAMessage({
+    performative: Performatives.AGREE,
+    sender,
+    receiver,
+    content,
+    ...options,
+  });
+}
+
+/**
+ * Create a REFUSE message (decline a request)
+ * @param {AgentIdentifier} sender
+ * @param {AgentIdentifier} receiver
+ * @param {string} reason - Reason for refusal
+ * @param {Object} [options]
+ * @returns {FIPAMessage}
+ */
+function refuse(sender, receiver, reason, options = {}) {
+  return new FIPAMessage({
+    performative: Performatives.REFUSE,
+    sender,
+    receiver,
+    content: { reason },
+    ...options,
+  });
+}
+
 module.exports = {
   FIPAMessage,
   AgentIdentifier,
@@ -427,4 +481,7 @@ module.exports = {
   queryRef,
   cfp,
   subscribe,
+  propose,
+  agree,
+  refuse,
 };

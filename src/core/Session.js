@@ -28,7 +28,10 @@ class Session {
   removeAgent(agentId) {
     const agent = this.agents.get(agentId);
     if (agent) {
-      agent.kill();
+      // ChatAgents don't have kill() - check before calling
+      if (typeof agent.kill === 'function') {
+        agent.kill();
+      }
       this.agents.delete(agentId);
       this.updatedAt = new Date().toISOString();
     }
@@ -43,7 +46,7 @@ class Session {
   }
 
   // Serialization
-  toJSON() {
+  toJSON(conversationManager = null) {
     return {
       id: this.id,
       name: this.name,
@@ -51,21 +54,35 @@ class Session {
       layout: this.layout?.toJSON() ?? null,
       focusedPaneId: this.focusedPaneId,
       createdAt: this.createdAt,
-      updatedAt: this.updatedAt
+      updatedAt: this.updatedAt,
+      conversations: conversationManager?.toJSON() ?? []
     };
   }
 
-  static fromJSON(data, AgentClass, LayoutNodeClass) {
+  static fromJSON(data, AgentClass, LayoutNodeClass, ChatAgentClass = null, conversationManager = null, fipaHub = null) {
     const session = new Session(data.name);
     session.id = data.id;
     session.createdAt = data.createdAt;
     session.updatedAt = data.updatedAt;
     session.focusedPaneId = data.focusedPaneId || null;
 
+    // Restore conversations first (before ChatAgents that depend on them)
+    if (conversationManager && data.conversations) {
+      conversationManager.restoreFromJSON(data.conversations);
+    }
+
     // Reconstruct agents
     for (const agentData of data.agents) {
-      const agent = AgentClass.fromJSON(agentData);
-      session.agents.set(agent.id, agent);
+      if (agentData.type === 'chat' && ChatAgentClass && conversationManager && fipaHub) {
+        // Reconstruct ChatAgent
+        const agent = ChatAgentClass.fromJSON(agentData, conversationManager, fipaHub);
+        session.agents.set(agent.id, agent);
+      } else if (agentData.type !== 'chat') {
+        // Regular agent
+        const agent = AgentClass.fromJSON(agentData);
+        session.agents.set(agent.id, agent);
+      }
+      // Skip chat agents if no ChatAgentClass provided
     }
 
     // Reconstruct layout
@@ -76,22 +93,22 @@ class Session {
     return session;
   }
 
-  async save(dir = DEFAULT_SESSION_DIR) {
+  async save(dir = DEFAULT_SESSION_DIR, conversationManager = null) {
     await fs.promises.mkdir(dir, { recursive: true });
     const filepath = path.join(dir, `${this.id}.json`);
-    await fs.promises.writeFile(filepath, JSON.stringify(this.toJSON(), null, 2));
+    await fs.promises.writeFile(filepath, JSON.stringify(this.toJSON(conversationManager), null, 2));
     return filepath;
   }
 
-  static async load(filepath, AgentClass, LayoutNodeClass) {
+  static async load(filepath, AgentClass, LayoutNodeClass, ChatAgentClass = null, conversationManager = null, fipaHub = null) {
     const data = JSON.parse(await fs.promises.readFile(filepath, 'utf-8'));
-    return Session.fromJSON(data, AgentClass, LayoutNodeClass);
+    return Session.fromJSON(data, AgentClass, LayoutNodeClass, ChatAgentClass, conversationManager, fipaHub);
   }
 
   /**
    * Load session by ID or name
    */
-  static async loadByIdOrName(idOrName, AgentClass, LayoutNodeClass, dir = DEFAULT_SESSION_DIR) {
+  static async loadByIdOrName(idOrName, AgentClass, LayoutNodeClass, dir = DEFAULT_SESSION_DIR, ChatAgentClass = null, conversationManager = null, fipaHub = null) {
     const sessions = await Session.listSessions(dir);
 
     // Try exact ID match first
@@ -108,7 +125,7 @@ class Session {
     }
 
     if (match) {
-      return Session.load(match.filepath, AgentClass, LayoutNodeClass);
+      return Session.load(match.filepath, AgentClass, LayoutNodeClass, ChatAgentClass, conversationManager, fipaHub);
     }
 
     return null;
@@ -117,10 +134,10 @@ class Session {
   /**
    * Get the most recent session
    */
-  static async loadLatest(AgentClass, LayoutNodeClass, dir = DEFAULT_SESSION_DIR) {
+  static async loadLatest(AgentClass, LayoutNodeClass, dir = DEFAULT_SESSION_DIR, ChatAgentClass = null, conversationManager = null, fipaHub = null) {
     const sessions = await Session.listSessions(dir);
     if (sessions.length === 0) return null;
-    return Session.load(sessions[0].filepath, AgentClass, LayoutNodeClass);
+    return Session.load(sessions[0].filepath, AgentClass, LayoutNodeClass, ChatAgentClass, conversationManager, fipaHub);
   }
 
   static async listSessions(dir = DEFAULT_SESSION_DIR) {
@@ -157,7 +174,10 @@ class Session {
 
   destroy() {
     for (const agent of this.agents.values()) {
-      agent.kill();
+      // ChatAgents don't have kill() - check before calling
+      if (typeof agent.kill === 'function') {
+        agent.kill();
+      }
     }
     this.agents.clear();
     if (this.ipcHub) {

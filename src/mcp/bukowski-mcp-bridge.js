@@ -118,14 +118,14 @@ function tryConnectToBukowski() {
   connecting = true;
   socket = net.createConnection(socketPath);
 
-  // Very short timeout - if not connected in 1 second, give up
+  // Timeout - if not connected in 5 seconds, give up
   const connectTimeout = setTimeout(() => {
     if (!connected) {
       socket?.destroy();
       socket = null;
       connecting = false;
     }
-  }, 1000);
+  }, 5000);
 
   socket.on('connect', () => {
     clearTimeout(connectTimeout);
@@ -245,7 +245,8 @@ const TOOLS = [
       required: ['to', 'action'],
       properties: {
         to: { type: 'string', description: 'Target agent ID (e.g., "claude-1", "codex-1")' },
-        action: { type: 'string', description: 'The action to request the agent perform' }
+        action: { type: 'string', description: 'The action to request the agent perform' },
+        conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }
     }
   },
@@ -257,7 +258,8 @@ const TOOLS = [
       required: ['to', 'content'],
       properties: {
         to: { type: 'string', description: 'Target agent ID' },
-        content: { type: 'string', description: 'The information to share' }
+        content: { type: 'string', description: 'The information to share' },
+        conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }
     }
   },
@@ -269,7 +271,8 @@ const TOOLS = [
       required: ['to', 'proposition'],
       properties: {
         to: { type: 'string', description: 'Target agent ID' },
-        proposition: { type: 'string', description: 'The yes/no question to ask' }
+        proposition: { type: 'string', description: 'The yes/no question to ask' },
+        conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }
     }
   },
@@ -281,7 +284,8 @@ const TOOLS = [
       required: ['to', 'reference'],
       properties: {
         to: { type: 'string', description: 'Target agent ID' },
-        reference: { type: 'string', description: 'Description of the information requested' }
+        reference: { type: 'string', description: 'Description of the information requested' },
+        conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }
     }
   },

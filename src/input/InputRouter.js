@@ -184,10 +184,9 @@ class InputRouter {
         this.fipaPrefix = true;
         return { action: 'fipa_prefix' };
 
-      // Chat mode
+      // Focus/create chat pane (don't change mode - chat is now pane-based)
       case 'c':
-        this.mode = 'chat';
-        return { action: 'mode_change', mode: 'chat' };
+        return { action: 'focus_chat' };
 
       // ACL send mode - uses visual selection if present
       case 's':

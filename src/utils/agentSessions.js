@@ -194,6 +194,29 @@ async function extractGeminiSessionIdFromFile(filepath) {
 }
 
 /**
+ * Extract cwd from Codex session file (first line contains SessionMeta)
+ * @param {string} filepath - Path to session JSONL file
+ * @returns {Promise<string|null>} Working directory or null
+ */
+async function extractCodexSessionCwd(filepath) {
+  try {
+    const readline = require('readline');
+    const stream = fs.createReadStream(filepath, { encoding: 'utf-8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+    for await (const line of rl) {
+      rl.close();
+      stream.destroy();
+      const data = JSON.parse(line);
+      return data.cwd || null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
  * Find the most recently modified session file after startTime
  * Searches all relevant directories for the agent type
  * @param {string} agentType - Agent type
@@ -255,6 +278,14 @@ async function findLatestSession(agentType, cwd, startTime, excludeIds = new Set
           mtime = stat.mtimeMs;
         } catch {
           continue;
+        }
+
+        // For Codex, filter by cwd to scope sessions to current directory
+        if (agentType === 'codex') {
+          const sessionCwd = await extractCodexSessionCwd(filepath);
+          if (sessionCwd && sessionCwd !== cwd) {
+            continue; // Skip sessions from other directories
+          }
         }
 
         // Find the session most recently MODIFIED after startTime

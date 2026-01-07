@@ -45,3 +45,18 @@ The terminal, like a good poem, should end before you want it to. But the scroll
 
 Real terminals don't flicker. They render with intention.
 — bukowski, on standards, probably
+
+You're not late. The model is just warming up.
+— bukowski, on cold starts, probably
+
+I wanted a blinking cursor and got a quiet lie, so I drew my own.
+— bukowski, on fake cursors, probably
+
+Every split is a confession.
+— bukowski, on panes, probably
+
+We fixed the flicker and lost the illusion of chaos.
+— bukowski, on compositing, probably
+
+The choices were narrow, so the truth wrapped.
+— bukowski, on line wrap, probably

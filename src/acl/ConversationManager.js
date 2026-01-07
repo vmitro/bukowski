@@ -38,6 +38,35 @@ class ConversationManager extends EventEmitter {
   }
 
   /**
+   * Create a new empty conversation (without an initial message)
+   * @param {Object} [options]
+   * @param {string} [options.id] - Conversation ID (generated if not provided)
+   * @param {string} [options.initiator] - Initiator agent ID
+   * @param {Object} [options.protocol] - Protocol instance
+   * @returns {Conversation}
+   */
+  createConversation(options = {}) {
+    const crypto = require('crypto');
+
+    if (this.conversations.size >= this.maxConversations) {
+      this._cleanup(true);
+    }
+
+    const id = options.id || crypto.randomUUID();
+    const conversation = new Conversation({
+      id,
+      initiator: options.initiator || 'user',
+      protocol: options.protocol || null,
+      formatter: this.formatter,
+    });
+
+    this.conversations.set(id, conversation);
+    this.emit('conversation:started', conversation);
+
+    return conversation;
+  }
+
+  /**
    * Start a new conversation with a FIPA message
    * @param {FIPAMessage} message - The initiating message
    * @returns {Conversation}
@@ -74,6 +103,7 @@ class ConversationManager extends EventEmitter {
 
     this.conversations.set(conversation.id, conversation);
     this.emit('conversation:started', conversation);
+    this.emit('message:received', { message, conversation });
 
     return conversation;
   }
@@ -95,6 +125,12 @@ class ConversationManager extends EventEmitter {
     // New conversation if not exists
     if (!conversation) {
       conversation = this.startConversation(message);
+      return conversation;
+    }
+
+    // De-dup: skip if we've already seen this message ID
+    const messageId = message._id;
+    if (messageId && conversation.messages.some(m => m._id === messageId)) {
       return conversation;
     }
 
@@ -218,6 +254,19 @@ class ConversationManager extends EventEmitter {
   }
 
   /**
+   * Check if a conversation involves the "user" participant
+   * @private
+   */
+  _conversationInvolvesUser(conversation) {
+    for (const message of conversation.messages || []) {
+      if (message.sender?.name === 'user') return true;
+      const receivers = Array.isArray(message.receiver) ? message.receiver : [message.receiver];
+      if (receivers.some(r => r?.name === 'user')) return true;
+    }
+    return false;
+  }
+
+  /**
    * Clean up completed/stale conversations
    * @private
    */
@@ -231,6 +280,9 @@ class ConversationManager extends EventEmitter {
       const age = now - conversation.lastActivity;
       const isStale = age > maxAge;
       const isComplete = conversation.isComplete;
+
+      // Never clean up conversations involving "user" - needed for chat history persistence
+      if (this._conversationInvolvesUser(conversation)) continue;
 
       if ((isComplete && age > 30000) || (isStale && !conversation.protocol?.isActive?.())) {
         toRemove.push(id);
@@ -300,6 +352,34 @@ class ConversationManager extends EventEmitter {
     this.conversations.clear();
     this.byParticipant.clear();
     this.removeAllListeners();
+  }
+
+  /**
+   * Serialize all conversations for persistence
+   * @returns {Object[]}
+   */
+  toJSON() {
+    return Array.from(this.conversations.values()).map(c => c.toJSON());
+  }
+
+  /**
+   * Restore conversations from JSON
+   * @param {Object[]} conversationsJson
+   */
+  restoreFromJSON(conversationsJson) {
+    if (!Array.isArray(conversationsJson)) return;
+
+    for (const json of conversationsJson) {
+      const conversation = Conversation.fromJSON(json, this.formatter);
+      this.conversations.set(conversation.id, conversation);
+
+      // Rebuild participant index
+      for (const message of conversation.messages) {
+        this._trackParticipant(message.sender.name, conversation.id);
+        const receivers = Array.isArray(message.receiver) ? message.receiver : [message.receiver];
+        receivers.forEach(r => this._trackParticipant(r.name, conversation.id));
+      }
+    }
   }
 }
 
@@ -411,6 +491,45 @@ class Conversation {
         return [m.sender.name, ...receivers.map((r) => r.name)];
       }))],
     };
+  }
+
+  /**
+   * Serialize conversation for persistence
+   * @returns {Object}
+   */
+  toJSON() {
+    return {
+      id: this.id,
+      initiator: this.initiator,
+      messages: this.messages.map(m => m.toJSON()),
+      startTime: this.startTime,
+      lastActivity: this.lastActivity,
+      isComplete: this.isComplete,
+      completedAt: this.completedAt,
+      completionReason: this.completionReason,
+    };
+  }
+
+  /**
+   * Restore conversation from JSON
+   * @param {Object} json
+   * @param {Object} formatter
+   * @returns {Conversation}
+   */
+  static fromJSON(json, formatter) {
+    const conversation = new Conversation({
+      id: json.id,
+      initiator: json.initiator,
+      protocol: null, // Protocol state is not preserved
+      formatter,
+    });
+    conversation.messages = json.messages.map(m => FIPAMessage.fromJSON(m));
+    conversation.startTime = json.startTime;
+    conversation.lastActivity = json.lastActivity;
+    conversation.isComplete = json.isComplete;
+    conversation.completedAt = json.completedAt;
+    conversation.completionReason = json.completionReason;
+    return conversation;
   }
 }
 

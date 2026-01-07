@@ -39,7 +39,7 @@ class Agent {
     this.terminal = new Terminal({
       cols,
       rows: virtualRows,
-      scrollback: parseInt(process.env.BUKOWSKI_SCROLLBACK) || 10000,
+      scrollback: parseInt(process.env.BUKOWSKI_SCROLLBACK) || 50000,
       allowProposedApi: true
     });
     this.serializeAddon = new SerializeAddon();

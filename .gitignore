@@ -6,3 +6,5 @@ crossterm-src/
 public/
 bin/
 app.py
+PLAN.md
+*.mkv

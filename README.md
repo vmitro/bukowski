@@ -29,6 +29,19 @@ node multi.js          # or `bukowski` if linked
 **Navigation**: vim-style (`hjkl`, `gg`, `G`, `/` search)
 **Mouse**: scroll wheel, `Ctrl+scroll` vertical resize, `Alt+scroll` horizontal resize
 
+**Runtime tuning** (ex command):
+` :set output_silence=32 ` (applies immediately)
+` :set scrollback=2000 ` (applies to newly spawned agents)
+
+## Environment overrides
+
+- `BUKOWSKI_SESSION` - default session name (overrides `--session`)
+- `BUKOWSKI_SPLASH` - splash screen duration in ms (default: 2000)
+- `BUKOWSKI_OUTPUT_SILENCE_DURATION` - PTY output debounce in ms (default: 16)
+- `BUKOWSKI_ROWS` - virtual terminal rows per pane (default: pane height)
+- `BUKOWSKI_SCROLLBACK` - scrollback lines per agent (default: 10000)
+- `BUKOWSKI_MCP_SOCKET` - override MCP socket path for the bridge
+
 ## Limitations
 
 - OSC 10/11 queries don't work through PTY intermediaries (affects Codex input box styling)

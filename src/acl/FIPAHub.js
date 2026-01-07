@@ -2,7 +2,7 @@
 // Provides FIPA ACL messaging layer on top of existing Unix socket IPC
 
 const { EventEmitter } = require('events');
-const { FIPAMessage, AgentIdentifier, request, inform, queryIf, queryRef, cfp, subscribe } = require('./FIPAMessage');
+const { FIPAMessage, AgentIdentifier, request, inform, queryIf, queryRef, cfp, subscribe, propose, agree, refuse } = require('./FIPAMessage');
 const { Performatives, getSemantics, getExpectedResponses } = require('./FIPAPerformatives');
 const { ConversationManager } = require('./ConversationManager');
 const { structuredFormatter, naturalFormatter, minimalFormatter, parseLLMResponse } = require('./FIPAPromptFormatter');
@@ -169,8 +169,9 @@ class FIPAHub extends EventEmitter {
       ...message.content,
     };
 
-    // Start conversation tracking
-    const conversation = this.conversations.startConversation(message);
+    // Track outgoing message in conversation (for chat display)
+    // This creates or updates the conversation and emits message:received
+    const conversation = this.conversations.handleMessage(message);
 
     // Determine if we should wait for response
     const expectsResponse = message.expectsResponse();
@@ -178,7 +179,7 @@ class FIPAHub extends EventEmitter {
     if (receivers.length === 1) {
       // Single recipient
       if (expectsResponse) {
-        return this._sendAndWait(message, payload, receivers[0]);
+        return this._sendAndWait(message, payload, receivers[0], conversation);
       } else {
         this.ipcHub.send(
           message.sender.name,
@@ -212,10 +213,13 @@ class FIPAHub extends EventEmitter {
    * Send message and wait for response
    * @private
    */
-  _sendAndWait(message, payload, to) {
+  _sendAndWait(message, payload, to, conversation) {
     const timeout = message.replyBy
       ? message.replyBy - Date.now()
       : 30000;
+
+    // Emit for MCP message queue and PTY injection
+    this.emit('fipa:sent', { message, to, conversation });
 
     return new Promise((resolve) => {
       const timeoutHandle = setTimeout(() => {
@@ -371,6 +375,57 @@ class FIPAHub extends EventEmitter {
       new AgentIdentifier(from),
       new AgentIdentifier(to),
       subscription,
+      options
+    );
+    return this.send(message);
+  }
+
+  /**
+   * Send a PROPOSE message (response to CFP)
+   * @param {string} from
+   * @param {string} to
+   * @param {*} proposal
+   * @param {Object} [options]
+   */
+  async propose(from, to, proposal, options = {}) {
+    const message = propose(
+      new AgentIdentifier(from),
+      new AgentIdentifier(to),
+      proposal,
+      options
+    );
+    return this.send(message);
+  }
+
+  /**
+   * Send an AGREE message (accept a request)
+   * @param {string} from
+   * @param {string} to
+   * @param {*} [content] - Optional confirmation content
+   * @param {Object} [options]
+   */
+  async agree(from, to, content = {}, options = {}) {
+    const message = agree(
+      new AgentIdentifier(from),
+      new AgentIdentifier(to),
+      content,
+      options
+    );
+    return this.send(message);
+  }
+
+  /**
+   * Send a REFUSE message (decline a request)
+   * @param {string} from
+   * @param {string} to
+   * @param {string} reason
+   * @param {Object} [options]
+   */
+  async refuse(from, to, reason, options = {}) {
+    const message = refuse(
+      new AgentIdentifier(from),
+      new AgentIdentifier(to),
+      reason,
       options
     );
     return this.send(message);

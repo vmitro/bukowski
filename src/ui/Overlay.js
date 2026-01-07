@@ -522,6 +522,10 @@ function createOverlay(config) {
       const { AgentPickerOverlay } = require('./AgentPickerOverlay');
       return new AgentPickerOverlay(config);
     }
+    case 'conversation-picker': {
+      const { ConversationPicker } = require('./ConversationPicker');
+      return new ConversationPicker(config);
+    }
     default:
       return new Overlay(config);
   }

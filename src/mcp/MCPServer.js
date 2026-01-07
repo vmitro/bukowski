@@ -56,7 +56,8 @@ class MCPServer extends EventEmitter {
           required: ['to', 'action'],
           properties: {
             to: { type: 'string', description: 'Target agent ID (e.g., "claude-1", "codex-1")' },
-            action: { type: 'string', description: 'The action to request the agent perform' }
+            action: { type: 'string', description: 'The action to request the agent perform' },
+            conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
           }
         }
       },
@@ -68,7 +69,8 @@ class MCPServer extends EventEmitter {
           required: ['to', 'content'],
           properties: {
             to: { type: 'string', description: 'Target agent ID' },
-            content: { type: 'string', description: 'The information to share' }
+            content: { type: 'string', description: 'The information to share' },
+            conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
           }
         }
       },
@@ -80,7 +82,8 @@ class MCPServer extends EventEmitter {
           required: ['to', 'proposition'],
           properties: {
             to: { type: 'string', description: 'Target agent ID' },
-            proposition: { type: 'string', description: 'The yes/no question to ask' }
+            proposition: { type: 'string', description: 'The yes/no question to ask' },
+            conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
           }
         }
       },
@@ -92,7 +95,8 @@ class MCPServer extends EventEmitter {
           required: ['to', 'reference'],
           properties: {
             to: { type: 'string', description: 'Target agent ID' },
-            reference: { type: 'string', description: 'Description of the information requested' }
+            reference: { type: 'string', description: 'Description of the information requested' },
+            conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
           }
         }
       },
@@ -399,16 +403,16 @@ class MCPServer extends EventEmitter {
   async _handleToolCall(toolName, args, callerAgentId) {
     switch (toolName) {
       case 'fipa_request':
-        return this._sendFipaMessage('request', callerAgentId, args.to, args.action);
+        return this._sendFipaMessage('request', callerAgentId, args.to, args.action, args.conversationId);
 
       case 'fipa_inform':
-        return this._sendFipaMessage('inform', callerAgentId, args.to, args.content);
+        return this._sendFipaMessage('inform', callerAgentId, args.to, args.content, args.conversationId);
 
       case 'fipa_query_if':
-        return this._sendFipaMessage('query-if', callerAgentId, args.to, args.proposition);
+        return this._sendFipaMessage('query-if', callerAgentId, args.to, args.proposition, args.conversationId);
 
       case 'fipa_query_ref':
-        return this._sendFipaMessage('query-ref', callerAgentId, args.to, args.reference);
+        return this._sendFipaMessage('query-ref', callerAgentId, args.to, args.reference, args.conversationId);
 
       case 'fipa_cfp': {
         const recipients = this.session.getAllAgents()
@@ -499,36 +503,38 @@ class MCPServer extends EventEmitter {
       throw new Error('FIPA Hub not available');
     }
 
-    // Validate target agent exists (session or external)
+    // Validate target agent exists (session, external, or special "user" identity)
     const sessionAgent = this.session.getAgent(to);
     const externalAgent = this.externalAgents.get(to);
-    if (!sessionAgent && !externalAgent) {
+    const isUser = to === 'user';
+    if (!sessionAgent && !externalAgent && !isUser) {
       throw new Error(`Unknown agent: ${to}`);
     }
 
-    // Send via FIPAHub
+    // Send via FIPAHub - pass conversationId in options if provided
+    const opts = conversationId ? { conversationId } : {};
     let result;
     switch (performative) {
       case 'request':
-        result = this.fipaHub.request(from, to, content);
+        result = this.fipaHub.request(from, to, content, opts);
         break;
       case 'inform':
-        result = this.fipaHub.inform(from, to, content);
+        result = this.fipaHub.inform(from, to, content, opts);
         break;
       case 'query-if':
-        result = this.fipaHub.queryIf(from, to, content);
+        result = this.fipaHub.queryIf(from, to, content, opts);
         break;
       case 'query-ref':
-        result = this.fipaHub.queryRef(from, to, content);
+        result = this.fipaHub.queryRef(from, to, content, opts);
         break;
       case 'propose':
-        result = this.fipaHub.propose ? this.fipaHub.propose(from, to, content, conversationId) : null;
+        result = this.fipaHub.propose(from, to, content, opts);
         break;
       case 'agree':
-        result = this.fipaHub.agree ? this.fipaHub.agree(from, to, conversationId) : null;
+        result = this.fipaHub.agree(from, to, content, opts);
         break;
       case 'refuse':
-        result = this.fipaHub.refuse ? this.fipaHub.refuse(from, to, content, conversationId) : null;
+        result = this.fipaHub.refuse(from, to, content, opts);
         break;
       default:
         // Fall back to inform for unknown performatives
@@ -674,6 +680,21 @@ class MCPServer extends EventEmitter {
       // Send standard MCP notification that clients know how to handle
       this._sendNotification(socket, 'notifications/tools/list_changed', {});
     }
+  }
+
+  /**
+   * Send a custom notification to an agent (for future async support)
+   * @param {string} agentId
+   * @param {string} method - Notification method name
+   * @param {Object} params - Notification parameters
+   */
+  notifyAgent(agentId, method, params = {}) {
+    const socket = this._findSocketForAgent(agentId);
+    if (socket) {
+      this._sendNotification(socket, method, params);
+    }
+    // Also emit event for local handlers
+    this.emit('agent:notification', { agentId, method, params });
   }
 }
 
