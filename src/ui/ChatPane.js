@@ -135,7 +135,7 @@ class ChatPane extends EventEmitter {
       return content;
     }
 
-    if (typeof content === 'object') {
+    if (content && typeof content === 'object') {
       // Try common content fields
       if (content.text) return content.text;
       if (content.message) return content.message;

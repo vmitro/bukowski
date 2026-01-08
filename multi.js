@@ -48,6 +48,7 @@ const {
   findCharOnLine
 } = require('./src/utils/bufferText');
 const { TerminalManager } = require('./src/core/TerminalManager');
+const { ActionDispatcher } = require('./src/handlers');
 
 // Initialize agent types with discovered CLI paths
 const claudePath = findClaudePath();
@@ -1128,10 +1129,7 @@ terminal.registerSignalHandlers();
         }
         break;
 
-      // Focus or create chat pane (Ctrl+Space c)
-      case 'focus_chat':
-        focusOrCreateChatPane();
-        break;
+      // focus_chat -> extracted to handlers/layout
 
       // Visual mode actions
       case 'extend_selection':
@@ -1385,18 +1383,7 @@ terminal.registerSignalHandlers();
         vimState.mode = 'normal';
         break;
 
-      // Layout navigation
-      case 'focus_direction':
-        layoutManager.focusDirection(result.dir);
-        break;
-
-      case 'focus_next':
-        layoutManager.cycleFocus(true);
-        break;
-
-      case 'focus_prev':
-        layoutManager.cycleFocus(false);
-        break;
+      // Layout navigation (focus_direction, focus_next, focus_prev) -> extracted to handlers/layout
 
       // Split operations
       case 'split_horizontal': {
@@ -2245,6 +2232,37 @@ terminal.registerSignalHandlers();
     }
   }
 
+  // Set up action dispatcher (compatibility layer - forwards to handleAction)
+  const dispatcher = new ActionDispatcher();
+  dispatcher.setContext({
+    session,
+    layoutManager,
+    compositor,
+    inputRouter,
+    registerManager,
+    fipaHub,
+    overlayManager,
+    terminal,
+    vimState,
+    searchState,
+    commandState,
+    chatState,
+    aclState,
+    AGENT_TYPES,
+    onHandleResize: handleResize,
+    onHandleAction: handleAction,
+    onExecuteCommand: executeCommand,
+    onCreateNewAgent: createNewAgent,
+    onSetupAgentHandlers: setupAgentHandlers,
+    onCreateChatPane: createChatPane,
+    onShowConversationPicker: showConversationPicker,
+    onFocusOrCreateChatPane: focusOrCreateChatPane,
+    onYankSelection: yankSelection,
+    onEnterVisualMode: enterVisualMode,
+    onMoveVisualCursor: moveVisualCursor
+  });
+  dispatcher.setFallbackHandler(handleAction);
+
   // Input handling
   process.stdin.on('data', (data) => {
     const str = data.toString();
@@ -2346,9 +2364,9 @@ terminal.registerSignalHandlers();
       }
     }
 
-    // Route input
+    // Route input through dispatcher
     const result = inputRouter.handle(str);
-    handleAction(result);
+    dispatcher.dispatch(result);
   });
 
   // Render on agent output - use scheduleDraw for throttled drawing (like index.js)
