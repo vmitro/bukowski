@@ -38,6 +38,10 @@ class HandlerContext {
     this.onMoveVisualCursor = options.onMoveVisualCursor || (() => {});
     this.onExecuteSearch = options.onExecuteSearch || (() => {});
     this.onJumpToMatch = options.onJumpToMatch || (() => {});
+    this.onPasteFromRegister = options.onPasteFromRegister || (() => {});
+
+    // UI components
+    this.chatPane = options.chatPane;
 
     // IPC hub reference (for quit handlers)
     this.ipcHub = options.ipcHub;

@@ -10,13 +10,23 @@ const { layoutHandlers } = require('./layout');
 const { vimHandlers } = require('./vim');
 const { searchHandlers } = require('./search');
 const { sessionHandlers } = require('./session');
+const { visualHandlers } = require('./visual');
+const { yankHandlers } = require('./yank');
+const { fipaHandlers } = require('./fipa');
+const { chatHandlers } = require('./chat');
+const { aclHandlers } = require('./acl');
 
 // Handler registries - populated from extracted handler modules
 const handlers = {
   ...layoutHandlers,
   ...vimHandlers,
   ...searchHandlers,
-  ...sessionHandlers
+  ...sessionHandlers,
+  ...visualHandlers,
+  ...yankHandlers,
+  ...fipaHandlers,
+  ...chatHandlers,
+  ...aclHandlers
 };
 
 /**
