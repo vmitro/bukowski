@@ -48,6 +48,7 @@ const {
   findCharOnLine
 } = require('./src/utils/bufferText');
 const { TerminalManager } = require('./src/core/TerminalManager');
+const { CommandExecutor } = require('./src/core/CommandExecutor');
 const { ActionDispatcher } = require('./src/handlers');
 
 // Initialize agent types with discovered CLI paths
@@ -641,222 +642,11 @@ terminal.registerSignalHandlers();
     }
   }
 
+  // Command execution delegated to CommandExecutor (initialized after dispatcher)
+  let commandExecutor = null;
   function executeCommand(cmd) {
-    const parts = cmd.trim().split(/\s+/);
-    const command = parts[0];
-    const args = parts.slice(1);
-
-    switch (command) {
-      case 'q':
-      case 'quit':
-        // Close focused pane, or quit if last pane
-        const panes = layoutManager.getAllPanes();
-        if (panes.length === 1) {
-          terminal.cleanup();
-          if (ipcHub) ipcHub.stop();
-          session.destroy();
-          process.exit(0);
-        } else {
-          handleAction({ action: 'close_pane' });
-        }
-        break;
-
-      case 'q!':
-      case 'quit!':
-      case 'qa':
-      case 'qa!':
-      case 'qall':
-      case 'qall!':
-        // Force quit everything
-        terminal.cleanup();
-        if (ipcHub) ipcHub.stop();
-        session.destroy();
-        process.exit(0);
-        break;
-
-      case 'e':
-      case 'edit': {
-        // :e [agent] [extra-args...] - new tab with agent (default: claude)
-        const agentType = resolveAgentType(AGENT_TYPES, args[0]);
-        if (agentType) {
-          const extraArgs = args.slice(1);  // Additional CLI args like --continue
-          handleAction({ action: 'new_tab', agentType, extraArgs });
-        }
-        break;
-      }
-
-      case 'sp':
-      case 'split': {
-        // :sp [agent] [extra-args...] - horizontal split (default: claude)
-        const agentType = resolveAgentType(AGENT_TYPES, args[0]);
-        if (agentType) {
-          const extraArgs = args.slice(1);
-          handleAction({ action: 'split_horizontal', agentType, extraArgs });
-        }
-        break;
-      }
-
-      case 'vs':
-      case 'vsp':
-      case 'vsplit': {
-        // :vs [agent] [extra-args...] - vertical split (default: claude)
-        const agentType = resolveAgentType(AGENT_TYPES, args[0]);
-        if (agentType) {
-          const extraArgs = args.slice(1);
-          handleAction({ action: 'split_vertical', agentType, extraArgs });
-        }
-        break;
-      }
-
-      case 'set': {
-        // :set key=value (runtime tuning)
-        if (!args.length) break;
-        const assignment = args.join(' ');
-        let key;
-        let value;
-        if (assignment.includes('=')) {
-          const parts = assignment.split('=');
-          key = parts[0];
-          value = parts.slice(1).join('=');
-        } else {
-          key = args[0];
-          value = args[1];
-        }
-
-        key = (key || '').trim().toLowerCase();
-        value = (value || '').trim();
-        if (!key || !value) break;
-
-        if (['output_silence', 'output_silence_ms', 'output-silence', 'output_silence_duration'].includes(key)) {
-          const ms = Math.max(0, parseInt(value, 10));
-          if (!Number.isNaN(ms)) {
-            outputSilenceMs = ms;
-            process.env.BUKOWSKI_OUTPUT_SILENCE_DURATION = String(ms);
-          }
-        } else if (key === 'scrollback') {
-          const sb = Math.max(0, parseInt(value, 10));
-          if (!Number.isNaN(sb)) {
-            process.env.BUKOWSKI_SCROLLBACK = String(sb);
-          }
-        }
-        break;
-      }
-
-      case 'only':
-      case 'on':
-        handleAction({ action: 'close_others' });
-        break;
-
-      case 'close':
-      case 'clo':
-        handleAction({ action: 'close_pane' });
-        break;
-
-      case 'w':
-      case 'write':
-      case 'save': {
-        // :w [name] - save session (optionally rename)
-        if (args[0]) {
-          session.name = args[0];
-        }
-        // Sync focused pane ID to session before saving
-        session.focusedPaneId = layoutManager.focusedPaneId;
-        // If zoomed, save the unzoomed layout (so restore gets full layout)
-        const wasZoomed = layoutManager.isZoomed();
-        const zoomedLayout = wasZoomed ? session.layout : null;
-        if (wasZoomed) {
-          session.layout = layoutManager.savedLayout;
-        }
-        // Capture agent session IDs before saving
-        captureAgentSessions().then(() => {
-          return session.save(undefined, fipaHub.conversations);
-        }).then(filepath => {
-          // Restore zoomed state after save
-          if (wasZoomed) {
-            session.layout = zoomedLayout;
-          }
-        }).catch(() => {
-          // Restore zoomed state on error too
-          if (wasZoomed) {
-            session.layout = zoomedLayout;
-          }
-        });
-        break;
-      }
-
-      case 'wq':
-      case 'x': {
-        // :wq / :x - save and quit
-        if (args[0]) session.name = args[0];
-        session.focusedPaneId = layoutManager.focusedPaneId;
-        // If zoomed, save the unzoomed layout
-        if (layoutManager.isZoomed()) {
-          session.layout = layoutManager.savedLayout;
-        }
-        // Capture agent session IDs before saving
-        captureAgentSessions().then(() => {
-          return session.save(undefined, fipaHub.conversations);
-        }).then(() => {
-          terminal.cleanup();
-          if (ipcHub) ipcHub.stop();
-          session.destroy();
-          process.exit(0);
-        }).catch(() => {
-          terminal.cleanup();
-          if (ipcHub) ipcHub.stop();
-          session.destroy();
-          process.exit(1);
-        });
-        break;
-      }
-
-      case 'sessions':
-      case 'ls': {
-        // :sessions - list saved sessions (writes to focused agent as info)
-        Session.listSessions().then(sessions => {
-          if (sessions.length === 0) {
-            // No sessions saved yet
-            return;
-          }
-          // Format session list
-          let output = '\r\n--- Saved Sessions ---\r\n';
-          for (const s of sessions.slice(0, 10)) {
-            const date = new Date(s.updatedAt).toLocaleString();
-            output += `  ${s.name} (${s.id.slice(0, 8)}) - ${s.agentCount} agents - ${date}\r\n`;
-          }
-          output += '----------------------\r\n';
-          // Write to focused agent's terminal
-          const focusedAgent = layoutManager.getFocusedAgent();
-          if (focusedAgent?.terminal) {
-            focusedAgent.terminal.write(output);
-          }
-        });
-        break;
-      }
-
-      case 'restore':
-      case 'load': {
-        // :restore [name|id] - restore a session (not implemented in-place, show hint)
-        const target = args[0] || 'latest';
-        const focusedAgent = layoutManager.getFocusedAgent();
-        if (focusedAgent?.terminal) {
-          focusedAgent.terminal.write(`\r\nTo restore session "${target}", restart with: bukowski --restore ${target}\r\n`);
-        }
-        break;
-      }
-
-      case 'name':
-      case 'rename': {
-        // :name <newname> - rename current session
-        if (args[0]) {
-          session.name = args[0];
-        }
-        break;
-      }
-
-      default:
-        // Unknown command - silently ignore for now
-        break;
+    if (commandExecutor) {
+      commandExecutor.execute(cmd);
     }
   }
 
@@ -1157,6 +947,20 @@ terminal.registerSignalHandlers();
     ipcHub
   });
   dispatcher.setFallbackHandler(handleAction);
+
+  // Initialize CommandExecutor (needs dispatcher for action dispatch)
+  commandExecutor = new CommandExecutor({
+    layoutManager,
+    terminal,
+    session,
+    ipcHub,
+    fipaHub,
+    dispatcher,
+    AGENT_TYPES,
+    resolveAgentType,
+    onCaptureAgentSessions: captureAgentSessions,
+    onSetOutputSilence: (ms) => { outputSilenceMs = ms; }
+  });
 
   // Input handling
   process.stdin.on('data', (data) => {
