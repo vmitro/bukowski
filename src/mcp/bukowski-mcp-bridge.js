@@ -54,10 +54,11 @@ const pendingRequests = new Map();
 
 /**
  * Discover bukowski's MCP socket
- * Priority: env var > discovery file (skip stale socket search)
+ * Priority: env var only (discovery file disabled to prevent cross-session leakage)
  */
 function discoverSocket() {
-  // 1. Check environment variable (most reliable)
+  // Use environment variable (set by bukowski when spawning agents)
+  // This ensures agents connect to their parent session, not another one
   if (process.env.BUKOWSKI_MCP_SOCKET) {
     const envPath = process.env.BUKOWSKI_MCP_SOCKET;
     if (fs.existsSync(envPath)) {
@@ -65,17 +66,10 @@ function discoverSocket() {
     }
   }
 
-  // 2. Check discovery file (written by active bukowski instance)
-  try {
-    const socketPath = fs.readFileSync(SOCKET_FILE, 'utf-8').trim();
-    if (fs.existsSync(socketPath)) {
-      return socketPath;
-    }
-  } catch {
-    // File doesn't exist or can't be read
-  }
+  // Fallback discovery file disabled - causes cross-session message leakage
+  // when multiple bukowski sessions are running. External agents must set
+  // BUKOWSKI_MCP_SOCKET env var to connect to a specific session.
 
-  // Don't search /tmp for stale sockets - they cause hangs on WSL2
   return null;
 }
 
