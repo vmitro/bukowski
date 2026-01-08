@@ -36,6 +36,11 @@ class HandlerContext {
     this.onYankSelection = options.onYankSelection || (() => {});
     this.onEnterVisualMode = options.onEnterVisualMode || (() => {});
     this.onMoveVisualCursor = options.onMoveVisualCursor || (() => {});
+    this.onExecuteSearch = options.onExecuteSearch || (() => {});
+    this.onJumpToMatch = options.onJumpToMatch || (() => {});
+
+    // IPC hub reference (for quit handlers)
+    this.ipcHub = options.ipcHub;
 
     // Agent types config
     this.AGENT_TYPES = options.AGENT_TYPES;

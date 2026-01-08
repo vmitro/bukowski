@@ -7,10 +7,16 @@
 
 const { HandlerContext } = require('./HandlerContext');
 const { layoutHandlers } = require('./layout');
+const { vimHandlers } = require('./vim');
+const { searchHandlers } = require('./search');
+const { sessionHandlers } = require('./session');
 
 // Handler registries - populated from extracted handler modules
 const handlers = {
-  ...layoutHandlers
+  ...layoutHandlers,
+  ...vimHandlers,
+  ...searchHandlers,
+  ...sessionHandlers
 };
 
 /**

@@ -3,10 +3,12 @@
  */
 
 const { focusHandlers } = require('./focusHandlers');
+const { splitHandlers } = require('./splitHandlers');
 
 // Combine all layout handlers
 const layoutHandlers = {
-  ...focusHandlers
+  ...focusHandlers,
+  ...splitHandlers
 };
 
-module.exports = { layoutHandlers, focusHandlers };
+module.exports = { layoutHandlers, focusHandlers, splitHandlers };

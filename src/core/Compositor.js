@@ -42,6 +42,8 @@ class Compositor {
     this.reflowMaxTimers = new Map();    // paneId -> max timeout (200ms)
     this.lastContentHeights = new Map();   // paneId -> lastHeight (for delta detection)
     this.stableContentHeights = new Map(); // paneId -> stable height (for status bar)
+    this.clearEvents = new Map();         // paneId -> [timestamps] for CPS
+    this.cpsWindowMs = parseInt(process.env.BUKOWSKI_CPS_WINDOW_MS, 10) || 5000;
   }
 
   startCursorBlink() {
@@ -64,6 +66,29 @@ class Compositor {
     this.stopCursorBlink();
     this.cursorBlinkVisible = true;
     this.startCursorBlink();
+  }
+
+  recordClear(paneId) {
+    const now = Date.now();
+    const cutoff = now - this.cpsWindowMs;
+    const events = this.clearEvents.get(paneId) || [];
+    events.push(now);
+    while (events.length && events[0] < cutoff) {
+      events.shift();
+    }
+    this.clearEvents.set(paneId, events);
+  }
+
+  getClearCps(paneId) {
+    const now = Date.now();
+    const cutoff = now - this.cpsWindowMs;
+    const events = this.clearEvents.get(paneId);
+    if (!events || events.length === 0) return 0;
+    while (events.length && events[0] < cutoff) {
+      events.shift();
+    }
+    if (events.length === 0) return 0;
+    return events.length / (this.cpsWindowMs / 1000);
   }
 
   /**
@@ -866,7 +891,8 @@ class Compositor {
 
       // Show lock indicator when viewport is frozen
       const lockIndicator = isLocked ? '🔒' : '';
-      right += `${lockIndicator}[${from}-${to}/${contentHeight}] ${pctStr} `;
+      const cps = this.getClearCps(paneId);
+      right += `${lockIndicator}[${from}-${to}/${contentHeight}] ${pctStr} ${cps.toFixed(2)} CPS `;
     }
 
     if (focusedAgent) {
