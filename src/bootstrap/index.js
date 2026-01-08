@@ -7,8 +7,8 @@ const fs = require('fs');
 const { execSync } = require('child_process');
 const os = require('os');
 
-// Socket discovery file for MCP bridge
-const SOCKET_DISCOVERY_FILE = path.join(os.homedir(), '.bukowski-mcp-socket');
+// Socket discovery file for MCP bridge (per-process to isolate sessions)
+const SOCKET_DISCOVERY_FILE = path.join(os.homedir(), `.bukowski-mcp-socket-${process.pid}`);
 
 // Load quotes from quotes.txt
 function loadQuotes(quotesPath) {

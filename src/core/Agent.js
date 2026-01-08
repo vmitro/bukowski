@@ -55,7 +55,8 @@ class Agent {
         ...this.env,
         FORCE_COLOR: '1',
         BUKOWSKI_AGENT_ID: this.id,    // For MCP bridge to use session agent ID
-        BUKOWSKI_AGENT_TYPE: this.type // For MCP bridge to know agent type
+        BUKOWSKI_AGENT_TYPE: this.type, // For MCP bridge to know agent type
+        BUKOWSKI_MCP_SOCKET: process.env.BUKOWSKI_MCP_SOCKET // Inherit parent's socket path
       }
     });
 

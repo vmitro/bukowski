@@ -257,6 +257,8 @@ terminal.registerSignalHandlers();
     // Write socket path to discovery file for MCP bridge (fallback for external tools)
     try {
       fs.writeFileSync(SOCKET_DISCOVERY_FILE, socketPath, 'utf-8');
+      // Also set env var so child agents inherit it (primary discovery method)
+      process.env.BUKOWSKI_MCP_SOCKET = socketPath;
     } catch {
       // Ignore - discovery file is optional
     }
