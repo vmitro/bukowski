@@ -90,10 +90,14 @@ const FIPA_REMINDER_INLINE = FIPA_REMINDER.replace(/\n+/g, '. ');
 
 // Create agent type configurations
 function createAgentTypes(claudePath, codexPath) {
+  const claudeEntrypointExists = claudePath && claudePath !== 'claude' && fs.existsSync(claudePath);
+  const claudeCommand = claudeEntrypointExists ? 'node' : 'claude';
+  const claudeArgs = claudeEntrypointExists ? [claudePath] : [];
+
   return {
     claude: {
-      command: 'node',
-      args: [claudePath],
+      command: claudeCommand,
+      args: claudeArgs,
       name: 'Claude',
       promptFlag: '--append-system-prompt',
       getResumeArgs: (sessionId) => sessionId

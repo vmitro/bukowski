@@ -129,13 +129,14 @@ terminal.registerSignalHandlers();
 
     // Create initial Claude agent
     // Inject FIPA reminder if user didn't provide their own prompt
-    const initialArgs = [claudePath, ...cliArgs.agentArgs];
+    const claudeConfig = AGENT_TYPES.claude;
+    const initialArgs = [...claudeConfig.args, ...cliArgs.agentArgs];
     const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, 'claude', initialArgs);
     const claude = new Agent({
       id: 'claude-1',
-      name: 'Claude',
+      name: claudeConfig.name,
       type: 'claude',
-      command: 'node',
+      command: claudeConfig.command,
       args: [...initialArgs, ...fipaArgs],
       autostart: true
     });
@@ -255,10 +256,12 @@ terminal.registerSignalHandlers();
       }
     }
 
-    // Write socket path to discovery file for MCP bridge (fallback for external tools)
+    // Write socket path to discovery files for MCP bridge
     try {
       fs.writeFileSync(SOCKET_DISCOVERY_FILE, socketPath, 'utf-8');
-      // Also set env var so child agents inherit it (primary discovery method)
+      // Global discovery file for MCP servers that don't inherit env vars
+      fs.writeFileSync(path.join(os.homedir(), '.bukowski-mcp-socket'), socketPath, 'utf-8');
+      // Env var for child agents (primary discovery method)
       process.env.BUKOWSKI_MCP_SOCKET = socketPath;
     } catch {
       // Ignore - discovery file is optional

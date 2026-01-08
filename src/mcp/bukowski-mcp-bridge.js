@@ -39,6 +39,46 @@ function getAncestorPids() {
 // Discovery file location
 const SOCKET_FILE = path.join(os.homedir(), '.bukowski-mcp-socket');
 
+/**
+ * Build diagnostic info for connection failures
+ */
+function getDiagnostics() {
+  const lines = ['bukowski is not running (or bridge cannot connect)', ''];
+
+  // Check env var
+  const envSocket = process.env.BUKOWSKI_MCP_SOCKET;
+  if (envSocket) {
+    const exists = fs.existsSync(envSocket);
+    lines.push(`BUKOWSKI_MCP_SOCKET=${envSocket} (${exists ? 'exists' : 'NOT FOUND'})`);
+  } else {
+    lines.push('BUKOWSKI_MCP_SOCKET=(not set)');
+  }
+
+  // Check discovery file
+  try {
+    const discoveryPath = fs.readFileSync(SOCKET_FILE, 'utf-8').trim();
+    const exists = fs.existsSync(discoveryPath);
+    lines.push(`~/.bukowski-mcp-socket -> ${discoveryPath} (${exists ? 'exists' : 'NOT FOUND'})`);
+  } catch {
+    lines.push('~/.bukowski-mcp-socket: (file not found)');
+  }
+
+  // Check /tmp for any bukowski sockets
+  try {
+    const tmpFiles = fs.readdirSync('/tmp').filter(f => f.startsWith('bukowski-mcp-'));
+    if (tmpFiles.length > 0) {
+      lines.push(`/tmp sockets: ${tmpFiles.join(', ')}`);
+    } else {
+      lines.push('/tmp sockets: (none found)');
+    }
+  } catch {
+    lines.push('/tmp sockets: (cannot read /tmp)');
+  }
+
+  lines.push('', 'Start bukowski first, or check socket permissions.');
+  return lines.join('\n');
+}
+
 // Agent ID assigned by bukowski
 let agentId = null;
 let agentType = null;
@@ -54,11 +94,10 @@ const pendingRequests = new Map();
 
 /**
  * Discover bukowski's MCP socket
- * Priority: env var only (discovery file disabled to prevent cross-session leakage)
+ * Priority: env var > discovery file
  */
 function discoverSocket() {
-  // Use environment variable (set by bukowski when spawning agents)
-  // This ensures agents connect to their parent session, not another one
+  // Primary: use env var (set by bukowski when spawning agents)
   if (process.env.BUKOWSKI_MCP_SOCKET) {
     const envPath = process.env.BUKOWSKI_MCP_SOCKET;
     if (fs.existsSync(envPath)) {
@@ -66,9 +105,15 @@ function discoverSocket() {
     }
   }
 
-  // Fallback discovery file disabled - causes cross-session message leakage
-  // when multiple bukowski sessions are running. External agents must set
-  // BUKOWSKI_MCP_SOCKET env var to connect to a specific session.
+  // Fallback: discovery file (for MCP servers that don't inherit env vars)
+  try {
+    const socketPath = fs.readFileSync(SOCKET_FILE, 'utf-8').trim();
+    if (fs.existsSync(socketPath)) {
+      return socketPath;
+    }
+  } catch {
+    // File doesn't exist
+  }
 
   return null;
 }
@@ -470,14 +515,14 @@ async function handleRequest(request) {
           });
         }
       } else {
-        // Not connected to bukowski
+        // Not connected to bukowski - show diagnostic info
         sendToStdout({
           jsonrpc: '2.0',
           id,
           result: {
             content: [{
               type: 'text',
-              text: 'bukowski is not running. Start bukowski first to enable agent communication.'
+              text: getDiagnostics()
             }],
             isError: true
           }
