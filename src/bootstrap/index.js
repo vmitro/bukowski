@@ -7,8 +7,10 @@ const fs = require('fs');
 const { execSync } = require('child_process');
 const os = require('os');
 
-// Socket discovery file for MCP bridge (per-process to isolate sessions)
-const SOCKET_DISCOVERY_FILE = path.join(os.homedir(), `.bukowski-mcp-socket-${process.pid}`);
+// Socket discovery paths for MCP bridge
+const SOCKETS_DIR = path.join(os.homedir(), '.bukowski', 'sockets');
+const SOCKET_DISCOVERY_FILE = path.join(SOCKETS_DIR, String(process.pid));
+const LEGACY_SOCKET_FILE = path.join(os.homedir(), '.bukowski-mcp-socket');
 
 // Load quotes from quotes.txt
 function loadQuotes(quotesPath) {
@@ -232,7 +234,9 @@ Examples:
 
 module.exports = {
   // Constants
+  SOCKETS_DIR,
   SOCKET_DISCOVERY_FILE,
+  LEGACY_SOCKET_FILE,
   FIPA_REMINDER,
   FIPA_REMINDER_INLINE,
 

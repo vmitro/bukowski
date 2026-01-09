@@ -481,6 +481,7 @@ class Compositor {
   renderChatInput() {
     const chatState = this.chatState || {};
     const input = chatState.inputBuffer || '';
+    const cursorPos = chatState.cursorPos ?? input.length;
     const performative = chatState.pendingPerformative || 'inform';
     const selectedAgent = chatState.selectedAgent;
 
@@ -509,9 +510,11 @@ class Compositor {
       prompt += '\x1b[2m<Tab to select agent>\x1b[0m ';
     }
 
-    // Input buffer with cursor
-    const cursorPos = input.length;
-    const visibleInput = input + '\x1b[7m \x1b[27m'; // Block cursor
+    // Input buffer with cursor at correct position
+    const beforeCursor = input.slice(0, cursorPos);
+    const atCursor = input[cursorPos] || ' ';
+    const afterCursor = input.slice(cursorPos + 1);
+    const visibleInput = beforeCursor + '\x1b[7m' + atCursor + '\x1b[27m' + afterCursor;
 
     prompt += visibleInput;
 
@@ -1119,7 +1122,14 @@ class Compositor {
       : liveHeight;
 
     const maxScroll = Math.max(0, effectiveHeight - pane.bounds.height);
-    const oldScroll = this.scrollOffsets.get(paneId) || 0;
+    let oldScroll = this.scrollOffsets.get(paneId) || 0;
+
+    // If we have an anchor (locked/frozen), base scrolling off the anchored view.
+    const anchor = this.scrollAnchors.get(paneId);
+    if (anchor !== undefined && this.followTail.get(paneId) === false) {
+      const anchoredScroll = Math.max(0, Math.min(maxScroll, maxScroll - anchor));
+      oldScroll = anchoredScroll;
+    }
 
     let scrollY = Math.max(0, Math.min(maxScroll, oldScroll + delta));
     this.scrollOffsets.set(paneId, scrollY);

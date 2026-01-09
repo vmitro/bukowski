@@ -5,11 +5,20 @@
 const fs = require('fs');
 
 class TerminalManager {
-  constructor(socketDiscoveryFile) {
+  constructor(socketDiscoveryFile, legacySocketFile) {
     this.socketDiscoveryFile = socketDiscoveryFile;
+    this.legacySocketFile = legacySocketFile;
+    this.socketPath = null; // Track our socket path for cleanup
     this.activeSession = null;
     this.activeCompositor = null;
     this.shutdownCallbacks = [];
+  }
+
+  /**
+   * Set socket path (for cleanup to know which socket belongs to us)
+   */
+  setSocketPath(socketPath) {
+    this.socketPath = socketPath;
   }
 
   /**
@@ -29,13 +38,22 @@ class TerminalManager {
     process.stdout.write('\x1b[?25h');              // Show cursor
     process.stdout.write('\x1b[?1049l');            // Exit alt screen
 
-    // Remove socket discovery file
+    // Remove per-PID socket discovery file (always ours)
     if (this.socketDiscoveryFile) {
       try {
         fs.unlinkSync(this.socketDiscoveryFile);
-      } catch {
-        // Ignore - file may not exist
-      }
+      } catch { /* ignore */ }
+    }
+
+    // Only remove legacy file if it still points to our socket
+    // (avoids clobbering newer session's legacy file)
+    if (this.legacySocketFile && this.socketPath) {
+      try {
+        const current = fs.readFileSync(this.legacySocketFile, 'utf-8').trim();
+        if (current === this.socketPath) {
+          fs.unlinkSync(this.legacySocketFile);
+        }
+      } catch { /* ignore */ }
     }
   }
 

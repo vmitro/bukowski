@@ -36,8 +36,59 @@ function getAncestorPids() {
   return ancestors;
 }
 
-// Discovery file location
-const SOCKET_FILE = path.join(os.homedir(), '.bukowski-mcp-socket');
+// Discovery paths
+const SOCKETS_DIR = path.join(os.homedir(), '.bukowski', 'sockets');
+const LEGACY_SOCKET_FILE = path.join(os.homedir(), '.bukowski-mcp-socket');
+
+/**
+ * Check if a PID is still running
+ */
+function isPidRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Prune stale socket files (dead PID or missing socket path)
+ */
+function pruneStaleSocketFiles() {
+  try {
+    if (!fs.existsSync(SOCKETS_DIR)) return;
+    const files = fs.readdirSync(SOCKETS_DIR);
+    for (const file of files) {
+      const pid = parseInt(file, 10);
+      if (isNaN(pid)) continue;
+
+      const filePath = path.join(SOCKETS_DIR, file);
+      let shouldDelete = false;
+
+      if (!isPidRunning(pid)) {
+        // PID not running - stale
+        shouldDelete = true;
+      } else {
+        // PID running but check if socket path exists
+        try {
+          const socketPath = fs.readFileSync(filePath, 'utf-8').trim();
+          if (!fs.existsSync(socketPath)) {
+            shouldDelete = true;
+          }
+        } catch {
+          shouldDelete = true;
+        }
+      }
+
+      if (shouldDelete) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+}
 
 /**
  * Build diagnostic info for connection failures
@@ -54,26 +105,31 @@ function getDiagnostics() {
     lines.push('BUKOWSKI_MCP_SOCKET=(not set)');
   }
 
-  // Check discovery file
+  // Check sockets directory
   try {
-    const discoveryPath = fs.readFileSync(SOCKET_FILE, 'utf-8').trim();
+    if (fs.existsSync(SOCKETS_DIR)) {
+      const files = fs.readdirSync(SOCKETS_DIR);
+      const active = files.filter(f => isPidRunning(parseInt(f, 10)));
+      lines.push(`~/.bukowski/sockets/: ${active.length} active sessions (${files.length} total)`);
+    } else {
+      lines.push('~/.bukowski/sockets/: (not found)');
+    }
+  } catch {
+    lines.push('~/.bukowski/sockets/: (cannot read)');
+  }
+
+  // Check legacy discovery file
+  try {
+    const discoveryPath = fs.readFileSync(LEGACY_SOCKET_FILE, 'utf-8').trim();
     const exists = fs.existsSync(discoveryPath);
     lines.push(`~/.bukowski-mcp-socket -> ${discoveryPath} (${exists ? 'exists' : 'NOT FOUND'})`);
   } catch {
-    lines.push('~/.bukowski-mcp-socket: (file not found)');
+    lines.push('~/.bukowski-mcp-socket: (not found)');
   }
 
-  // Check /tmp for any bukowski sockets
-  try {
-    const tmpFiles = fs.readdirSync('/tmp').filter(f => f.startsWith('bukowski-mcp-'));
-    if (tmpFiles.length > 0) {
-      lines.push(`/tmp sockets: ${tmpFiles.join(', ')}`);
-    } else {
-      lines.push('/tmp sockets: (none found)');
-    }
-  } catch {
-    lines.push('/tmp sockets: (cannot read /tmp)');
-  }
+  // Show ancestor PIDs for debugging
+  const ancestors = getAncestorPids();
+  lines.push(`Ancestor PIDs: ${ancestors.slice(0, 5).join(', ')}${ancestors.length > 5 ? '...' : ''}`);
 
   lines.push('', 'Start bukowski first, or check socket permissions.');
   return lines.join('\n');
@@ -94,10 +150,14 @@ const pendingRequests = new Map();
 
 /**
  * Discover bukowski's MCP socket
- * Priority: env var > discovery file
+ * Priority: env var > ancestor PID match > most recent > legacy file
+ * Called dynamically on each connect attempt (not cached)
  */
 function discoverSocket() {
-  // Primary: use env var (set by bukowski when spawning agents)
+  // Prune stale files first
+  pruneStaleSocketFiles();
+
+  // 1. Explicit env var override (set by bukowski for child agents)
   if (process.env.BUKOWSKI_MCP_SOCKET) {
     const envPath = process.env.BUKOWSKI_MCP_SOCKET;
     if (fs.existsSync(envPath)) {
@@ -105,15 +165,57 @@ function discoverSocket() {
     }
   }
 
-  // Fallback: discovery file (for MCP servers that don't inherit env vars)
+  // 2. Ancestor PID matching (for processes in bukowski's tree)
   try {
-    const socketPath = fs.readFileSync(SOCKET_FILE, 'utf-8').trim();
+    if (fs.existsSync(SOCKETS_DIR)) {
+      const files = fs.readdirSync(SOCKETS_DIR);
+      const ancestors = new Set(getAncestorPids());
+
+      // Check if any socket file's PID is our ancestor
+      for (const file of files) {
+        const pid = parseInt(file, 10);
+        if (!isNaN(pid) && ancestors.has(pid)) {
+          const socketPath = fs.readFileSync(path.join(SOCKETS_DIR, file), 'utf-8').trim();
+          if (fs.existsSync(socketPath)) {
+            return socketPath;
+          }
+        }
+      }
+
+      // 3. Most recent active session (fallback for external tools)
+      // Collect active sessions with mtime, sort by most recent first
+      const activeSessions = [];
+      for (const file of files) {
+        const pid = parseInt(file, 10);
+        if (!isNaN(pid) && isPidRunning(pid)) {
+          const filePath = path.join(SOCKETS_DIR, file);
+          try {
+            const stat = fs.statSync(filePath);
+            activeSessions.push({ filePath, mtime: stat.mtimeMs });
+          } catch { /* ignore */ }
+        }
+      }
+      activeSessions.sort((a, b) => b.mtime - a.mtime);
+
+      // Return first one with valid socket path
+      for (const { filePath } of activeSessions) {
+        try {
+          const socketPath = fs.readFileSync(filePath, 'utf-8').trim();
+          if (fs.existsSync(socketPath)) {
+            return socketPath;
+          }
+        } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 4. Legacy discovery file (backwards compatibility)
+  try {
+    const socketPath = fs.readFileSync(LEGACY_SOCKET_FILE, 'utf-8').trim();
     if (fs.existsSync(socketPath)) {
       return socketPath;
     }
-  } catch {
-    // File doesn't exist
-  }
+  } catch { /* ignore */ }
 
   return null;
 }

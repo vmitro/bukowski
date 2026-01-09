@@ -125,6 +125,19 @@ const aclHandlers = {
     ctx.compositor.draw();
   },
 
+  acl_cycle_performative_back(ctx, _result) {
+    const currentIdx = PERFORMATIVES.indexOf(ctx.aclState.performative);
+    const prevIdx = currentIdx <= 0 ? PERFORMATIVES.length - 1 : currentIdx - 1;
+    ctx.aclState.performative = PERFORMATIVES[prevIdx];
+
+    // Update overlay
+    const overlay = ctx.overlayManager.get(ctx.aclState.overlayId);
+    if (overlay) {
+      overlay.setPerformative(ctx.aclState.performative);
+    }
+    ctx.compositor.draw();
+  },
+
   acl_send(ctx, _result) {
     const overlay = ctx.overlayManager.get(ctx.aclState.overlayId);
     if (!overlay) return;

@@ -362,12 +362,37 @@ class InputRouter {
    * Chat mode allows composing FIPA ACL messages to other agents
    */
   handleChatMode(data) {
-    // Enter sends the message
-    if (data === '\r' || data === '\n') {
+    // Bracketed paste: ESC[200~ ... ESC[201~
+    if (data.startsWith('\x1b[200~')) {
+      const pasteEnd = data.indexOf('\x1b[201~');
+      if (pasteEnd !== -1) {
+        const text = data.slice(6, pasteEnd);
+        return { action: 'chat_paste', text };
+      }
+      // Incomplete paste sequence - treat as paste of everything after start
+      return { action: 'chat_paste', text: data.slice(6) };
+    }
+
+    // Enter (CR) sends the message
+    if (data === '\r') {
       return { action: 'chat_send' };
     }
 
-    // ESC exits chat mode
+    // Ctrl+J (LF) inserts newline
+    if (data === '\n' || data === '\x0a') {
+      return { action: 'chat_newline' };
+    }
+
+    // Alt/Ctrl/Shift+Enter variants insert newline
+    if (
+      data === '\x1b\r' || data === '\x1b\n' ||
+      data === '\x1b[13;2~' || data === '\x1b[13;5~' || data === '\x1b[13;6~' ||
+      data === '\x1b[27;5;13~' || data === '\x1b[27;6;13~'
+    ) {
+      return { action: 'chat_newline' };
+    }
+
+    // ESC exits chat mode (but not if part of a sequence)
     if (data === '\x1b') {
       this.mode = 'insert';
       return { action: 'chat_exit' };
@@ -376,6 +401,11 @@ class InputRouter {
     // Backspace
     if (data === '\x7f' || data === '\b') {
       return { action: 'chat_backspace' };
+    }
+
+    // Delete key
+    if (data === '\x1b[3~') {
+      return { action: 'chat_delete' };
     }
 
     // Ctrl+W: delete word
@@ -388,19 +418,58 @@ class InputRouter {
       return { action: 'chat_clear' };
     }
 
+    // Ctrl+A: cursor to start (emacs)
+    if (data === '\x01') {
+      return { action: 'chat_cursor_home' };
+    }
+
+    // Ctrl+E: cursor to end (emacs)
+    if (data === '\x05') {
+      return { action: 'chat_cursor_end' };
+    }
+
+    // Home key
+    if (data === '\x1b[H' || data === '\x1bOH' || data === '\x1b[1~') {
+      return { action: 'chat_cursor_home' };
+    }
+
+    // End key
+    if (data === '\x1b[F' || data === '\x1bOF' || data === '\x1b[4~') {
+      return { action: 'chat_cursor_end' };
+    }
+
     // Tab: cycle target agent
     if (data === '\t') {
       return { action: 'chat_cycle_agent' };
     }
 
-    // Shift+Tab (usually ESC [ Z): cycle agent backwards
-    if (data === '\x1b[Z') {
+    // Shift+Tab (ESC [ Z or ESC [ 1;2Z): cycle performative backwards
+    if (data === '\x1b[Z' || data === '\x1b[1;2Z') {
+      return { action: 'chat_cycle_performative_back' };
+    }
+
+    // Ctrl+P: cycle performative forward
+    if (data === '\x10') {
+      return { action: 'chat_cycle_performative' };
+    }
+
+    // Ctrl+N: cycle agent backwards (alternative to lost Shift+Tab)
+    if (data === '\x0e') {
       return { action: 'chat_cycle_agent_back' };
     }
 
-    // Ctrl+P: cycle performative
-    if (data === '\x10') {
-      return { action: 'chat_cycle_performative' };
+    // Word movement (emacs + terminal variants)
+    if (data === '\x1bb' || data === '\x1b[1;3D' || data === '\x1b[3D') {
+      return { action: 'chat_word_left' };
+    }
+    if (data === '\x1bf' || data === '\x1b[1;3C' || data === '\x1b[3C') {
+      return { action: 'chat_word_right' };
+    }
+    if (data === '\x1b[1;5D' || data === '\x1b[5D') {
+      return { action: 'chat_word_left' };
+    }
+    if (data === '\x1b[1;5C' || data === '\x1b[5C') {
+      return { action: 'chat_word_right' };
     }
 
     // Up arrow: scroll chat up
@@ -413,12 +482,27 @@ class InputRouter {
       return { action: 'chat_scroll_down' };
     }
 
-    // Left/Right arrows: prev/next conversation
+    // Left arrow: cursor left
     if (data === '\x1b[D') {
+      return { action: 'chat_cursor_left' };
+    }
+
+    // Right arrow: cursor right
+    if (data === '\x1b[C') {
+      return { action: 'chat_cursor_right' };
+    }
+
+    // Ctrl+Up/Down: prev/next conversation
+    if (data === '\x1b[1;5A') {
       return { action: 'chat_prev_conversation' };
     }
-    if (data === '\x1b[C') {
+    if (data === '\x1b[1;5B') {
       return { action: 'chat_next_conversation' };
+    }
+
+    // Multi-char input (likely paste without bracketed mode)
+    if (data.length > 1) {
+      return { action: 'chat_chunk', text: data };
     }
 
     // Regular character - add to input buffer
@@ -444,11 +528,14 @@ class InputRouter {
     // Tab - cycle target agent
     if (data === '\t') return { action: 'acl_cycle_agent' };
 
-    // Shift+Tab - cycle agent backwards
-    if (data === '\x1b[Z') return { action: 'acl_cycle_agent_back' };
+    // Shift+Tab - cycle performative backwards
+    if (data === '\x1b[Z' || data === '\x1b[1;2Z') return { action: 'acl_cycle_performative_back' };
 
     // Ctrl+P - cycle performative
     if (data === '\x10') return { action: 'acl_cycle_performative' };
+
+    // Ctrl+N - cycle agent backwards
+    if (data === '\x0e') return { action: 'acl_cycle_agent_back' };
 
     // Enter - send message
     if (data === '\r' || data === '\n') return { action: 'acl_send' };

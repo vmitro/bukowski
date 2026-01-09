@@ -6,7 +6,9 @@ const fs = require('fs');
 
 // Bootstrap module
 const {
+  SOCKETS_DIR,
   SOCKET_DISCOVERY_FILE,
+  LEGACY_SOCKET_FILE,
   FIPA_REMINDER,
   findClaudePath,
   findCodexPath,
@@ -17,6 +19,7 @@ const {
   showSplash,
   parseArgs
 } = require('./src/bootstrap');
+const os = require('os');
 
 const { Session } = require('./src/core/Session');
 const { Agent } = require('./src/core/Agent');
@@ -75,7 +78,7 @@ if (cliArgs.single) {
 }
 
 // Terminal manager - handles setup/cleanup and signal handlers
-const terminal = new TerminalManager(SOCKET_DISCOVERY_FILE);
+const terminal = new TerminalManager(SOCKET_DISCOVERY_FILE, LEGACY_SOCKET_FILE);
 terminal.registerSignalHandlers();
 
 // Main async startup
@@ -209,6 +212,9 @@ terminal.registerSignalHandlers();
     process.env.BUKOWSKI_MCP_SOCKET = socketPath;
 
     // Wire FIPAHub messages to MCP message queue and PTY injection
+    const fipaPromptDelayMs = parseInt(process.env.BUKOWSKI_FIPA_PROMPT_DELAY_MS, 10) || 100;
+    const fipaSubmitDelayMs = parseInt(process.env.BUKOWSKI_FIPA_SUBMIT_DELAY_MS, 10) || 80;
+
     fipaHub.on('fipa:sent', ({ message, to }) => {
       if (!to) return;
 
@@ -225,8 +231,8 @@ terminal.registerSignalHandlers();
           // Send \r separately after a tiny delay to trigger submit
           setTimeout(() => {
             agent.pty.write('\r');
-          }, 50);
-        }, 100);
+          }, fipaSubmitDelayMs);
+        }, fipaPromptDelayMs);
       } else if (agent?.type === 'chat') {
         const prompt = formatFIPAForPTY(message);
         agent.write(prompt);
@@ -258,11 +264,16 @@ terminal.registerSignalHandlers();
 
     // Write socket path to discovery files for MCP bridge
     try {
+      // Create sockets directory (recursive to also create .bukowski if needed)
+      fs.mkdirSync(SOCKETS_DIR, { recursive: true });
+      // Per-PID socket file for ancestor matching
       fs.writeFileSync(SOCKET_DISCOVERY_FILE, socketPath, 'utf-8');
-      // Global discovery file for MCP servers that don't inherit env vars
-      fs.writeFileSync(path.join(os.homedir(), '.bukowski-mcp-socket'), socketPath, 'utf-8');
+      // Legacy discovery file for backwards compatibility
+      fs.writeFileSync(LEGACY_SOCKET_FILE, socketPath, 'utf-8');
       // Env var for child agents (primary discovery method)
       process.env.BUKOWSKI_MCP_SOCKET = socketPath;
+      // Track socket path for cleanup (only delete legacy if still ours)
+      terminal.setSocketPath(socketPath);
     } catch {
       // Ignore - discovery file is optional
     }
@@ -320,6 +331,7 @@ terminal.registerSignalHandlers();
   // Chat mode state
   const chatState = {
     inputBuffer: '',
+    cursorPos: 0,             // Cursor position within inputBuffer
     selectedAgent: null,      // Target agent for messages
     pendingPerformative: 'inform',  // Default performative
     showAgentPicker: false
@@ -966,8 +978,41 @@ terminal.registerSignalHandlers();
   });
 
   // Input handling
+  let chatEscBuffer = '';
+  let chatEscTimer = null;
   process.stdin.on('data', (data) => {
-    const str = data.toString();
+    let str = data.toString();
+
+    // In chat mode, buffer lone ESC to allow split escape sequences (e.g. Ctrl+Arrow).
+    const focusedPane = layoutManager.getFocusedPane();
+    const focusedAgent = focusedPane ? session.getAgent(focusedPane.agentId) : null;
+    const chatFocused = focusedAgent?.type === 'chat';
+    if (chatFocused) {
+      if (chatEscBuffer) {
+        str = chatEscBuffer + str;
+        chatEscBuffer = '';
+      }
+
+      if (str.startsWith('\x1b[200~')) {
+        if (!str.includes('\x1b[201~')) {
+          chatEscBuffer = str;
+          return;
+        }
+      } else if (str.startsWith('\x1b') && !/[A-Za-z~]$/.test(str)) {
+        chatEscBuffer = str;
+        if (str === '\x1b') {
+          if (chatEscTimer) clearTimeout(chatEscTimer);
+          chatEscTimer = setTimeout(() => {
+            const buffered = chatEscBuffer;
+            chatEscBuffer = '';
+            chatEscTimer = null;
+            const result = inputRouter.handle(buffered);
+            dispatcher.dispatch(result);
+          }, 25);
+        }
+        return;
+      }
+    }
 
     // Mouse handling (SGR)
     // SGR button encoding:
@@ -1067,7 +1112,10 @@ terminal.registerSignalHandlers();
     }
 
     // Route input through dispatcher
-    const result = inputRouter.handle(str);
+    // ChatAgent panes use handleChatMode() directly (mode stays 'insert' but needs chat keybindings)
+    const result = chatFocused
+      ? inputRouter.handleChatMode(str)
+      : inputRouter.handle(str);
     dispatcher.dispatch(result);
   });
 

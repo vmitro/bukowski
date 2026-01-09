@@ -398,90 +398,122 @@ class ChatAgent extends EventEmitter {
       return { lines: [''], cursorLine: 0, cursorCol: Math.min(cursorIndex, 0) };
     }
 
-    // Pass 1: Word-aware wrap into lines (reuse _wrapText logic)
+    const segments = text.split('\n');
     const lines = [];
-    const words = text.split(/(\s+)/);  // Keep whitespace as tokens
-    let currentLine = '';
-
-    for (const token of words) {
-      if (!token) continue;
-
-      // Would adding this token overflow?
-      if (currentLine.length + token.length > width && currentLine.length > 0) {
-        lines.push(currentLine);
-        // Skip leading whitespace on new lines
-        if (/^\s+$/.test(token)) {
-          currentLine = '';
-          continue;
-        }
-        currentLine = '';
-      }
-
-      // Handle tokens longer than width (hard split)
-      if (token.length > width && !currentLine) {
-        let remaining = token;
-        while (remaining.length > width) {
-          lines.push(remaining.slice(0, width));
-          remaining = remaining.slice(width);
-        }
-        currentLine = remaining;
-      } else if (token.length > width) {
-        // Token too long but line has content - push line first
-        lines.push(currentLine);
-        let remaining = token;
-        while (remaining.length > width) {
-          lines.push(remaining.slice(0, width));
-          remaining = remaining.slice(width);
-        }
-        currentLine = remaining;
-      } else {
-        currentLine += token;
-      }
-    }
-    if (currentLine || lines.length === 0) {
-      lines.push(currentLine);
-    }
-
-    // Pass 2: Map cursor index to (line, col) by walking through
-    // Rebuild text from lines to find cursor position
     let cursorLine = 0;
     let cursorCol = 0;
-    let charsSeen = 0;
+    let cursorFound = false;
+    let remainingCursor = cursorIndex;
 
-    // The wrapped lines may not have all characters (whitespace at wrap points skipped)
-    // So we walk through original text and match against wrapped output
-    let lineIdx = 0;
-    let colIdx = 0;
-
-    for (let i = 0; i <= text.length; i++) {
-      if (i === cursorIndex) {
-        cursorLine = lineIdx;
-        cursorCol = colIdx;
-        break;
+    const wrapSegment = (segment, segCursorIndex) => {
+      if (!segment) {
+        return { lines: [''], cursorLine: 0, cursorCol: Math.min(segCursorIndex || 0, 0) };
       }
 
-      if (lineIdx < lines.length) {
-        const line = lines[lineIdx];
-        if (colIdx < line.length) {
-          // Check if this char matches
-          if (text[i] === line[colIdx]) {
-            colIdx++;
-          } else {
-            // Whitespace was skipped at wrap - skip in original too
-            // (cursor stays at current position)
+      // Pass 1: Word-aware wrap into lines (reuse _wrapText logic)
+      const segLines = [];
+      const words = segment.split(/(\s+)/);  // Keep whitespace as tokens
+      let currentLine = '';
+
+      for (const token of words) {
+        if (!token) continue;
+
+        // Would adding this token overflow?
+        if (currentLine.length + token.length > width && currentLine.length > 0) {
+          segLines.push(currentLine);
+          // Skip leading whitespace on new lines
+          if (/^\s+$/.test(token)) {
+            currentLine = '';
+            continue;
+          }
+          currentLine = '';
+        }
+
+        // Handle tokens longer than width (hard split)
+        if (token.length > width && !currentLine) {
+          let remaining = token;
+          while (remaining.length > width) {
+            segLines.push(remaining.slice(0, width));
+            remaining = remaining.slice(width);
+          }
+          currentLine = remaining;
+        } else if (token.length > width) {
+          // Token too long but line has content - push line first
+          segLines.push(currentLine);
+          let remaining = token;
+          while (remaining.length > width) {
+            segLines.push(remaining.slice(0, width));
+            remaining = remaining.slice(width);
+          }
+          currentLine = remaining;
+        } else {
+          currentLine += token;
+        }
+      }
+      if (currentLine || segLines.length === 0) {
+        segLines.push(currentLine);
+      }
+
+      if (segCursorIndex === null || segCursorIndex === undefined) {
+        return { lines: segLines, cursorLine: 0, cursorCol: 0 };
+      }
+
+      // Pass 2: Map cursor index to (line, col) by walking through
+      let segCursorLine = 0;
+      let segCursorCol = 0;
+      let lineIdx = 0;
+      let colIdx = 0;
+
+      for (let i = 0; i <= segment.length; i++) {
+        if (i === segCursorIndex) {
+          segCursorLine = lineIdx;
+          segCursorCol = colIdx;
+          break;
+        }
+
+        if (lineIdx < segLines.length) {
+          const line = segLines[lineIdx];
+          if (colIdx < line.length) {
+            if (segment[i] === line[colIdx]) {
+              colIdx++;
+            }
+          }
+
+          if (colIdx >= line.length && lineIdx < segLines.length - 1) {
+            lineIdx++;
+            colIdx = 0;
           }
         }
+      }
 
-        // Move to next line if at end
-        if (colIdx >= line.length && lineIdx < lines.length - 1) {
-          lineIdx++;
-          colIdx = 0;
+      if (segCursorIndex >= segment.length) {
+        segCursorLine = segLines.length - 1;
+        segCursorCol = segLines[segLines.length - 1].length;
+      }
+
+      return { lines: segLines, cursorLine: segCursorLine, cursorCol: segCursorCol };
+    };
+
+    for (const segment of segments) {
+      let segCursorIndex = null;
+      if (!cursorFound) {
+        if (remainingCursor <= segment.length) {
+          segCursorIndex = remainingCursor;
+          cursorFound = true;
+        } else {
+          remainingCursor -= segment.length + 1;
         }
       }
+
+      const wrapped = wrapSegment(segment, segCursorIndex);
+      if (segCursorIndex !== null && segCursorIndex !== undefined) {
+        cursorLine = lines.length + wrapped.cursorLine;
+        cursorCol = wrapped.cursorCol;
+      }
+      lines.push(...wrapped.lines);
     }
 
-    // Handle cursor at end
-    if (cursorIndex >= text.length) {
+    if (!cursorFound && lines.length > 0) {
       cursorLine = lines.length - 1;
       cursorCol = lines[lines.length - 1].length;
     }
