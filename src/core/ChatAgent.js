@@ -595,8 +595,8 @@ class ChatAgent extends EventEmitter {
       return;
     }
 
-    // Enter - send message
-    if (data === '\r' || data === '\n') {
+    // Enter (CR) - send message
+    if (data === '\r') {
       this.send();
       return;
     }
