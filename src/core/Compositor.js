@@ -21,6 +21,8 @@ class Compositor {
     this.visualState = null; // Will be set from multi.js - {mode, visualAnchor, visualCursor}
     this.cursorBlinkVisible = true;
     this.cursorBlinkInterval = null;
+    this.statusMessage = null; // Temporary status message (errors, info)
+    this.statusMessageTimer = null;
 
     // Resize state machine - single source of truth for resize handling
     // Phases: 'idle' | 'cached' | 'reflowing'
@@ -105,6 +107,11 @@ class Compositor {
         // For reflow, check per-pane in the scroll functions
         if (this.resizePhase === 'idle') {
           const focusedPaneId = this.layoutManager.focusedPaneId;
+          // If followTail is true but a stale lock remains, clear it.
+          if (this.followTail.get(focusedPaneId) !== false
+            && this.scrollLocks.get(focusedPaneId) === true) {
+            this.forceFollowTail(focusedPaneId);
+          }
           // Only auto-scroll focused pane if it's not reflowing
           if (this.paneReflowPhases.get(focusedPaneId) !== 'reflowing'
             && this.scrollLocks.get(focusedPaneId) !== true) {
@@ -118,6 +125,35 @@ class Compositor {
         this.draw();
       }, frameInterval);
     }
+  }
+
+  /**
+   * Force a pane to follow tail (used by ChatAgent when typing)
+   * Resets scroll lock and follow tail state so auto-scroll resumes
+   */
+  forceFollowTail(paneId) {
+    this.followTail.set(paneId, true);
+    this.scrollLocks.set(paneId, false);
+    this.scrollAnchors.delete(paneId);
+    this.lockedHeights.delete(paneId);
+  }
+
+  /**
+   * Show a temporary status message (auto-clears after timeout)
+   * @param {string} message - Message to display
+   * @param {number} timeout - Time in ms before auto-clear (default 3000)
+   */
+  showStatusMessage(message, timeout = 3000) {
+    if (this.statusMessageTimer) {
+      clearTimeout(this.statusMessageTimer);
+    }
+    this.statusMessage = message;
+    this.scheduleDraw();
+    this.statusMessageTimer = setTimeout(() => {
+      this.statusMessage = null;
+      this.statusMessageTimer = null;
+      this.scheduleDraw();
+    }, timeout);
   }
 
   /**
@@ -151,7 +187,13 @@ class Compositor {
 
       // Skip panes in reflow or scroll-locked - don't update scroll while unstable
       if (this.paneReflowPhases.get(paneId) === 'reflowing') continue;
-      if (this.scrollLocks.get(paneId) === true) continue;
+      if (this.scrollLocks.get(paneId) === true) {
+        if (this.followTail.get(paneId) !== false) {
+          this.forceFollowTail(paneId);
+        } else {
+          continue;
+        }
+      }
 
       if (this.followTail.get(paneId) !== false) {
         const agent = this.session.getAgent(pane.agentId);
@@ -547,6 +589,7 @@ class Compositor {
     }));
 
     this.tabBar.setTabs(tabs);
+    this.tabBar.setSessionName(this.session.name);
     return this.tabBar.render(this.cols);
   }
 
@@ -614,18 +657,8 @@ class Compositor {
       return result;
     }
 
-    // Compute scrollY - use anchor (distance from bottom) for viewport stability
-    // when user is scrolled up, otherwise use stored offset
-    let scrollY;
-    const anchor = this.scrollAnchors.get(pane.id);
-    const anchorActive = isReflowing === true || this.scrollLocks.get(pane.id) === true;
-    if (anchorActive && anchor !== undefined && this.followTail.get(pane.id) === false) {
-      // Maintain distance from bottom while locked or reflowing.
-      // Don't modify scrollOffsets here - state modification during render causes flicker.
-      scrollY = Math.max(0, maxScroll - anchor);
-    } else {
-      scrollY = this.scrollOffsets.get(pane.id) || 0;
-    }
+    // Compute scrollY from stored offset (anchored/locked panes should not drift)
+    let scrollY = this.scrollOffsets.get(pane.id) || 0;
 
     // Clamp scroll locally for render only
     if (scrollY > maxScroll) {
@@ -852,8 +885,10 @@ class Compositor {
       left += `[${focusedIdx + 1}/${panes.length}] `;
     }
 
-    // Search/command status
-    if (this.commandState?.active) {
+    // Search/command status or status message
+    if (this.statusMessage) {
+      left += `${this.statusMessage} `;
+    } else if (this.commandState?.active) {
       left += `:${this.commandState.buffer}_ `;
     } else if (this.searchState?.active) {
       left += `/${this.searchState.pattern}_ `;
@@ -1122,14 +1157,7 @@ class Compositor {
       : liveHeight;
 
     const maxScroll = Math.max(0, effectiveHeight - pane.bounds.height);
-    let oldScroll = this.scrollOffsets.get(paneId) || 0;
-
-    // If we have an anchor (locked/frozen), base scrolling off the anchored view.
-    const anchor = this.scrollAnchors.get(paneId);
-    if (anchor !== undefined && this.followTail.get(paneId) === false) {
-      const anchoredScroll = Math.max(0, Math.min(maxScroll, maxScroll - anchor));
-      oldScroll = anchoredScroll;
-    }
+    const oldScroll = this.scrollOffsets.get(paneId) || 0;
 
     let scrollY = Math.max(0, Math.min(maxScroll, oldScroll + delta));
     this.scrollOffsets.set(paneId, scrollY);
