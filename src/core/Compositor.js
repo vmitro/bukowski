@@ -1167,22 +1167,20 @@ class Compositor {
     const liveMaxScroll = Math.max(0, liveHeight - pane.bounds.height);
     const atBottom = scrollY >= liveMaxScroll - 2;  // 2px tolerance
 
-    if (isLocked) {
-      // When locked, never auto-unlock based on live height churn.
-      this.followTail.set(paneId, false);
-      this.scrollLocks.set(paneId, true);
-      this.scrollAnchors.set(paneId, maxScroll - scrollY);
-    } else if (atBottom) {
-      // Unlock: clear anchor and frozen height
+    if (atBottom) {
+      // User scrolled to bottom - always unlock (even if was locked)
       this.followTail.set(paneId, true);
       this.scrollAnchors.delete(paneId);
       this.scrollLocks.set(paneId, false);
       this.lockedHeights.delete(paneId);
+    } else if (isLocked) {
+      // Still locked and not at bottom - maintain lock
+      this.followTail.set(paneId, false);
+      this.scrollLocks.set(paneId, true);
+      this.scrollAnchors.set(paneId, maxScroll - scrollY);
     } else {
-      // Lock: freeze current height if not already locked
-      if (!isLocked) {
-        this.lockedHeights.set(paneId, liveHeight);
-      }
+      // Not locked, not at bottom - engage lock
+      this.lockedHeights.set(paneId, liveHeight);
       this.followTail.set(paneId, false);
       this.scrollAnchors.set(paneId, maxScroll - scrollY);
       this.scrollLocks.set(paneId, true);
