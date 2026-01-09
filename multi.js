@@ -1112,10 +1112,7 @@ terminal.registerSignalHandlers();
     }
 
     // Route input through dispatcher
-    // ChatAgent panes use handleChatMode() directly (mode stays 'insert' but needs chat keybindings)
-    const result = chatFocused
-      ? inputRouter.handleChatMode(str)
-      : inputRouter.handle(str);
+    const result = inputRouter.handle(str);
     dispatcher.dispatch(result);
   });
 

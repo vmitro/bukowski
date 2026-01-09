@@ -22,6 +22,7 @@ class ChatAgent extends EventEmitter {
     // Chat state
     this.inputBuffer = '';
     this.inputCursor = 0;
+    this._pasteBuffer = '';
     this.targetAgent = null;      // Target agent for messages
     this.performative = 'inform'; // Current performative
     this.scrollOffset = 0;
@@ -570,9 +571,48 @@ class ChatAgent extends EventEmitter {
   // ═══════════════════════════════════════════════════════════════════════════
 
   handleInput(data) {
+    if (this._pasteBuffer) {
+      data = this._pasteBuffer + data;
+      this._pasteBuffer = '';
+    }
+
+    // Bracketed paste: ESC[200~ ... ESC[201~
+    if (data.startsWith('\x1b[200~')) {
+      const pasteEnd = data.indexOf('\x1b[201~');
+      if (pasteEnd === -1) {
+        this._pasteBuffer = data;
+        return;
+      }
+      const text = data.slice(6, pasteEnd).replace(/\r\n/g, '\n');
+      if (text) {
+        this.inputBuffer = this.inputBuffer.slice(0, this.inputCursor) +
+                           text +
+                           this.inputBuffer.slice(this.inputCursor);
+        this.inputCursor += text.length;
+        this._render();
+        this.emit('data');
+      }
+      return;
+    }
+
     // Enter - send message
     if (data === '\r' || data === '\n') {
       this.send();
+      return;
+    }
+
+    // Insert newline (common Alt/Ctrl/Shift+Enter sequences)
+    if (
+      data === '\x0a' || data === '\x1b\r' || data === '\x1b\n' ||
+      data === '\x1b[13;2~' || data === '\x1b[13;5~' || data === '\x1b[13;6~' ||
+      data === '\x1b[27;5;13~' || data === '\x1b[27;6;13~'
+    ) {
+      this.inputBuffer = this.inputBuffer.slice(0, this.inputCursor) +
+                         '\n' +
+                         this.inputBuffer.slice(this.inputCursor);
+      this.inputCursor++;
+      this._render();
+      this.emit('data');
       return;
     }
 
@@ -616,7 +656,7 @@ class ChatAgent extends EventEmitter {
     }
 
     // Shift+Tab - cycle backward
-    if (data === '\x1b[Z') {
+    if (data === '\x1b[Z' || data === '\x1b[1;2Z') {
       this.cycleTargetAgent(-1);
       return;
     }
@@ -624,6 +664,26 @@ class ChatAgent extends EventEmitter {
     // Ctrl+P - cycle performative
     if (data === '\x10') {
       this.cyclePerformative();
+      return;
+    }
+
+    // Word movement
+    if (data === '\x1bb' || data === '\x1b[1;3D' || data === '\x1b[3D' || data === '\x1b[1;5D' || data === '\x1b[5D') {
+      let pos = this.inputCursor;
+      while (pos > 0 && /\s/.test(this.inputBuffer[pos - 1])) pos--;
+      while (pos > 0 && /\S/.test(this.inputBuffer[pos - 1])) pos--;
+      this.inputCursor = pos;
+      this._render();
+      this.emit('data');
+      return;
+    }
+    if (data === '\x1bf' || data === '\x1b[1;3C' || data === '\x1b[3C' || data === '\x1b[1;5C' || data === '\x1b[5C') {
+      let pos = this.inputCursor;
+      while (pos < this.inputBuffer.length && /\S/.test(this.inputBuffer[pos])) pos++;
+      while (pos < this.inputBuffer.length && /\s/.test(this.inputBuffer[pos])) pos++;
+      this.inputCursor = pos;
+      this._render();
+      this.emit('data');
       return;
     }
 
@@ -654,6 +714,18 @@ class ChatAgent extends EventEmitter {
     }
 
     // Regular character
+    if (data.length > 1 && !data.startsWith('\x1b')) {
+      const clean = data.replace(/\r\n/g, '\n').replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '');
+      if (clean) {
+        this.inputBuffer = this.inputBuffer.slice(0, this.inputCursor) +
+                           clean +
+                           this.inputBuffer.slice(this.inputCursor);
+        this.inputCursor += clean.length;
+        this._render();
+        this.emit('data');
+      }
+      return;
+    }
     if (data.length === 1 && data >= ' ') {
       this.inputBuffer = this.inputBuffer.slice(0, this.inputCursor) +
                          data +
