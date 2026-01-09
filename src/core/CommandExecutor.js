@@ -21,6 +21,7 @@ class CommandExecutor {
     // Callbacks for operations that need access to multi.js scope
     this.onCaptureAgentSessions = options.onCaptureAgentSessions || (() => Promise.resolve());
     this.onSetOutputSilence = options.onSetOutputSilence || (() => {});
+    this.onShowStatusMessage = options.onShowStatusMessage || (() => {});
   }
 
   /**
@@ -176,8 +177,15 @@ class CommandExecutor {
   }
 
   _save(args, andQuit) {
+    // Set name if provided
     if (args[0]) {
       this.session.name = args[0];
+    }
+
+    // Error if session has no name (like vim's "No file name")
+    if (!this.session.name) {
+      this.onShowStatusMessage('E32: No session name (use :w <name>)');
+      return;
     }
 
     // Sync focused pane ID to session before saving

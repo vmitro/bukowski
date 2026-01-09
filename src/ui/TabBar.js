@@ -4,10 +4,15 @@ class TabBar {
   constructor() {
     this.tabs = [];        // { id, name, active, status }
     this.scrollOffset = 0; // For overflow scrolling
+    this.sessionName = null; // Session name (null = untitled)
   }
 
   setTabs(tabs) {
     this.tabs = tabs;
+  }
+
+  setSessionName(name) {
+    this.sessionName = name || null;
   }
 
   /**
@@ -70,13 +75,26 @@ class TabBar {
    * @returns {string}
    */
   render(termWidth) {
-    if (this.tabs.length === 0) {
-      return ' '.repeat(termWidth);
+    let output = '';
+
+    // Session name on the left (dim styling)
+    // Truncate to max 1/3 of terminal width to leave room for tabs
+    const rawName = this.sessionName || 'untitled';
+    const maxNameLen = Math.max(8, Math.floor(termWidth / 3) - 2);
+    const displayName = rawName.length > maxNameLen
+      ? rawName.slice(0, maxNameLen - 1) + '…'
+      : rawName;
+    const sessionPart = ` ${displayName} `;
+    output += `\x1b[90m${sessionPart}\x1b[0m`;
+
+    // Remaining width for tabs (clamp to >= 0)
+    const tabAreaWidth = Math.max(0, termWidth - sessionPart.length);
+
+    if (this.tabs.length === 0 || tabAreaWidth < 8) {
+      return output + ' '.repeat(Math.max(0, tabAreaWidth));
     }
 
-    const { tabWidth, visibleStart, visibleEnd, hasOverflowLeft, hasOverflowRight } = this.calcLayout(termWidth);
-
-    let output = '';
+    const { tabWidth, visibleStart, visibleEnd, hasOverflowLeft, hasOverflowRight } = this.calcLayout(tabAreaWidth);
 
     // Left overflow indicator
     if (hasOverflowLeft) {
@@ -105,9 +123,9 @@ class TabBar {
       }
     }
 
-    // Calculate remaining space
+    // Calculate remaining space (within tab area)
     const usedWidth = 2 + (visibleEnd - visibleStart) * tabWidth;
-    const remaining = termWidth - usedWidth - 2;
+    const remaining = tabAreaWidth - usedWidth - 2;
     if (remaining > 0) {
       output += ' '.repeat(remaining);
     }
@@ -134,10 +152,21 @@ class TabBar {
    * Get tab index at screen position
    */
   getTabAtPosition(x, termWidth) {
-    const { tabWidth, visibleStart, visibleEnd, hasOverflowLeft } = this.calcLayout(termWidth);
+    // Account for session name on the left (must match render truncation)
+    const rawName = this.sessionName || 'untitled';
+    const maxNameLen = Math.max(8, Math.floor(termWidth / 3) - 2);
+    const displayName = rawName.length > maxNameLen
+      ? rawName.slice(0, maxNameLen - 1) + '…'
+      : rawName;
+    const sessionPartLen = displayName.length + 2; // " name "
+    const tabAreaWidth = Math.max(0, termWidth - sessionPartLen);
 
-    // Account for overflow indicator
-    const startX = hasOverflowLeft ? 2 : 2;
+    if (tabAreaWidth < 8) return -1;
+
+    const { tabWidth, visibleStart, visibleEnd, hasOverflowLeft } = this.calcLayout(tabAreaWidth);
+
+    // Account for session name + overflow indicator
+    const startX = sessionPartLen + (hasOverflowLeft ? 2 : 2);
     const relX = x - startX;
 
     if (relX < 0) return -1;
