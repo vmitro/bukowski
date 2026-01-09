@@ -194,6 +194,7 @@ terminal.registerSignalHandlers();
             const realAgents = session.getAllAgents().filter(a => a.type !== 'chat');
             chatAgent.setAvailableAgents(realAgents);
             session.addAgent(chatAgent);
+            flushPendingChatErrors();
           }
         }
       }
@@ -201,6 +202,60 @@ terminal.registerSignalHandlers();
   } catch (err) {
     console.error('Warning: FIPA hub failed to initialize:', err.message);
   }
+
+  const pendingChatErrors = [];
+  const maxPendingChatErrors = 200;
+  const stripAnsi = (value) => String(value).replace(/\x1b\[[0-9;]*m/g, '');
+
+  function getChatAgents() {
+    return session.getAllAgents().filter(agent => agent.type === 'chat' && typeof agent.addErrorMessage === 'function');
+  }
+
+  function flushPendingChatErrors() {
+    if (pendingChatErrors.length === 0) return;
+    const chatAgents = getChatAgents();
+    if (chatAgents.length === 0) return;
+    const lines = pendingChatErrors.splice(0, pendingChatErrors.length);
+    for (const line of lines) {
+      for (const agent of chatAgents) {
+        agent.addErrorMessage(line);
+      }
+    }
+  }
+
+  function broadcastChatError(text) {
+    const cleaned = stripAnsi(text || '').replace(/\r/g, '');
+    const lines = cleaned.split('\n').map(line => line.trimEnd()).filter(Boolean);
+    if (lines.length === 0) return;
+
+    const chatAgents = getChatAgents();
+    if (chatAgents.length === 0) {
+      pendingChatErrors.push(...lines);
+      if (pendingChatErrors.length > maxPendingChatErrors) {
+        pendingChatErrors.splice(0, pendingChatErrors.length - maxPendingChatErrors);
+      }
+      return;
+    }
+
+    for (const line of lines) {
+      for (const agent of chatAgents) {
+        agent.addErrorMessage(line);
+      }
+    }
+  }
+
+  const stderrWrite = process.stderr.write.bind(process.stderr);
+  let stderrBuffer = '';
+  process.stderr.write = (chunk, encoding, callback) => {
+    const text = typeof chunk === 'string' ? chunk : chunk.toString(encoding || 'utf8');
+    stderrBuffer += text;
+    const parts = stderrBuffer.split(/\r?\n/);
+    stderrBuffer = parts.pop() || '';
+    for (const line of parts) {
+      broadcastChatError(line);
+    }
+    return stderrWrite(chunk, encoding, callback);
+  };
 
   // Start MCP Server for agent tool communication
   const mcpServer = new MCPServer(session, fipaHub, ipcHub);
@@ -764,6 +819,10 @@ terminal.registerSignalHandlers();
         // Keep the pane open on errors so the user can see the failure.
         const msg = `\r\n\x1b[31m[process exited with code ${exitCode}]\x1b[0m\r\n`;
         agent.terminal?.write(msg);
+        if (!agent._reportedExit) {
+          agent._reportedExit = true;
+          broadcastChatError(`${agent.id} exited with code ${exitCode}`);
+        }
         compositor.scheduleDraw();
         return;
       }
@@ -840,6 +899,7 @@ terminal.registerSignalHandlers();
 
     // Add to session
     session.addAgent(chatAgent);
+    flushPendingChatErrors();
 
     // Create pane
     let newPane;
@@ -974,7 +1034,8 @@ terminal.registerSignalHandlers();
     AGENT_TYPES,
     resolveAgentType,
     onCaptureAgentSessions: captureAgentSessions,
-    onSetOutputSilence: (ms) => { outputSilenceMs = ms; }
+    onSetOutputSilence: (ms) => { outputSilenceMs = ms; },
+    onShowStatusMessage: (msg, timeout) => compositor.showStatusMessage(msg, timeout)
   });
 
   // Input handling
@@ -1160,6 +1221,10 @@ terminal.registerSignalHandlers();
   for (const agent of session.getAllAgents()) {
     if (agent.pty) {
       agent.pty.onExit(({ exitCode }) => {
+        if (exitCode !== 0 && !agent._reportedExit) {
+          agent._reportedExit = true;
+          broadcastChatError(`${agent.id} exited with code ${exitCode}`);
+        }
         const pane = layoutManager.findPaneByAgent(agent.id);
         if (pane) {
           layoutManager.focusPane(pane.id);

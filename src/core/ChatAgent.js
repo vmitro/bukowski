@@ -183,6 +183,7 @@ class ChatAgent extends EventEmitter {
       'agree': { fg: '\x1b[32m' },        // green
       'refuse': { fg: '\x1b[31m' },       // red
       'failure': { fg: '\x1b[1;31m' },    // bold red
+      'system': { fg: '\x1b[90m' },       // dim gray
       'not-understood': { fg: '\x1b[2;33m' }, // dim yellow
       'subscribe': { fg: '\x1b[36m' },    // cyan
       'cancel': { fg: '\x1b[90m' },       // gray
@@ -870,7 +871,7 @@ class ChatAgent extends EventEmitter {
     // Detect newly joined agents
     for (const agent of newAgents) {
       if (!oldIds.has(agent.id)) {
-        this._addSystemMessage(`${agent.id} joined the chat`);
+        this.addSystemMessage(`${agent.id} joined the chat`);
       }
     }
 
@@ -883,17 +884,24 @@ class ChatAgent extends EventEmitter {
     }
   }
 
-  _addSystemMessage(text) {
+  addSystemMessage(text, options = {}) {
+    const performative = options.performative || 'system';
+    const style = options.style || this._getStyle(performative);
     this.messages.push({
       id: `sys-${Date.now()}`,
       timestamp: new Date(),
       sender: '***',
-      performative: 'system',
+      performative,
       content: text,
-      style: { fg: '\x1b[90m' }  // dim gray
+      style
     });
     this._render();
     this.emit('data');
+  }
+
+  addErrorMessage(text) {
+    const message = text.startsWith('ERROR:') ? text : `ERROR: ${text}`;
+    this.addSystemMessage(message, { performative: 'failure' });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
