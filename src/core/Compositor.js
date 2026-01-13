@@ -383,6 +383,24 @@ class Compositor {
   }
 
   /**
+   * Get adaptive reflow timers based on CPS (clears per second)
+   * Higher CPS = more aggressive throttling to prevent scroll bugs
+   */
+  getAdaptiveReflowTimers(paneId) {
+    const cps = this.getClearCps(paneId);
+    if (cps > 10) {
+      // Aggressive: very high clear rate (e.g., scrollback limit churn)
+      return { silence: 120, max: 500 };
+    } else if (cps > 5) {
+      // Moderate: elevated clear rate
+      return { silence: 80, max: 400 };
+    } else {
+      // Normal: low/no clear activity
+      return { silence: 40, max: 200 };
+    }
+  }
+
+  /**
    * Enter output reflow phase for a specific pane
    */
   enterOutputReflow(paneId) {
@@ -394,11 +412,14 @@ class Compositor {
     if (existingTimer) clearTimeout(existingTimer);
     if (existingMaxTimer) clearTimeout(existingMaxTimer);
 
-    // Silence timer: 40ms of no large output = stabilized
-    this.reflowTimers.set(paneId, setTimeout(() => this.exitOutputReflow(paneId), 40));
+    // Adaptive timers based on CPS - higher CPS = longer delays
+    const timers = this.getAdaptiveReflowTimers(paneId);
 
-    // Maximum timeout: never block for more than 200ms
-    this.reflowMaxTimers.set(paneId, setTimeout(() => this.exitOutputReflow(paneId), 200));
+    // Silence timer: wait for output to stabilize
+    this.reflowTimers.set(paneId, setTimeout(() => this.exitOutputReflow(paneId), timers.silence));
+
+    // Maximum timeout: never block forever
+    this.reflowMaxTimers.set(paneId, setTimeout(() => this.exitOutputReflow(paneId), timers.max));
   }
 
   /**
@@ -407,7 +428,8 @@ class Compositor {
   resetReflowTimer(paneId) {
     const existingTimer = this.reflowTimers.get(paneId);
     if (existingTimer) clearTimeout(existingTimer);
-    this.reflowTimers.set(paneId, setTimeout(() => this.exitOutputReflow(paneId), 40));
+    const timers = this.getAdaptiveReflowTimers(paneId);
+    this.reflowTimers.set(paneId, setTimeout(() => this.exitOutputReflow(paneId), timers.silence));
   }
 
   /**
