@@ -17,7 +17,39 @@ npm link  # optional, makes `bukowski` available globally
 
 ```bash
 node multi.js          # or `bukowski` if linked
+bukowski --session myproject      # name this session "myproject"
+bukowski --resume myproject       # resume existing session "myproject"
 ```
+
+**Session flags**:
+- `--session <name>` - Names the current session (creates new if doesn't exist)
+- `--resume <name>` - Resumes an existing session with its full conversation history
+
+## MCP Server Setup
+
+Each agent needs the bukowski MCP server configured to enable inter-agent FIPA messaging.
+
+**Automatic installation**:
+```bash
+node -e "require('./src/mcp/install').installAll()"
+```
+
+**Check status**:
+```bash
+node -e "console.log(require('./src/mcp/install').checkStatus())"
+```
+
+**Uninstall**:
+```bash
+node -e "require('./src/mcp/install').uninstallAll()"
+```
+
+The install script configures:
+- Claude Code (`~/.claude.json`)
+- Codex (`~/.codex/config.toml`)
+- Gemini (`~/.gemini/settings.json`)
+
+The MCP bridge auto-detects the socket path via `BUKOWSKI_MCP_SOCKET` environment variable set by the parent bukowski process.
 
 **Input modes**: insert (default), normal, visual, search, command, chat
 **Prefix key**: `Ctrl+Space` followed by:

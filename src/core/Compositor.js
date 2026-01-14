@@ -347,6 +347,7 @@ class Compositor {
     this.lockedHeights.delete(paneId);
     this.resizeCache.delete(paneId);
     this.frameCache.delete(paneId);
+    this.clearEvents.delete(paneId);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1168,11 +1169,52 @@ class Compositor {
     const agent = this.session.getAgent(pane.agentId);
     if (!agent) return;
 
+    // Check if output is unstable (high CPS or reflowing)
+    const cps = this.getClearCps(paneId);
+    const isReflowing = this.paneReflowPhases.get(paneId) === 'reflowing';
+    const isUnstable = cps > 5 || isReflowing;
+
     const liveHeight = agent.getContentHeight();
     const isLocked = this.scrollLocks.get(paneId) === true;
+    const isFollowing = this.followTail.get(paneId) !== false;
 
+    // During unstable output, allow scroll but DON'T engage NEW locks
+    // (engaging lock captures unstable liveHeight snapshot → 43% bug)
+    if (isUnstable) {
+      const stableHeight = this.stableContentHeights.get(paneId) || liveHeight;
+      const lockedHeight = this.lockedHeights.get(paneId);
+      // Use locked height if already locked, otherwise stable height
+      const effectiveHeight = isLocked && lockedHeight !== undefined
+        ? Math.max(lockedHeight, liveHeight)
+        : stableHeight;
+      const maxScroll = Math.max(0, effectiveHeight - pane.bounds.height);
+      const oldScroll = this.scrollOffsets.get(paneId) || 0;
+      const scrollY = Math.max(0, Math.min(maxScroll, oldScroll + delta));
+      this.scrollOffsets.set(paneId, scrollY);
+
+      // Check if at bottom
+      const liveMaxScroll = Math.max(0, liveHeight - pane.bounds.height);
+      const atBottom = scrollY >= liveMaxScroll - 2;
+
+      if (atBottom) {
+        this.followTail.set(paneId, true);
+        // Clear lock if was locked and now at bottom
+        if (isLocked) {
+          this.scrollLocks.set(paneId, false);
+          this.scrollAnchors.delete(paneId);
+          this.lockedHeights.delete(paneId);
+        }
+      } else {
+        this.followTail.set(paneId, false);
+        // Keep existing lock if locked, but DON'T engage new lock during unstable
+      }
+
+      if (scrollY !== oldScroll) this.draw();
+      return;
+    }
+
+    // Stable output - proceed with normal scroll logic
     // Use frozen height when locked, otherwise live height
-    // This prevents scroll position from shifting as content grows
     const lockedHeight = this.lockedHeights.get(paneId);
     const effectiveHeight = isLocked && lockedHeight !== undefined
       ? Math.max(lockedHeight, liveHeight)  // Never shrink below live (handles deletions)
@@ -1185,7 +1227,6 @@ class Compositor {
     this.scrollOffsets.set(paneId, scrollY);
 
     // Check if at actual bottom (using live height for accurate detection)
-    // Only used to re-enable followTail when not locked.
     const liveMaxScroll = Math.max(0, liveHeight - pane.bounds.height);
     const atBottom = scrollY >= liveMaxScroll - 2;  // 2px tolerance
 
