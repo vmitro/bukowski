@@ -1209,7 +1209,7 @@ class Compositor {
         // Keep existing lock if locked, but DON'T engage new lock during unstable
       }
 
-      if (scrollY !== oldScroll) this.draw();
+      if (scrollY !== oldScroll) this.scheduleDraw();
       return;
     }
 
@@ -1250,7 +1250,7 @@ class Compositor {
     }
 
     if (scrollY !== oldScroll) {
-      this.draw();
+      this.scheduleDraw();
     }
   }
 
@@ -1290,7 +1290,7 @@ class Compositor {
       this.scrollLocks.set(paneId, false);
       this.lockedHeights.delete(paneId);
     }
-    this.draw();
+    this.scheduleDraw();
   }
 }
 
