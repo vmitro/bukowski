@@ -40,8 +40,8 @@ class Compositor {
     // Prevents "infinite scroll" when xterm.js buffer is trimming old lines rapidly
     // Per-pane so one churning agent doesn't freeze others
     this.paneReflowPhases = new Map();   // paneId -> 'idle' | 'reflowing'
-    this.reflowTimers = new Map();       // paneId -> silence timer (40ms = stabilized)
-    this.reflowMaxTimers = new Map();    // paneId -> max timeout (200ms)
+    this.reflowTimers = new Map();       // paneId -> silence timer (100-150ms adaptive)
+    this.reflowMaxTimers = new Map();    // paneId -> max timeout (400-800ms adaptive)
     this.lastContentHeights = new Map();   // paneId -> lastHeight (for delta detection)
     this.stableContentHeights = new Map(); // paneId -> stable height (for status bar)
     this.clearEvents = new Map();         // paneId -> [timestamps] for CPS
@@ -79,6 +79,12 @@ class Compositor {
       events.shift();
     }
     this.clearEvents.set(paneId, events);
+
+    // Enter reflow immediately on ANY clear (hybrid CLS+1 strategy)
+    // This prevents initial rewinds; longer silence/max timers ensure complete repopulation
+    if (this.paneReflowPhases.get(paneId) !== 'reflowing') {
+      this.enterOutputReflow(paneId);
+    }
   }
 
   getClearCps(paneId) {
@@ -391,13 +397,14 @@ class Compositor {
     const cps = this.getClearCps(paneId);
     if (cps > 10) {
       // Aggressive: very high clear rate (e.g., scrollback limit churn)
-      return { silence: 120, max: 500 };
+      // Longer timers ensure 100k+ line repopulation completes
+      return { silence: 120, max: 800 };
     } else if (cps > 5) {
       // Moderate: elevated clear rate
-      return { silence: 80, max: 400 };
+      return { silence: 90, max: 500 };
     } else {
-      // Normal: low/no clear activity
-      return { silence: 40, max: 200 };
+      // Normal/first clear: keep latency low but still allow repopulation to finish
+      return { silence: 70, max: 350 };
     }
   }
 
@@ -680,8 +687,22 @@ class Compositor {
       return result;
     }
 
-    // Compute scrollY from stored offset (anchored/locked panes should not drift)
-    let scrollY = this.scrollOffsets.get(pane.id) || 0;
+    // Compute scrollY - when locked, use anchor-based position for stability
+    // Anchor = lines from bottom, stays stable when top is trimmed (scrollback full)
+    let scrollY;
+    if (isLocked) {
+      const anchor = this.scrollAnchors.get(pane.id);
+      if (anchor !== undefined) {
+        // Use anchor-based scrollY: stable when top lines trimmed
+        const liveMaxScroll = Math.max(0, liveHeight - height);
+        scrollY = Math.max(0, Math.min(liveMaxScroll, liveMaxScroll - anchor));
+      } else {
+        // Fallback to absolute scrollY if no anchor
+        scrollY = this.scrollOffsets.get(pane.id) || 0;
+      }
+    } else {
+      scrollY = this.scrollOffsets.get(pane.id) || 0;
+    }
 
     // Clamp scroll locally for render only
     if (scrollY > maxScroll) {
@@ -1177,36 +1198,43 @@ class Compositor {
     const liveHeight = agent.getContentHeight();
     const isLocked = this.scrollLocks.get(paneId) === true;
     const isFollowing = this.followTail.get(paneId) !== false;
+    const currentMaxScroll = Math.max(0, liveHeight - pane.bounds.height);
 
-    // During unstable output, allow scroll but DON'T engage NEW locks
-    // (engaging lock captures unstable liveHeight snapshot → 43% bug)
+    // During unstable output (CLS storm / reflow), handle scroll specially:
+    // - Use stableContentHeights for scroll math
+    // - Don't engage NEW locks (prevents capturing unstable heights)
+    // - Allow scroll to work immediately (no deferring that could hang forever)
     if (isUnstable) {
       const stableHeight = this.stableContentHeights.get(paneId) || liveHeight;
-      const lockedHeight = this.lockedHeights.get(paneId);
-      // Use locked height if already locked, otherwise stable height
-      const effectiveHeight = isLocked && lockedHeight !== undefined
-        ? Math.max(lockedHeight, liveHeight)
-        : stableHeight;
-      const maxScroll = Math.max(0, effectiveHeight - pane.bounds.height);
+
+      if (isLocked) {
+        // Already locked: scroll within stable heights, don't update anchors
+        const lockedHeight = this.lockedHeights.get(paneId);
+        const effectiveHeight = lockedHeight !== undefined
+          ? Math.max(Math.min(lockedHeight, stableHeight), stableHeight)
+          : stableHeight;
+        const maxScroll = Math.max(0, effectiveHeight - pane.bounds.height);
+        const oldScroll = this.scrollOffsets.get(paneId) || 0;
+        const scrollY = Math.max(0, Math.min(maxScroll, oldScroll + delta));
+        this.scrollOffsets.set(paneId, scrollY);
+        // Don't update anchors during unstable - keep them stable
+        if (scrollY !== oldScroll) this.scheduleDraw();
+        return;
+      }
+
+      // Not locked: scroll using stable heights, don't engage new lock
+      const maxScroll = Math.max(0, stableHeight - pane.bounds.height);
       const oldScroll = this.scrollOffsets.get(paneId) || 0;
       const scrollY = Math.max(0, Math.min(maxScroll, oldScroll + delta));
       this.scrollOffsets.set(paneId, scrollY);
 
-      // Check if at bottom
-      const liveMaxScroll = Math.max(0, liveHeight - pane.bounds.height);
-      const atBottom = scrollY >= liveMaxScroll - 2;
-
+      // Check if at bottom (using stable height)
+      const atBottom = scrollY >= maxScroll - 2;
       if (atBottom) {
         this.followTail.set(paneId, true);
-        // Clear lock if was locked and now at bottom
-        if (isLocked) {
-          this.scrollLocks.set(paneId, false);
-          this.scrollAnchors.delete(paneId);
-          this.lockedHeights.delete(paneId);
-        }
       } else {
         this.followTail.set(paneId, false);
-        // Keep existing lock if locked, but DON'T engage new lock during unstable
+        // Don't engage lock during unstable - will engage when stable
       }
 
       if (scrollY !== oldScroll) this.scheduleDraw();
@@ -1227,8 +1255,7 @@ class Compositor {
     this.scrollOffsets.set(paneId, scrollY);
 
     // Check if at actual bottom (using live height for accurate detection)
-    const liveMaxScroll = Math.max(0, liveHeight - pane.bounds.height);
-    const atBottom = scrollY >= liveMaxScroll - 2;  // 2px tolerance
+    const atBottom = scrollY >= currentMaxScroll - 2;  // 2px tolerance
 
     if (atBottom) {
       // User scrolled to bottom - always unlock (even if was locked)
@@ -1240,12 +1267,15 @@ class Compositor {
       // Still locked and not at bottom - maintain lock
       this.followTail.set(paneId, false);
       this.scrollLocks.set(paneId, true);
-      this.scrollAnchors.set(paneId, maxScroll - scrollY);
+      // Anchor is lines from bottom; use live height to avoid drift when trimming
+      const liveAnchor = currentMaxScroll - scrollY;
+      this.scrollAnchors.set(paneId, liveAnchor);
     } else {
       // Not locked, not at bottom - engage lock
       this.lockedHeights.set(paneId, liveHeight);
       this.followTail.set(paneId, false);
-      this.scrollAnchors.set(paneId, maxScroll - scrollY);
+      const liveAnchor = currentMaxScroll - scrollY;
+      this.scrollAnchors.set(paneId, liveAnchor);
       this.scrollLocks.set(paneId, true);
     }
 
