@@ -46,6 +46,7 @@ class Compositor {
     this.stableContentHeights = new Map(); // paneId -> stable height (for status bar)
     this.clearEvents = new Map();         // paneId -> [timestamps] for CPS
     this.cpsWindowMs = parseInt(process.env.BUKOWSKI_CPS_WINDOW_MS, 10) || 5000;
+    this.bufferBaseYs = new Map();        // paneId -> last buffer.baseY (for trim detection)
   }
 
   startCursorBlink() {
@@ -109,6 +110,14 @@ class Compositor {
       const frameInterval = parseInt(process.env.BUKOWSKI_FRAME_INTERVAL) || 33;
       setTimeout(() => {
         this.drawScheduled = false;
+        // Check output reflow and buffer trim for ALL panes
+        for (const pane of this.layoutManager.getAllPanes()) {
+          const agent = this.session.getAgent(pane.agentId);
+          if (agent) {
+            this.checkOutputReflow(pane.id, agent);
+            this.compensateBufferTrim(pane.id, agent);
+          }
+        }
         // Skip auto-scroll during resize phase
         // For reflow, check per-pane in the scroll functions
         if (this.resizePhase === 'idle') {
@@ -140,8 +149,6 @@ class Compositor {
   forceFollowTail(paneId) {
     this.followTail.set(paneId, true);
     this.scrollLocks.set(paneId, false);
-    this.scrollAnchors.delete(paneId);
-    this.lockedHeights.delete(paneId);
   }
 
   /**
@@ -354,6 +361,7 @@ class Compositor {
     this.resizeCache.delete(paneId);
     this.frameCache.delete(paneId);
     this.clearEvents.delete(paneId);
+    this.bufferBaseYs.delete(paneId);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -387,6 +395,28 @@ class Compositor {
     if (this.paneReflowPhases.get(paneId) !== 'reflowing') {
       this.stableContentHeights.set(paneId, currentHeight);
     }
+  }
+
+  /**
+   * Compensate for buffer trimming at scrollback limit
+   * When xterm buffer trims old lines, baseY increases - adjust scrollY to maintain view
+   */
+  compensateBufferTrim(paneId, agent) {
+    const buffer = agent.getBuffer();
+    if (!buffer) return;
+
+    const currentBaseY = buffer.baseY;
+    const lastBaseY = this.bufferBaseYs.get(paneId) || currentBaseY;
+
+    if (currentBaseY > lastBaseY) {
+      // Buffer trimmed lines from top - adjust scroll position
+      const trimDelta = currentBaseY - lastBaseY;
+      const oldScrollY = this.scrollOffsets.get(paneId) || 0;
+      const newScrollY = Math.max(0, oldScrollY - trimDelta);
+      this.scrollOffsets.set(paneId, newScrollY);
+    }
+
+    this.bufferBaseYs.set(paneId, currentBaseY);
   }
 
   /**
@@ -652,28 +682,19 @@ class Compositor {
     const agent = this.session.getAgent(pane.agentId);
     if (!agent) return '';
 
-    // Use frozen height when scroll-locked or during reflow to prevent scroll churn
-    // This is critical for viewport stability - live height changes during output
+    // Use stable height during reflow to prevent jitter, otherwise live height
     const isReflowing = this.paneReflowPhases.get(pane.id) === 'reflowing';
     const isLocked = this.scrollLocks.get(pane.id) === true;
     const liveHeight = agent.getContentHeight();
 
-    let contentHeight;
-    if (isLocked) {
-      // Use frozen height captured at scroll-up time
-      const lockedHeight = this.lockedHeights.get(pane.id);
-      contentHeight = lockedHeight !== undefined
-        ? Math.max(lockedHeight, liveHeight)
-        : liveHeight;
-    } else if (isReflowing) {
-      contentHeight = this.stableContentHeights.get(pane.id) || liveHeight;
-    } else {
-      contentHeight = liveHeight;
-    }
+    const contentHeight = isReflowing
+      ? (this.stableContentHeights.get(pane.id) || liveHeight)
+      : liveHeight;
     const maxScroll = Math.max(0, contentHeight - height);
 
-    // During output reflow, keep the previous frame for this pane.
-    if (isReflowing) {
+    // During output reflow, keep the previous frame ONLY if following tail.
+    // If user scrolled up (locked), render at their scroll position to prevent jump when reflow exits.
+    if (isReflowing && !isLocked) {
       const cached = this.paneFrameCache.get(pane.id);
       if (!cached) return '';
 
@@ -687,24 +708,9 @@ class Compositor {
       return result;
     }
 
-    // Compute scrollY - when locked, use anchor-based position for stability
-    // Anchor = lines from bottom, stays stable when top is trimmed (scrollback full)
-    let scrollY;
-    if (isLocked) {
-      const anchor = this.scrollAnchors.get(pane.id);
-      if (anchor !== undefined) {
-        // Use anchor-based scrollY: stable when top lines trimmed
-        const liveMaxScroll = Math.max(0, liveHeight - height);
-        scrollY = Math.max(0, Math.min(liveMaxScroll, liveMaxScroll - anchor));
-      } else {
-        // Fallback to absolute scrollY if no anchor
-        scrollY = this.scrollOffsets.get(pane.id) || 0;
-      }
-    } else {
-      scrollY = this.scrollOffsets.get(pane.id) || 0;
-    }
-
-    // Clamp scroll locally for render only
+    // Compute scrollY - use absolute offset, clamp to current bounds
+    // Simple approach: no anchor math, just stored position clamped to maxScroll
+    let scrollY = this.scrollOffsets.get(pane.id) || 0;
     if (scrollY > maxScroll) {
       scrollY = maxScroll;
     }
@@ -749,7 +755,9 @@ class Compositor {
           }
 
           // Insert mode: show agent's actual cursor (blinking) - only for agents that need it
-          if (agent.needsFakeCursor && (!this.visualState || this.visualState.mode === 'insert') && this.cursorBlinkVisible) {
+          // Skip during reflow or scroll-lock: cursor line is from live buffer but scrollY may use lockedHeight
+          if (agent.needsFakeCursor && (!this.visualState || this.visualState.mode === 'insert') && this.cursorBlinkVisible
+              && !isReflowing && !isLocked) {
             const cursorPos = agent.getCursorPosition();
             if (cursorPos && bufferLine === cursorPos.line) {
               lineContent = this.insertCursorMarker(lineContent, plainLine, cursorPos.col);
@@ -948,17 +956,12 @@ class Compositor {
       const scrollY = this.scrollOffsets.get(paneId) || 0;
       const liveHeight = focusedAgent.getContentHeight();
       const isLocked = this.scrollLocks.get(paneId) === true;
+      const isReflowing = this.paneReflowPhases.get(paneId) === 'reflowing';
 
-      // Use frozen height when locked for consistent percent display
-      let contentHeight;
-      if (isLocked) {
-        const lockedHeight = this.lockedHeights.get(paneId);
-        contentHeight = lockedHeight !== undefined
-          ? Math.max(lockedHeight, liveHeight)
-          : liveHeight;
-      } else {
-        contentHeight = this.stableContentHeights.get(paneId) || liveHeight;
-      }
+      // Use stable height during reflow, otherwise live height
+      const contentHeight = isReflowing
+        ? (this.stableContentHeights.get(paneId) || liveHeight)
+        : liveHeight;
 
       const viewHeight = focusedPane.bounds.height;
       const maxScroll = Math.max(0, contentHeight - viewHeight);
@@ -1181,7 +1184,8 @@ class Compositor {
   }
 
   /**
-   * Scroll pane by delta (like index.js scroll)
+   * Scroll pane by delta - simplified absolute offset approach
+   * No anchor math - just store scrollY directly, clamp on shrink
    */
   scrollPane(paneId, delta) {
     const pane = this.layoutManager.findPane(paneId);
@@ -1190,92 +1194,32 @@ class Compositor {
     const agent = this.session.getAgent(pane.agentId);
     if (!agent) return;
 
-    // Check if output is unstable (high CPS or reflowing)
-    const cps = this.getClearCps(paneId);
-    const isReflowing = this.paneReflowPhases.get(paneId) === 'reflowing';
-    const isUnstable = cps > 5 || isReflowing;
-
     const liveHeight = agent.getContentHeight();
-    const isLocked = this.scrollLocks.get(paneId) === true;
-    const isFollowing = this.followTail.get(paneId) !== false;
-    const currentMaxScroll = Math.max(0, liveHeight - pane.bounds.height);
+    const isReflowing = this.paneReflowPhases.get(paneId) === 'reflowing';
 
-    // During unstable output (CLS storm / reflow), handle scroll specially:
-    // - Use stableContentHeights for scroll math
-    // - Don't engage NEW locks (prevents capturing unstable heights)
-    // - Allow scroll to work immediately (no deferring that could hang forever)
-    if (isUnstable) {
-      const stableHeight = this.stableContentHeights.get(paneId) || liveHeight;
-
-      if (isLocked) {
-        // Already locked: scroll within stable heights, don't update anchors
-        const lockedHeight = this.lockedHeights.get(paneId);
-        const effectiveHeight = lockedHeight !== undefined
-          ? Math.max(Math.min(lockedHeight, stableHeight), stableHeight)
-          : stableHeight;
-        const maxScroll = Math.max(0, effectiveHeight - pane.bounds.height);
-        const oldScroll = this.scrollOffsets.get(paneId) || 0;
-        const scrollY = Math.max(0, Math.min(maxScroll, oldScroll + delta));
-        this.scrollOffsets.set(paneId, scrollY);
-        // Don't update anchors during unstable - keep them stable
-        if (scrollY !== oldScroll) this.scheduleDraw();
-        return;
-      }
-
-      // Not locked: scroll using stable heights, don't engage new lock
-      const maxScroll = Math.max(0, stableHeight - pane.bounds.height);
-      const oldScroll = this.scrollOffsets.get(paneId) || 0;
-      const scrollY = Math.max(0, Math.min(maxScroll, oldScroll + delta));
-      this.scrollOffsets.set(paneId, scrollY);
-
-      // Check if at bottom (using stable height)
-      const atBottom = scrollY >= maxScroll - 2;
-      if (atBottom) {
-        this.followTail.set(paneId, true);
-      } else {
-        this.followTail.set(paneId, false);
-        // Don't engage lock during unstable - will engage when stable
-      }
-
-      if (scrollY !== oldScroll) this.scheduleDraw();
-      return;
-    }
-
-    // Stable output - proceed with normal scroll logic
-    // Use frozen height when locked, otherwise live height
-    const lockedHeight = this.lockedHeights.get(paneId);
-    const effectiveHeight = isLocked && lockedHeight !== undefined
-      ? Math.max(lockedHeight, liveHeight)  // Never shrink below live (handles deletions)
+    // Use stable height during reflow to avoid jitter, otherwise live height
+    const effectiveHeight = isReflowing
+      ? (this.stableContentHeights.get(paneId) || liveHeight)
       : liveHeight;
 
     const maxScroll = Math.max(0, effectiveHeight - pane.bounds.height);
     const oldScroll = this.scrollOffsets.get(paneId) || 0;
 
+    // Compute new scroll position, clamped to valid range
     let scrollY = Math.max(0, Math.min(maxScroll, oldScroll + delta));
     this.scrollOffsets.set(paneId, scrollY);
 
-    // Check if at actual bottom (using live height for accurate detection)
-    const atBottom = scrollY >= currentMaxScroll - 2;  // 2px tolerance
+    // Check if at bottom (use live height for accurate detection)
+    const liveMaxScroll = Math.max(0, liveHeight - pane.bounds.height);
+    const atBottom = scrollY >= liveMaxScroll - 2;  // 2px tolerance
 
     if (atBottom) {
-      // User scrolled to bottom - always unlock (even if was locked)
+      // At bottom - follow tail, clear lock
       this.followTail.set(paneId, true);
-      this.scrollAnchors.delete(paneId);
       this.scrollLocks.set(paneId, false);
-      this.lockedHeights.delete(paneId);
-    } else if (isLocked) {
-      // Still locked and not at bottom - maintain lock
-      this.followTail.set(paneId, false);
-      this.scrollLocks.set(paneId, true);
-      // Anchor is lines from bottom; use live height to avoid drift when trimming
-      const liveAnchor = currentMaxScroll - scrollY;
-      this.scrollAnchors.set(paneId, liveAnchor);
     } else {
-      // Not locked, not at bottom - engage lock
-      this.lockedHeights.set(paneId, liveHeight);
+      // Scrolled up - stop following tail, engage lock
       this.followTail.set(paneId, false);
-      const liveAnchor = currentMaxScroll - scrollY;
-      this.scrollAnchors.set(paneId, liveAnchor);
       this.scrollLocks.set(paneId, true);
     }
 
@@ -1308,17 +1252,11 @@ class Compositor {
     if (position === 'top') {
       this.scrollOffsets.set(paneId, 0);
       this.followTail.set(paneId, false);
-      // Lock and freeze height at current value
-      this.scrollAnchors.set(paneId, maxScroll);
       this.scrollLocks.set(paneId, true);
-      this.lockedHeights.set(paneId, liveHeight);
     } else if (position === 'bottom') {
       this.scrollOffsets.set(paneId, maxScroll);
       this.followTail.set(paneId, true);
-      // Unlock: clear anchor and frozen height
-      this.scrollAnchors.delete(paneId);
       this.scrollLocks.set(paneId, false);
-      this.lockedHeights.delete(paneId);
     }
     this.scheduleDraw();
   }
