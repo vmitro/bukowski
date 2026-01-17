@@ -65,6 +65,24 @@ const QUOTES = loadQuotes(quotesPath);
 
 const cliArgs = parseArgs();
 
+// Optional debug logging to a file (captures console logs/errors)
+const logFilePath = process.env.BUKOWSKI_LOG_FILE || 'bukowski.log';
+const logStream = fs.createWriteStream(path.resolve(logFilePath), { flags: 'a' });
+const origLog = console.log;
+const origError = console.error;
+console.log = (...args) => {
+  try {
+    logStream.write(`${new Date().toISOString()} [INFO] ${args.join(' ')}\n`);
+  } catch { /* ignore logging errors */ }
+  origLog(...args);
+};
+console.error = (...args) => {
+  try {
+    logStream.write(`${new Date().toISOString()} [ERROR] ${args.join(' ')}\n`);
+  } catch { /* ignore logging errors */ }
+  origError(...args);
+};
+
 // Single-pane mode: exec single.js and exit
 if (cliArgs.single) {
   const singlePath = path.join(__dirname, 'single.js');

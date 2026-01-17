@@ -421,17 +421,11 @@ class Compositor {
     const currentBaseY = buffer.baseY;
     const lastBaseY = this.bufferBaseYs.get(paneId) || currentBaseY;
 
-    // DEBUG: Log baseY changes
-    if (currentBaseY !== lastBaseY) {
-      console.log(`[TRIM DEBUG] pane=${paneId} agent=${agent.type} baseY: ${lastBaseY} -> ${currentBaseY}`);
-    }
-
     if (currentBaseY > lastBaseY) {
       // Buffer trimmed lines from top - adjust scroll position
       const trimDelta = currentBaseY - lastBaseY;
       const oldScrollY = this.scrollOffsets.get(paneId) || 0;
       const newScrollY = Math.max(0, oldScrollY - trimDelta);
-      console.log(`[TRIM COMPENSATE] pane=${paneId} delta=${trimDelta} scrollY: ${oldScrollY} -> ${newScrollY}`);
       this.scrollOffsets.set(paneId, newScrollY);
     }
 
