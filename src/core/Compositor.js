@@ -116,6 +116,14 @@ class Compositor {
         for (const pane of this.layoutManager.getAllPanes()) {
           const agent = this.session.getAgent(pane.agentId);
           if (agent) {
+            // Seed scrollback strategy once per pane
+            if (!this.scrollbackStrategies.has(pane.id)) {
+              if (this.enableTrimCompensation && agent.type === 'codex') {
+                this.scrollbackStrategies.set(pane.id, 'compensate-trim');
+              } else {
+                this.scrollbackStrategies.set(pane.id, 'none');
+              }
+            }
             this.checkOutputReflow(pane.id, agent);
             this.compensateBufferTrim(pane.id, agent);
           }
@@ -405,8 +413,8 @@ class Compositor {
    * When xterm buffer trims old lines, baseY increases - adjust scrollY to maintain view
    */
   compensateBufferTrim(paneId, agent) {
-    // DISABLED by default - only enable with --debug-enable-compensations flag
-    const strategy = this.scrollbackStrategies.get(paneId) || (this.enableTrimCompensation ? 'compensate-trim' : 'none');
+    // DISABLED by default - only enable with --debug-enable-compensations flag AND opt-in strategy
+    const strategy = this.scrollbackStrategies.get(paneId) || 'none';
     if (strategy !== 'compensate-trim') {
       // Strategy disabled for this pane
       return;
@@ -421,11 +429,17 @@ class Compositor {
     const currentBaseY = buffer.baseY;
     const lastBaseY = this.bufferBaseYs.get(paneId) || currentBaseY;
 
+    // Log baseY changes for debugging
+    if (currentBaseY !== lastBaseY) {
+      console.log(`[TRIM DEBUG] pane=${paneId} agent=${agent.type} baseY: ${lastBaseY} -> ${currentBaseY}`);
+    }
+
     if (currentBaseY > lastBaseY) {
       // Buffer trimmed lines from top - adjust scroll position
       const trimDelta = currentBaseY - lastBaseY;
       const oldScrollY = this.scrollOffsets.get(paneId) || 0;
       const newScrollY = Math.max(0, oldScrollY - trimDelta);
+      console.log(`[TRIM COMPENSATE] pane=${paneId} delta=${trimDelta} scrollY: ${oldScrollY} -> ${newScrollY}`);
       this.scrollOffsets.set(paneId, newScrollY);
     }
 
