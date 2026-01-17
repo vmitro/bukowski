@@ -48,6 +48,7 @@ class Compositor {
     this.cpsWindowMs = parseInt(process.env.BUKOWSKI_CPS_WINDOW_MS, 10) || 5000;
     this.bufferBaseYs = new Map();        // paneId -> last buffer.baseY (for trim detection)
     this.scrollbackStrategies = new Map(); // paneId -> strategy ('compensate-trim' | 'none')
+    this.enableTrimCompensation = process.argv.includes('--debug-enable-compensations');
   }
 
   startCursorBlink() {
@@ -404,8 +405,8 @@ class Compositor {
    * When xterm buffer trims old lines, baseY increases - adjust scrollY to maintain view
    */
   compensateBufferTrim(paneId, agent) {
-    // DISABLED by default - only enable explicitly per pane
-    const strategy = this.scrollbackStrategies.get(paneId) || 'none';
+    // DISABLED by default - only enable with --debug-enable-compensations flag
+    const strategy = this.scrollbackStrategies.get(paneId) || (this.enableTrimCompensation ? 'compensate-trim' : 'none');
     if (strategy !== 'compensate-trim') {
       // Strategy disabled for this pane
       return;
