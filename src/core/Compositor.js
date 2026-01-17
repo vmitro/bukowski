@@ -13,9 +13,9 @@ class Compositor {
     this.rows = 24;
     this.scrollOffsets = new Map(); // paneId -> scrollY
     this.followTail = new Map();    // paneId -> boolean (whether to auto-scroll)
-    this.scrollAnchors = new Map(); // paneId -> linesFromBottom (viewport stability when scrolled up)
+    this.scrollAnchors = new Map(); // deprecated (kept for cleanup)
     this.scrollLocks = new Map();   // paneId -> boolean (freeze viewport like tmux copy mode)
-    this.lockedHeights = new Map(); // paneId -> frozen contentHeight (captured at scroll-up time)
+    this.lockedHeights = new Map(); // deprecated (kept for cleanup)
     this.drawScheduled = false;     // Throttle like index.js scheduleDraw()
     this.searchState = null; // Will be set from multi.js
     this.visualState = null; // Will be set from multi.js - {mode, visualAnchor, visualCursor}
@@ -47,6 +47,7 @@ class Compositor {
     this.clearEvents = new Map();         // paneId -> [timestamps] for CPS
     this.cpsWindowMs = parseInt(process.env.BUKOWSKI_CPS_WINDOW_MS, 10) || 5000;
     this.bufferBaseYs = new Map();        // paneId -> last buffer.baseY (for trim detection)
+    this.scrollbackStrategies = new Map(); // paneId -> strategy ('compensate-trim' | 'none')
   }
 
   startCursorBlink() {
@@ -362,6 +363,7 @@ class Compositor {
     this.frameCache.delete(paneId);
     this.clearEvents.delete(paneId);
     this.bufferBaseYs.delete(paneId);
+    this.scrollbackStrategies.delete(paneId);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -402,17 +404,33 @@ class Compositor {
    * When xterm buffer trims old lines, baseY increases - adjust scrollY to maintain view
    */
   compensateBufferTrim(paneId, agent) {
+    // DISABLED by default - only enable explicitly per pane
+    const strategy = this.scrollbackStrategies.get(paneId) || 'none';
+    if (strategy !== 'compensate-trim') {
+      // Strategy disabled for this pane
+      return;
+    }
+
+    // Skip if agent doesn't have getBuffer (e.g., ChatAgent)
+    if (!agent.getBuffer) return;
+
     const buffer = agent.getBuffer();
     if (!buffer) return;
 
     const currentBaseY = buffer.baseY;
     const lastBaseY = this.bufferBaseYs.get(paneId) || currentBaseY;
 
+    // DEBUG: Log baseY changes
+    if (currentBaseY !== lastBaseY) {
+      console.log(`[TRIM DEBUG] pane=${paneId} agent=${agent.type} baseY: ${lastBaseY} -> ${currentBaseY}`);
+    }
+
     if (currentBaseY > lastBaseY) {
       // Buffer trimmed lines from top - adjust scroll position
       const trimDelta = currentBaseY - lastBaseY;
       const oldScrollY = this.scrollOffsets.get(paneId) || 0;
       const newScrollY = Math.max(0, oldScrollY - trimDelta);
+      console.log(`[TRIM COMPENSATE] pane=${paneId} delta=${trimDelta} scrollY: ${oldScrollY} -> ${newScrollY}`);
       this.scrollOffsets.set(paneId, newScrollY);
     }
 
