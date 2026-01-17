@@ -125,7 +125,7 @@ class Compositor {
               }
             }
             this.checkOutputReflow(pane.id, agent);
-            this.compensateBufferTrim(pane.id, agent);
+            // Note: compensateBufferTrim moved to render() for correct timing
           }
         }
         // Skip auto-scroll during resize phase
@@ -734,6 +734,10 @@ class Compositor {
       }
       return result;
     }
+
+    // Compensate for buffer trim RIGHT BEFORE reading scrollY
+    // This ensures we use the freshest baseY for compensation
+    this.compensateBufferTrim(pane.id, agent);
 
     // Compute scrollY - use absolute offset, clamp to current bounds
     // Simple approach: no anchor math, just stored position clamped to maxScroll

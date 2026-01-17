@@ -221,6 +221,9 @@ Examples:
   bukowski -s "My Project"           Start new session with name
 `);
       process.exit(0);
+    } else if (arg === '--debug-enable-compensations') {
+      // Bukowski-only flag, don't pass to agents (handled by Compositor)
+      continue;
     } else if (arg === '--') {
       result.agentArgs = args.slice(i + 1);
       break;

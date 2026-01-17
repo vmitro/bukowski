@@ -188,6 +188,11 @@ terminal.registerSignalHandlers();
     console.error('Warning: IPC hub failed to start:', err.message);
   }
 
+  // Chat error buffer (needs to exist before FIPAHub init so catch blocks can push)
+  const pendingChatErrors = [];
+  const maxPendingChatErrors = 200;
+  const stripAnsi = (value) => String(value).replace(/\x1b\[[0-9;]*m/g, '');
+
   // Start FIPA Hub
   const fipaHub = new FIPAHub(ipcHub);
   try {
@@ -216,10 +221,6 @@ terminal.registerSignalHandlers();
   } catch (err) {
     console.error('Warning: FIPA hub failed to initialize:', err.message);
   }
-
-  const pendingChatErrors = [];
-  const maxPendingChatErrors = 200;
-  const stripAnsi = (value) => String(value).replace(/\x1b\[[0-9;]*m/g, '');
 
   function getChatAgents() {
     return session.getAllAgents().filter(agent => agent.type === 'chat' && typeof agent.addErrorMessage === 'function');
@@ -254,6 +255,113 @@ terminal.registerSignalHandlers();
     for (const line of lines) {
       for (const agent of chatAgents) {
         agent.addErrorMessage(line);
+      }
+    }
+  }
+
+  // Capture agent output (stdout+stderr merged in PTY) into bukowski.log without touching the TUI.
+  // Deferred to avoid slowing down PTY data handling.
+  const agentLogBuffers = new Map(); // agentId -> partial line buffer
+  const agentLogQueue = []; // queued log entries
+  let agentLogScheduled = false;
+
+  function flushAgentLogQueue() {
+    agentLogScheduled = false;
+    if (agentLogQueue.length === 0) return;
+    const entries = agentLogQueue.splice(0, agentLogQueue.length);
+    const timestamp = new Date().toISOString();
+    for (const { agentId, line } of entries) {
+      try {
+        // Strip ANSI escape codes for cleaner logs
+        const clean = line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+        if (clean.trim()) {
+          logStream.write(`${timestamp} [AGENT ${agentId}] ${clean}\n`);
+        }
+      } catch { /* ignore logging errors */ }
+    }
+  }
+
+  function logAgentData(agentId, chunk) {
+    if (!chunk || !logStream) return;
+    const buffer = agentLogBuffers.get(agentId) || '';
+    const text = buffer + (typeof chunk === 'string' ? chunk : chunk.toString());
+    const parts = text.split(/\r?\n/);
+    agentLogBuffers.set(agentId, parts.pop() || '');
+    for (const line of parts) {
+      if (line) agentLogQueue.push({ agentId, line });
+    }
+    // Defer actual write to next tick to avoid blocking PTY handler
+    if (!agentLogScheduled && agentLogQueue.length > 0) {
+      agentLogScheduled = true;
+      setImmediate(flushAgentLogQueue);
+    }
+  }
+
+  // Respawn an agent once without resume args when a stale session ID causes launch failure.
+  function respawnAgentWithoutResume(agent) {
+    const pane = layoutManager.findPaneByAgent(agent.id);
+    const typeConfig = AGENT_TYPES[agent.type];
+    if (!pane || !typeConfig) return false;
+
+    // Build fresh args without resume, plus FIPA prompt
+    const baseArgs = typeConfig.args || [];
+    const combinedArgs = [...baseArgs];
+    const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, agent.type, combinedArgs);
+    agent.args = [...combinedArgs, ...fipaArgs];
+    agent.agentSessionId = null;
+    agent.exitCode = null;
+    agent.status = 'stopped';
+
+    agent.spawn(pane.bounds.width, pane.bounds.height);
+    setupAgentHandlers(agent);
+    agent.terminal?.write('\r\n\x1b[33m[resume failed; respawned fresh without session]\x1b[0m\r\n');
+    broadcastChatError(`${agent.id} resume failed; respawned fresh session`);
+    return true;
+  }
+
+  function handleAgentExit(agent, exitCode) {
+    if (exitCode !== 0) {
+      // If resume failed due to stale session, retry once without resume args
+      if (agent.agentSessionId && !agent._retriedWithoutResume) {
+        agent._retriedWithoutResume = true;
+        const restarted = respawnAgentWithoutResume(agent);
+        if (restarted) {
+          compositor.scheduleDraw();
+          return;
+        }
+      }
+
+      // Keep the pane open on errors so the user can see the failure.
+      const msg = `\r\n\x1b[31m[process exited with code ${exitCode}]\x1b[0m\r\n`;
+      agent.terminal?.write(msg);
+      if (!agent._reportedExit) {
+        agent._reportedExit = true;
+        broadcastChatError(`${agent.id} exited with code ${exitCode}`);
+      }
+      compositor.scheduleDraw();
+      return;
+    }
+
+    // Find and close the pane for this agent
+    const pane = layoutManager.findPaneByAgent(agent.id);
+    if (pane) {
+      // Focus this pane first so closePane() closes the right one
+      layoutManager.focusPane(pane.id);
+
+      const allPanes = layoutManager.getAllPanes();
+      if (allPanes.length === 1) {
+        // Last pane - quit entirely
+        terminal.cleanup();
+        if (ipcHub) ipcHub.stop();
+        session.destroy();
+        process.exit(exitCode);
+      } else {
+        // Close just this pane
+        const paneId = pane.id;
+        layoutManager.closePane();
+        compositor.cleanupPane(paneId);  // Clear reflow timers and state
+        session.removeAgent(agent.id);
+        handleResize();
       }
     }
   }
@@ -293,7 +401,11 @@ terminal.registerSignalHandlers();
       // For session agents with PTY, inject and auto-submit to trigger response
       const agent = session.getAgent(to);
       if (agent?.pty && message.sender?.name !== to) {
-        const prompt = formatFIPAForPTY(message);
+        let prompt = formatFIPAForPTY(message);
+        // Gemini uses ! for shell mode - replace with . to avoid triggering it
+        if (agent.type === 'gemini') {
+          prompt = prompt.replace(/!/g, '.');
+        }
         // Small delay to not interrupt mid-output
         setTimeout(() => {
           agent.pty.write(prompt);
@@ -748,6 +860,11 @@ terminal.registerSignalHandlers();
     const agent = session.getAgent(pane.agentId);
     // Skip chat agents (virtual, no PTY/spawn) and already-spawned agents
     if (agent && !agent.pty && agent.type !== 'chat') {
+      // On fresh sessions, drop any stale saved agentSessionId to avoid reusing old resumes
+      if (!restoredSession) {
+        agent.agentSessionId = null;
+      }
+
       // If restoring a session, rebuild args from AGENT_TYPES + resume args
       // Don't use saved agent.args - they may contain old resume args
       // Also inject FIPA reminder prompt
@@ -796,6 +913,7 @@ terminal.registerSignalHandlers();
 
     // Coalesce PTY output to avoid mid-update flicker on wrapped content.
     agent.pty.onData((data) => {
+      logAgentData(agent.id, data);
       if (compositor.resizePhase === 'reflowing') {
         onAgentOutputDuringReflow();  // Smart reflow detection
         return;
@@ -828,42 +946,7 @@ terminal.registerSignalHandlers();
       outputTimers.set(agent.id, timer);
     });
 
-    agent.pty.onExit(({ exitCode }) => {
-      if (exitCode !== 0) {
-        // Keep the pane open on errors so the user can see the failure.
-        const msg = `\r\n\x1b[31m[process exited with code ${exitCode}]\x1b[0m\r\n`;
-        agent.terminal?.write(msg);
-        if (!agent._reportedExit) {
-          agent._reportedExit = true;
-          broadcastChatError(`${agent.id} exited with code ${exitCode}`);
-        }
-        compositor.scheduleDraw();
-        return;
-      }
-
-      // Find and close the pane for this agent
-      const pane = layoutManager.findPaneByAgent(agent.id);
-      if (pane) {
-        // Focus this pane first so closePane() closes the right one
-        layoutManager.focusPane(pane.id);
-
-        const allPanes = layoutManager.getAllPanes();
-        if (allPanes.length === 1) {
-          // Last pane - quit entirely
-          terminal.cleanup();
-          if (ipcHub) ipcHub.stop();
-          session.destroy();
-          process.exit(exitCode);
-        } else {
-          // Close just this pane
-          const paneId = pane.id;
-          layoutManager.closePane();
-          compositor.cleanupPane(paneId);  // Clear reflow timers and state
-          session.removeAgent(agent.id);
-          handleResize();
-        }
-      }
-    });
+    agent.pty.onExit(({ exitCode }) => handleAgentExit(agent, exitCode));
   }
 
   function createNewAgent(type = 'claude', extraArgs = []) {
@@ -1195,6 +1278,7 @@ terminal.registerSignalHandlers();
   for (const agent of session.getAllAgents()) {
     if (agent.pty) {
       agent.pty.onData((data) => {
+        logAgentData(agent.id, data);
         onAgentOutputDuringReflow();  // Smart reflow detection
 
         const pane = layoutManager.findPaneByAgent(agent.id);
@@ -1209,6 +1293,7 @@ terminal.registerSignalHandlers();
 
         compositor.scheduleDraw();
       });
+      agent.pty.onExit(({ exitCode }) => handleAgentExit(agent, exitCode));
     }
   }
 
@@ -1234,29 +1319,7 @@ terminal.registerSignalHandlers();
   // Handle agent exit for initial agents (onData already set up above)
   for (const agent of session.getAllAgents()) {
     if (agent.pty) {
-      agent.pty.onExit(({ exitCode }) => {
-        if (exitCode !== 0 && !agent._reportedExit) {
-          agent._reportedExit = true;
-          broadcastChatError(`${agent.id} exited with code ${exitCode}`);
-        }
-        const pane = layoutManager.findPaneByAgent(agent.id);
-        if (pane) {
-          layoutManager.focusPane(pane.id);
-          const allPanes = layoutManager.getAllPanes();
-          if (allPanes.length === 1) {
-            terminal.cleanup();
-            if (ipcHub) ipcHub.stop();
-            session.destroy();
-            process.exit(exitCode);
-          } else {
-            const paneId = pane.id;
-            layoutManager.closePane();
-            compositor.cleanupPane(paneId);  // Clear reflow timers and state
-            session.removeAgent(agent.id);
-            handleResize();
-          }
-        }
-      });
+      agent.pty.onExit(({ exitCode }) => handleAgentExit(agent, exitCode));
     }
   }
 
