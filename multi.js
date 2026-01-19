@@ -265,6 +265,11 @@ terminal.registerSignalHandlers();
   const agentLogQueue = []; // queued log entries
   let agentLogScheduled = false;
 
+  // Pre-compiled regexes for performance (avoid recompiling per-line)
+  const ANSI_CSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;  // CSI sequences like \x1b[31m
+  const ANSI_OSC_RE = /\x1b\][^\x07]*\x07/g;      // OSC sequences like \x1b]0;title\x07
+  const NEWLINE_RE = /\r?\n/;
+
   function flushAgentLogQueue() {
     agentLogScheduled = false;
     if (agentLogQueue.length === 0) return;
@@ -273,7 +278,7 @@ terminal.registerSignalHandlers();
     for (const { agentId, line } of entries) {
       try {
         // Strip ANSI escape codes for cleaner logs
-        const clean = line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+        const clean = line.replace(ANSI_CSI_RE, '').replace(ANSI_OSC_RE, '');
         if (clean.trim()) {
           logStream.write(`${timestamp} [AGENT ${agentId}] ${clean}\n`);
         }
@@ -285,7 +290,7 @@ terminal.registerSignalHandlers();
     if (!chunk || !logStream) return;
     const buffer = agentLogBuffers.get(agentId) || '';
     const text = buffer + (typeof chunk === 'string' ? chunk : chunk.toString());
-    const parts = text.split(/\r?\n/);
+    const parts = text.split(NEWLINE_RE);
     agentLogBuffers.set(agentId, parts.pop() || '');
     for (const line of parts) {
       if (line) agentLogQueue.push({ agentId, line });
@@ -390,7 +395,65 @@ terminal.registerSignalHandlers();
 
     // Wire FIPAHub messages to MCP message queue and PTY injection
     const fipaPromptDelayMs = parseInt(process.env.BUKOWSKI_FIPA_PROMPT_DELAY_MS, 10) || 100;
-    const fipaSubmitDelayMs = parseInt(process.env.BUKOWSKI_FIPA_SUBMIT_DELAY_MS, 10) || 80;
+    const fipaSubmitDelayMs = parseInt(process.env.BUKOWSKI_FIPA_SUBMIT_DELAY_MS, 10) || 80; // Legacy fixed delay
+    const fipaEchoTimeoutMs = parseInt(process.env.BUKOWSKI_FIPA_ECHO_TIMEOUT_MS, 10) || 250; // Max wait before forcing Enter
+
+    // Per-agent FIFO to prevent overlapping injections from racing.
+    const fipaInjectQueues = new Map(); // agentId -> Promise chain
+
+    function enqueueFipaInject(agent, prompt) {
+      if (!agent?.pty) return;
+      const prev = fipaInjectQueues.get(agent.id) || Promise.resolve();
+      const task = () => injectFipaWithEcho(agent, prompt).catch(() => { /* swallow to keep chain alive */ });
+      const next = prev.then(task, task);
+      fipaInjectQueues.set(agent.id, next);
+    }
+
+    // Inject text into an agent PTY and wait for the echo before sending Enter.
+    // Falls back to a short timeout so we don't hang if no echo arrives.
+    function injectFipaWithEcho(agent, prompt) {
+      if (!agent?.pty) return Promise.resolve();
+
+      return new Promise((resolve) => {
+        let done = false;
+        let buffer = '';
+        const maxWaitMs = Math.max(fipaEchoTimeoutMs, fipaSubmitDelayMs, 150); // Ensure a sensible minimum
+        const maxBuffer = Math.max(prompt.length * 2, 256);
+
+        const cleanup = (disposable, timer) => {
+          if (timer) clearTimeout(timer);
+          if (disposable?.dispose) disposable.dispose();
+        };
+
+        const sendEnter = (disposable, timer) => {
+          if (done) return;
+          done = true;
+          cleanup(disposable, timer);
+          agent.pty.write('\r');
+          resolve();
+        };
+
+        const timer = setTimeout(() => {
+          if (!done) {
+            console.error(`[fipa-autoinject] echo timeout for ${agent.id}; sending Enter without echo`);
+          }
+          sendEnter(dataListener, timer);
+        }, maxWaitMs);
+
+        const dataListener = agent.pty.onData((data) => {
+          if (done) return;
+          buffer += data;
+          if (buffer.length > maxBuffer) {
+            buffer = buffer.slice(-maxBuffer);
+          }
+          if (buffer.includes(prompt)) {
+            sendEnter(dataListener, timer);
+          }
+        });
+
+        agent.pty.write(prompt);
+      });
+    }
 
     fipaHub.on('fipa:sent', ({ message, to }) => {
       if (!to) return;
@@ -408,11 +471,7 @@ terminal.registerSignalHandlers();
         }
         // Small delay to not interrupt mid-output
         setTimeout(() => {
-          agent.pty.write(prompt);
-          // Send \r separately after a tiny delay to trigger submit
-          setTimeout(() => {
-            agent.pty.write('\r');
-          }, fipaSubmitDelayMs);
+          enqueueFipaInject(agent, prompt);
         }, fipaPromptDelayMs);
       } else if (agent?.type === 'chat') {
         const prompt = formatFIPAForPTY(message);
@@ -732,7 +791,7 @@ terminal.registerSignalHandlers();
   const REFLOW_SILENCE_MS = 20;   // Consider reflow complete after 20ms of no output
   const REFLOW_MAX_MS = 100;      // Max wait in case agent produces no output
   let outputSilenceMs = parseInt(process.env.BUKOWSKI_OUTPUT_SILENCE_DURATION, 10) || 16;
-  const outputTimers = new Map();
+  const outputTimers = new Map(); // per-agent debounce timers
 
   function onReflowComplete() {
     if (compositor.resizePhase !== 'reflowing') return;
@@ -937,6 +996,7 @@ terminal.registerSignalHandlers();
         }
       }
 
+      // Per-agent debounce timer
       const existing = outputTimers.get(agent.id);
       if (existing) clearTimeout(existing);
       const timer = setTimeout(() => {

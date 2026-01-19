@@ -23,6 +23,10 @@ class Agent {
     this.exitCode = null;
     this.spawnedAt = null;   // Timestamp when spawned (for session discovery)
 
+    // Line cache: invalidated on terminal writes
+    this._lineCache = new Map();  // lineIndex -> { str, gen }
+    this._cacheGen = 0;           // Increments on each terminal write
+
     // Codex needs fake cursor (its cursor doesn't survive PTY), others render their own
     this.needsFakeCursor = config.needsFakeCursor ?? (this.type === 'codex');
   }
@@ -62,6 +66,7 @@ class Agent {
 
     this.pty.onData(data => {
       this.terminal.write(data);
+      this._cacheGen++;  // Invalidate line cache
 
       // Handle cursor position request (DSR) - respond with current cursor position
       // Apps like Codex send \x1b[6n and expect \x1b[{row};{col}R back
@@ -124,99 +129,102 @@ class Agent {
     const buffer = this.getBuffer();
     if (!buffer || index < 0 || index >= buffer.length) return '';
 
+    // Check cache first
+    const cached = this._lineCache.get(index);
+    if (cached && cached.gen === this._cacheGen) {
+      return cached.str;
+    }
+
     const line = buffer.getLine(index);
     if (!line) return '';
 
-    // First pass: find last non-default cell (has styling or non-space char)
-    let lastStyledIdx = -1;
-    for (let i = 0; i < line.length; i++) {
+    // OPTIMIZED: Single pass, collect cells then build string
+    const lineLen = line.length;
+    const cells = [];
+    let lastContentIdx = -1;
+
+    // Single pass: collect cell data and track last content position
+    for (let i = 0; i < lineLen; i++) {
       const cell = line.getCell(i);
       if (!cell) break;
 
       const char = cell.getChars();
-      const hasBg = cell.getBgColorMode() !== 0;
-      const hasFg = cell.getFgColorMode() !== 0;
-      const hasAttrs = cell.isBold() || cell.isDim() || cell.isItalic() ||
-                       cell.isUnderline() || cell.isBlink() || cell.isInverse() ||
-                       cell.isInvisible() || cell.isStrikethrough();
+      const fgMode = cell.getFgColorMode();
+      const bgMode = cell.getBgColorMode();
 
-      // Keep this cell if it has content OR has any styling
-      if (char || hasBg || hasFg || hasAttrs) {
-        lastStyledIdx = i;
-      }
+      // Check if cell has content or styling (combine checks for speed)
+      const hasContent = char || fgMode !== 0 || bgMode !== 0 ||
+        cell.isBold() || cell.isDim() || cell.isItalic() ||
+        cell.isUnderline() || cell.isInverse() || cell.isStrikethrough();
+
+      if (hasContent) lastContentIdx = i;
+
+      cells.push({
+        char: char || ' ',
+        fgMode,
+        bgMode,
+        fg: fgMode ? cell.getFgColor() : 0,
+        bg: bgMode ? cell.getBgColor() : 0,
+        bold: cell.isBold(),
+        dim: cell.isDim(),
+        italic: cell.isItalic(),
+        underline: cell.isUnderline(),
+        inverse: cell.isInverse(),
+        strikethrough: cell.isStrikethrough()
+      });
     }
 
-    if (lastStyledIdx < 0) return '';
+    if (lastContentIdx < 0) {
+      this._lineCache.set(index, { str: '', gen: this._cacheGen });
+      return '';
+    }
 
-    let result = '';
+    // Build result with array.join (faster than += for many concatenations)
+    const parts = [];
     let lastSgr = '';
 
-    for (let i = 0; i <= lastStyledIdx; i++) {
-      const cell = line.getCell(i);
-      if (!cell) break;
+    for (let i = 0; i <= lastContentIdx; i++) {
+      const c = cells[i];
+      const sgr = [];
 
-      const char = cell.getChars() || ' ';  // Empty cells are spaces
+      if (c.bold) sgr.push(1);
+      if (c.dim) sgr.push(2);
+      if (c.italic) sgr.push(3);
+      if (c.underline) sgr.push(4);
+      if (c.inverse) sgr.push(7);
+      if (c.strikethrough) sgr.push(9);
 
-      let sgr = [];
-
-      if (cell.isBold()) sgr.push(1);
-      if (cell.isDim()) sgr.push(2);
-      if (cell.isItalic()) sgr.push(3);
-      if (cell.isUnderline()) sgr.push(4);
-      if (cell.isBlink()) sgr.push(5);
-      if (cell.isInverse()) sgr.push(7);
-      if (cell.isInvisible()) sgr.push(8);
-      if (cell.isStrikethrough()) sgr.push(9);
-
-      const fgMode = cell.getFgColorMode();
-      // Fg color modes: 0 = default, 0x1000000 = 16-color,
-      // 0x2000000 = 256-color, 0x3000000 = RGB
-      if (fgMode === 0x1000000) {
-        const fg = cell.getFgColor();
-        if (fg < 8) sgr.push(30 + fg);
-        else sgr.push(90 + fg - 8);
-      } else if (fgMode === 0x2000000) {
-        sgr.push(38, 5, cell.getFgColor());
-      } else if (fgMode === 0x3000000) {
-        const rgb = cell.getFgColor();
-        const r = (rgb >> 16) & 0xFF;
-        const g = (rgb >> 8) & 0xFF;
-        const b = rgb & 0xFF;
-        sgr.push(38, 2, r, g, b);
+      // Foreground color
+      if (c.fgMode === 0x1000000) {
+        sgr.push(c.fg < 8 ? 30 + c.fg : 82 + c.fg);
+      } else if (c.fgMode === 0x2000000) {
+        sgr.push(38, 5, c.fg);
+      } else if (c.fgMode === 0x3000000) {
+        sgr.push(38, 2, (c.fg >> 16) & 0xFF, (c.fg >> 8) & 0xFF, c.fg & 0xFF);
       }
 
-      const bgMode = cell.getBgColorMode();
-      if (bgMode === 0x1000000) {
-        const bg = cell.getBgColor();
-        if (bg < 8) sgr.push(40 + bg);
-        else sgr.push(100 + bg - 8);
-      } else if (bgMode === 0x2000000) {
-        sgr.push(48, 5, cell.getBgColor());
-      } else if (bgMode === 0x3000000) {
-        const rgb = cell.getBgColor();
-        const r = (rgb >> 16) & 0xFF;
-        const g = (rgb >> 8) & 0xFF;
-        const b = rgb & 0xFF;
-        sgr.push(48, 2, r, g, b);
+      // Background color
+      if (c.bgMode === 0x1000000) {
+        sgr.push(c.bg < 8 ? 40 + c.bg : 92 + c.bg);
+      } else if (c.bgMode === 0x2000000) {
+        sgr.push(48, 5, c.bg);
+      } else if (c.bgMode === 0x3000000) {
+        sgr.push(48, 2, (c.bg >> 16) & 0xFF, (c.bg >> 8) & 0xFF, c.bg & 0xFF);
       }
 
-      const sgrStr = sgr.join(';');
+      const sgrStr = sgr.length ? sgr.join(';') : '';
       if (sgrStr !== lastSgr) {
-        if (sgr.length > 0) {
-          result += `\x1b[0;${sgrStr}m`;
-        } else if (lastSgr !== '') {
-          result += '\x1b[0m';
-        }
+        parts.push(sgrStr ? `\x1b[0;${sgrStr}m` : (lastSgr ? '\x1b[0m' : ''));
         lastSgr = sgrStr;
       }
 
-      result += char;
+      parts.push(c.char);
     }
 
-    if (lastSgr !== '') {
-      result += '\x1b[0m';
-    }
+    if (lastSgr) parts.push('\x1b[0m');
 
+    const result = parts.join('');
+    this._lineCache.set(index, { str: result, gen: this._cacheGen });
     return result;
   }
 
@@ -225,14 +233,16 @@ class Agent {
     if (!buffer || index < 0 || index >= buffer.length) return '';
     const line = buffer.getLine(index);
     if (!line) return '';
-    let result = '';
+
+    // OPTIMIZED: array.join() + trimEnd() instead of += and regex
+    const chars = [];
     for (let i = 0; i < line.length; i++) {
       const cell = line.getCell(i);
       if (!cell) break;
       const char = cell.getChars();
-      if (char) result += char;
+      if (char) chars.push(char);
     }
-    return result.replace(/\s+$/, '');
+    return chars.join('').trimEnd();
   }
 
   getVisibleLines(startRow, count) {

@@ -8,6 +8,18 @@ class LayoutManager {
     this.focusedPaneId = null;
     this.zoomedPaneId = null;   // Track zoomed pane
     this.savedLayout = null;    // Save layout before zoom
+
+    // Caches for hot-path lookups (invalidated on layout changes)
+    this._agentPaneCache = new Map();  // agentId -> pane
+    this._allPanesCache = null;        // flat pane array
+  }
+
+  /**
+   * Invalidate layout caches (call after any layout change)
+   */
+  invalidateCache() {
+    this._agentPaneCache.clear();
+    this._allPanesCache = null;
   }
 
   get layout() {
@@ -16,6 +28,7 @@ class LayoutManager {
 
   set layout(node) {
     this.session.layout = node;
+    this.invalidateCache();
   }
 
   /**
@@ -42,14 +55,25 @@ class LayoutManager {
   }
 
   /**
-   * Find pane by agent ID
+   * Find pane by agent ID (cached for hot-path performance)
    */
-  findPaneByAgent(agentId, node = this.layout) {
+  findPaneByAgent(agentId) {
+    // Check cache first
+    if (this._agentPaneCache.has(agentId)) {
+      return this._agentPaneCache.get(agentId);
+    }
+    // Tree traversal (only on cache miss)
+    const pane = this._findPaneByAgentUncached(agentId, this.layout);
+    this._agentPaneCache.set(agentId, pane);
+    return pane;
+  }
+
+  _findPaneByAgentUncached(agentId, node) {
     if (!node) return null;
     if (node.type === 'pane' && node.agentId === agentId) return node;
     if (node.type === 'container') {
       for (const child of node.children) {
-        const found = this.findPaneByAgent(agentId, child);
+        const found = this._findPaneByAgentUncached(agentId, child);
         if (found) return found;
       }
     }
@@ -57,13 +81,22 @@ class LayoutManager {
   }
 
   /**
-   * Get all panes as flat list
+   * Get all panes as flat list (cached when called from root)
    */
-  getAllPanes(node = this.layout) {
+  getAllPanes(node = null) {
+    // If called with explicit node, do uncached traversal (rare, for subtrees)
+    if (node) return this._getAllPanesUncached(node);
+    // Root call - use cache
+    if (this._allPanesCache) return this._allPanesCache;
+    this._allPanesCache = this._getAllPanesUncached(this.layout);
+    return this._allPanesCache;
+  }
+
+  _getAllPanesUncached(node) {
     if (!node) return [];
     if (node.type === 'pane') return [node];
     if (node.type === 'container') {
-      return node.children.flatMap(c => this.getAllPanes(c));
+      return node.children.flatMap(c => this._getAllPanesUncached(c));
     }
     return [];
   }
@@ -125,6 +158,9 @@ class LayoutManager {
     focusedPane.parent = container;
     newPane.parent = container;
 
+    // Invalidate cache since layout structure changed
+    this.invalidateCache();
+
     // Focus new pane
     this.focusedPaneId = newPane.id;
     return newPane;
@@ -163,6 +199,9 @@ class LayoutManager {
       this.layout = sibling;
       sibling.parent = null;
     }
+
+    // Invalidate cache since layout structure changed
+    this.invalidateCache();
 
     // Focus sibling or first pane in sibling
     if (sibling.type === 'pane') {

@@ -31,10 +31,18 @@ class FIPAHub extends EventEmitter {
       defaultTimeout: options.defaultTimeout || 30000,
       maxConversations: options.maxConversations || 1000,
       formatter: options.formatter || structuredFormatter,
+      agents: this.session.agents,
     });
 
     // Message formatter for LLM output
-    this.formatter = options.formatter || structuredFormatter;
+    this.formatter = new (require('./FIPAPromptFormatter').FIPAPromptFormatter)({
+        style: 'structured',
+        includeProtocol: true,
+        includeGuidance: true,
+        includeConversationContext: true,
+        agents: this.session.agents,
+    });
+
 
     // Pending FIPA requests (by message ID)
     this.pendingFIPA = new Map();

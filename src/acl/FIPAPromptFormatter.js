@@ -117,12 +117,11 @@ class FIPAPromptFormatter {
       ? message.receiver.map((r) => r.name).join(', ')
       : message.receiver.name;
 
-    return `┌─ FIPA-ACL Message ─────────────────────────────────────────┐
-│ Performative: ${performative.padEnd(44)}│
-│ From: ${sender.padEnd(52)}│
-│ To: ${receivers.padEnd(54)}│
-│ Conversation: ${message.conversationId.slice(0, 36).padEnd(44)}│
-└────────────────────────────────────────────────────────────┘`;
+    return `FIPA-ACL Message:
+  Performative: ${performative}
+  From: ${sender}
+  To: ${receivers}
+  Conversation ID: ${message.conversationId}`;
   }
 
   /**

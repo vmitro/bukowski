@@ -104,28 +104,23 @@ class Compositor {
 
   /**
    * Schedule a throttled draw (exactly like index.js pattern)
-   * Default 33ms (~30 FPS) to reduce VS Code terminal scrollback accumulation
+   * Default 16ms (~60 FPS) - smooth rendering with optimized line caching
    */
   scheduleDraw() {
     if (!this.drawScheduled) {
       this.drawScheduled = true;
-      const frameInterval = parseInt(process.env.BUKOWSKI_FRAME_INTERVAL) || 33;
+      const frameInterval = parseInt(process.env.BUKOWSKI_FRAME_INTERVAL) || 16;
       setTimeout(() => {
         this.drawScheduled = false;
-        // Check output reflow and buffer trim for ALL panes
+        // Seed scrollback strategy once per pane (checkOutputReflow called in PTY handler)
         for (const pane of this.layoutManager.getAllPanes()) {
           const agent = this.session.getAgent(pane.agentId);
-          if (agent) {
-            // Seed scrollback strategy once per pane
-            if (!this.scrollbackStrategies.has(pane.id)) {
-              if (this.enableTrimCompensation && agent.type === 'codex') {
-                this.scrollbackStrategies.set(pane.id, 'compensate-trim');
-              } else {
-                this.scrollbackStrategies.set(pane.id, 'none');
-              }
+          if (agent && !this.scrollbackStrategies.has(pane.id)) {
+            if (this.enableTrimCompensation && agent.type === 'codex') {
+              this.scrollbackStrategies.set(pane.id, 'compensate-trim');
+            } else {
+              this.scrollbackStrategies.set(pane.id, 'none');
             }
-            this.checkOutputReflow(pane.id, agent);
-            // Note: compensateBufferTrim moved to render() for correct timing
           }
         }
         // Skip auto-scroll during resize phase
@@ -411,15 +406,9 @@ class Compositor {
   /**
    * Compensate for buffer trimming at scrollback limit
    * When xterm buffer trims old lines, baseY increases - adjust scrollY to maintain view
+   * NOTE: Caller must check strategy === 'compensate-trim' before calling (for perf)
    */
   compensateBufferTrim(paneId, agent) {
-    // DISABLED by default - only enable with --debug-enable-compensations flag AND opt-in strategy
-    const strategy = this.scrollbackStrategies.get(paneId) || 'none';
-    if (strategy !== 'compensate-trim') {
-      // Strategy disabled for this pane
-      return;
-    }
-
     // Skip if agent doesn't have getBuffer (e.g., ChatAgent)
     if (!agent.getBuffer) return;
 
@@ -427,20 +416,22 @@ class Compositor {
     if (!buffer) return;
 
     const currentBaseY = buffer.baseY;
-    const lastBaseY = this.bufferBaseYs.get(paneId) || currentBaseY;
+    const lastBaseY = this.bufferBaseYs.get(paneId);
 
-    // Log baseY changes for debugging
-    if (currentBaseY !== lastBaseY) {
-      console.log(`[TRIM DEBUG] pane=${paneId} agent=${agent.type} baseY: ${lastBaseY} -> ${currentBaseY}`);
+    // First call for this pane - just record baseline
+    if (lastBaseY === undefined) {
+      this.bufferBaseYs.set(paneId, currentBaseY);
+      return;
     }
 
+    // No change - skip Map write
+    if (currentBaseY === lastBaseY) return;
+
+    // Buffer trimmed lines from top - adjust scroll position
     if (currentBaseY > lastBaseY) {
-      // Buffer trimmed lines from top - adjust scroll position
       const trimDelta = currentBaseY - lastBaseY;
       const oldScrollY = this.scrollOffsets.get(paneId) || 0;
-      const newScrollY = Math.max(0, oldScrollY - trimDelta);
-      console.log(`[TRIM COMPENSATE] pane=${paneId} delta=${trimDelta} scrollY: ${oldScrollY} -> ${newScrollY}`);
-      this.scrollOffsets.set(paneId, newScrollY);
+      this.scrollOffsets.set(paneId, Math.max(0, oldScrollY - trimDelta));
     }
 
     this.bufferBaseYs.set(paneId, currentBaseY);
@@ -735,9 +726,10 @@ class Compositor {
       return result;
     }
 
-    // Compensate for buffer trim RIGHT BEFORE reading scrollY
-    // This ensures we use the freshest baseY for compensation
-    this.compensateBufferTrim(pane.id, agent);
+    // Compensate for buffer trim RIGHT BEFORE reading scrollY (only for panes that need it)
+    if (this.scrollbackStrategies.get(pane.id) === 'compensate-trim') {
+      this.compensateBufferTrim(pane.id, agent);
+    }
 
     // Compute scrollY - use absolute offset, clamp to current bounds
     // Simple approach: no anchor math, just stored position clamped to maxScroll
