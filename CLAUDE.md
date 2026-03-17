@@ -1,1 +1,0 @@
-- TODO: render chat interface inside a pane instead of full-screen takeover

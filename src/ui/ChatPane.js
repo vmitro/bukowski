@@ -84,6 +84,39 @@ class ChatPane extends EventEmitter {
   }
 
   /**
+   * Add a system message (join/leave notifications, etc.)
+   * @param {string} text - The system message text
+   * @param {string} [conversationId] - Optional conversation ID (uses active or creates lobby)
+   */
+  addSystemMessage(text, conversationId = null) {
+    const targetId = conversationId || this.activeConversationId || '__lobby__';
+
+    if (!this.chatHistory.has(targetId)) {
+      this.chatHistory.set(targetId, []);
+    }
+
+    const chatMsg = {
+      id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: new Date(),
+      sender: '***',
+      performative: 'system',
+      content: text,
+      raw: null,
+      style: { fg: 'yellow', dim: true },
+      isSystem: true,
+    };
+
+    this.chatHistory.get(targetId).push(chatMsg);
+
+    // Auto-scroll if enabled and viewing this conversation
+    if (this.autoScroll && (this.activeConversationId === targetId || targetId === '__lobby__')) {
+      this.scrollToBottom();
+    }
+
+    this.emit('message:added', { conversationId: targetId, message: chatMsg });
+  }
+
+  /**
    * Convert FIPA message to chat-friendly format
    * @private
    */

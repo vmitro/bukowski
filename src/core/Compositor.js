@@ -1026,7 +1026,8 @@ class Compositor {
     } else if (this.commandState?.active) {
       hint = 'Enter:execute Esc:cancel';
     } else if (mode === 'insert') {
-      hint = 'CTRL+Space:cmd Esc:normal';
+      // Esc is passed through to the agent; use Ctrl+Space to enter command/prefix flow
+      hint = 'CTRL+Space:cmd CTRL+C:normal';
     } else if (mode === 'normal') {
       hint = 'i:insert /:search ::cmd';
     } else if (mode === 'visual' || mode === 'visual-line') {

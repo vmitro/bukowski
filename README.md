@@ -25,6 +25,13 @@ bukowski --resume myproject       # resume existing session "myproject"
 - `--session <name>` - Names the current session (creates new if doesn't exist)
 - `--resume <name>` - Resumes an existing session with its full conversation history
 
+### Quick multi-agent guide
+- Split panes: `Ctrl+Space` `w` `s` (horizontal) or `w` `v` (vertical) - spawns Claude by default
+- Focus navigation: `Ctrl+Space` `w` then `h/j/k/l` (directional) or `w/W` (cycle next/prev)
+- Pane management: `Ctrl+Space` `w` then `c` (close), `o` (close others), `z` (zoom toggle)
+- Chat pane: `Ctrl+Space` `c` to focus or create chat pane for inter-agent messaging
+- Resume session: `bukowski --resume <name>` reloads layout, scrollback, and FIPA conversations
+
 ## MCP Server Setup
 
 Each agent needs the bukowski MCP server configured to enable inter-agent FIPA messaging.
@@ -55,8 +62,7 @@ The MCP bridge auto-detects the socket path via `BUKOWSKI_MCP_SOCKET` environmen
 **Prefix key**: `Ctrl+Space` followed by:
 - `w` - layout operations (split, resize, zoom, close)
 - `a` - IPC operations
-- `f` - FIPA ACL messaging
-- `c` - chat mode (full-screen inter-agent messaging)
+- `c` - focus/create chat pane
 
 **Navigation**: vim-style (`hjkl`, `gg`, `G`, `/` search)
 **Mouse**: scroll wheel, `Ctrl+scroll` vertical resize, `Alt+scroll` horizontal resize

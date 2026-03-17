@@ -11,7 +11,6 @@ class InputRouter {
     this.prefixActive = false;    // CTRL+Space was pressed
     this.layoutPrefix = false;    // Waiting for layout command (after 'w')
     this.ipcPrefix = false;       // Waiting for IPC command (after 'a')
-    this.fipaPrefix = false;      // Waiting for FIPA ACL command (after 'f')
     this.pendingCount = '';       // For numeric prefixes like "3j"
 
     // Register system state
@@ -46,7 +45,6 @@ class InputRouter {
       this.prefixActive = false;
       this.layoutPrefix = false;
       this.ipcPrefix = false;
-      this.fipaPrefix = false;
       this.pendingCount = '';
       this.awaitingRegister = false;
       this.selectedRegister = null;
@@ -105,12 +103,6 @@ class InputRouter {
     if (this.ipcPrefix) {
       this.ipcPrefix = false;
       return this.handleIPCCommand(data);
-    }
-
-    // Handle FIPA ACL prefix (after CTRL+Space f)
-    if (this.fipaPrefix) {
-      this.fipaPrefix = false;
-      return this.handleFIPACommand(data);
     }
 
     // Mode-specific handling
@@ -177,12 +169,6 @@ class InputRouter {
       case 'A':
         this.ipcPrefix = true;
         return { action: 'ipc_prefix' };
-
-      // FIPA ACL prefix
-      case 'f':
-      case 'F':
-        this.fipaPrefix = true;
-        return { action: 'fipa_prefix' };
 
       // Focus/create chat pane (don't change mode - chat is now pane-based)
       case 'c':
@@ -296,64 +282,6 @@ class InputRouter {
       case 'd': return { action: 'ipc_disconnect' };
       default:
         return { action: 'unknown_ipc', key };
-    }
-  }
-
-  /**
-   * Handle FIPA ACL commands (after CTRL+Space f)
-   *
-   * FIPA ACL performatives for structured agent communication:
-   * - r: REQUEST - Ask agent to perform an action
-   * - i: INFORM - Share information with agent
-   * - q: QUERY-IF - Ask yes/no question
-   * - Q: QUERY-REF - Ask for specific information
-   * - c: CFP - Call for proposals (broadcast to all agents)
-   * - p: PROPOSE - Submit a proposal
-   * - a: AGREE - Agree to a request
-   * - f: REFUSE - Refuse a request
-   * - s: SUBSCRIBE - Subscribe to notifications
-   * - l: List conversations - Show active FIPA conversations
-   * - h: Help - Show FIPA ACL command help
-   */
-  handleFIPACommand(key) {
-    switch (key) {
-      // Core performatives
-      case 'r': return { action: 'fipa_request' };        // REQUEST
-      case 'i': return { action: 'fipa_inform' };         // INFORM
-      case 'q': return { action: 'fipa_query_if' };       // QUERY-IF
-      case 'Q': return { action: 'fipa_query_ref' };      // QUERY-REF
-
-      // Negotiation performatives
-      case 'c': return { action: 'fipa_cfp' };            // CFP (Call For Proposals)
-      case 'p': return { action: 'fipa_propose' };        // PROPOSE
-      case 'A': return { action: 'fipa_accept' };         // ACCEPT-PROPOSAL
-      case 'R': return { action: 'fipa_reject' };         // REJECT-PROPOSAL
-
-      // Commitment performatives
-      case 'a': return { action: 'fipa_agree' };          // AGREE
-      case 'f': return { action: 'fipa_refuse' };         // REFUSE
-      case 'F': return { action: 'fipa_failure' };        // FAILURE
-
-      // Subscription
-      case 's': return { action: 'fipa_subscribe' };      // SUBSCRIBE
-
-      // Conversation management
-      case 'l': return { action: 'fipa_list' };           // List active conversations
-      case 'v': return { action: 'fipa_view' };           // View conversation details
-      case 'x': return { action: 'fipa_cancel' };         // Cancel conversation
-
-      // Formatting style
-      case '1': return { action: 'fipa_style', style: 'structured' };
-      case '2': return { action: 'fipa_style', style: 'natural' };
-      case '3': return { action: 'fipa_style', style: 'minimal' };
-
-      // Help
-      case 'h':
-      case '?':
-        return { action: 'fipa_help' };
-
-      default:
-        return { action: 'unknown_fipa', key };
     }
   }
 
@@ -1098,7 +1026,7 @@ class InputRouter {
    * Check if in prefix mode
    */
   isPrefixActive() {
-    return this.prefixActive || this.layoutPrefix || this.ipcPrefix || this.fipaPrefix;
+    return this.prefixActive || this.layoutPrefix || this.ipcPrefix;
   }
 
   /**
@@ -1108,7 +1036,6 @@ class InputRouter {
     if (this.prefixActive) return 'prefix';
     if (this.layoutPrefix) return 'layout';
     if (this.ipcPrefix) return 'ipc';
-    if (this.fipaPrefix) return 'fipa';
     return null;
   }
 

@@ -59,6 +59,10 @@ const claudePath = findClaudePath();
 const codexPath = findCodexPath();
 const AGENT_TYPES = createAgentTypes(claudePath, codexPath);
 
+// Lazy-initialized UI singletons (set later in startup)
+let chatPane = null;
+let compositor = null;
+
 // Load quotes for splash screen
 const quotesPath = path.join(__dirname, 'quotes.txt');
 const QUOTES = loadQuotes(quotesPath);
@@ -66,18 +70,25 @@ const QUOTES = loadQuotes(quotesPath);
 const cliArgs = parseArgs();
 
 // Optional debug logging to a file (captures console logs/errors) without polluting stdout
-const logFilePath = process.env.BUKOWSKI_LOG_FILE || 'bukowski.log';
-const logStream = fs.createWriteStream(path.resolve(logFilePath), { flags: 'a' });
-console.log = (...args) => {
-  try {
-    logStream.write(`${new Date().toISOString()} [INFO] ${args.join(' ')}\n`);
-  } catch { /* ignore logging errors */ }
-};
-console.error = (...args) => {
-  try {
-    logStream.write(`${new Date().toISOString()} [ERROR] ${args.join(' ')}\n`);
-  } catch { /* ignore logging errors */ }
-};
+let logStream = null;
+function enableFileLogging() {
+  const logFilePath = process.env.BUKOWSKI_LOG_FILE || 'bukowski.log';
+  logStream = fs.createWriteStream(path.resolve(logFilePath), { flags: 'a' });
+  console.log = (...args) => {
+    try {
+      logStream.write(`${new Date().toISOString()} [INFO] ${args.join(' ')}\n`);
+    } catch { /* ignore logging errors */ }
+  };
+  console.error = (...args) => {
+    try {
+      logStream.write(`${new Date().toISOString()} [ERROR] ${args.join(' ')}\n`);
+    } catch { /* ignore logging errors */ }
+  };
+}
+enableFileLogging();
+
+// Activate file logging so console.log/error go to bukowski.log instead of stderr
+enableFileLogging();
 
 // Single-pane mode: exec single.js and exit
 if (cliArgs.single) {
@@ -259,25 +270,40 @@ terminal.registerSignalHandlers();
     }
   }
 
-  // Capture agent output (stdout+stderr merged in PTY) into bukowski.log without touching the TUI.
-  // Deferred to avoid slowing down PTY data handling.
-  const agentLogBuffers = new Map(); // agentId -> partial line buffer
-  const agentLogQueue = []; // queued log entries
-  let agentLogScheduled = false;
+  // Broadcast informational/system announcements to all chat surfaces
+  function broadcastSystemMessage(text) {
+    if (!text) return;
 
-  // Pre-compiled regexes for performance (avoid recompiling per-line)
-  const ANSI_CSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;  // CSI sequences like \x1b[31m
-  const ANSI_OSC_RE = /\x1b\][^\x07]*\x07/g;      // OSC sequences like \x1b]0;title\x07
+    if (chatPane) {
+      chatPane.addSystemMessage(text);
+    }
+
+    for (const agent of getChatAgents()) {
+      if (typeof agent.addSystemMessage === 'function') {
+        agent.addSystemMessage(text);
+      }
+    }
+
+    if (compositor) {
+      compositor.scheduleDraw();
+    }
+  }
+
+  // Agent output logging to bukowski.log (only active when enableFileLogging() called)
+  const agentLogBuffers = new Map();
+  const agentLogQueue = [];
+  let agentLogScheduled = false;
+  const ANSI_CSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+  const ANSI_OSC_RE = /\x1b\][^\x07]*\x07/g;
   const NEWLINE_RE = /\r?\n/;
 
   function flushAgentLogQueue() {
     agentLogScheduled = false;
-    if (agentLogQueue.length === 0) return;
+    if (agentLogQueue.length === 0 || !logStream) return;
     const entries = agentLogQueue.splice(0, agentLogQueue.length);
     const timestamp = new Date().toISOString();
     for (const { agentId, line } of entries) {
       try {
-        // Strip ANSI escape codes for cleaner logs
         const clean = line.replace(ANSI_CSI_RE, '').replace(ANSI_OSC_RE, '');
         if (clean.trim()) {
           logStream.write(`${timestamp} [AGENT ${agentId}] ${clean}\n`);
@@ -295,7 +321,6 @@ terminal.registerSignalHandlers();
     for (const line of parts) {
       if (line) agentLogQueue.push({ agentId, line });
     }
-    // Defer actual write to next tick to avoid blocking PTY handler
     if (!agentLogScheduled && agentLogQueue.length > 0) {
       agentLogScheduled = true;
       setImmediate(flushAgentLogQueue);
@@ -365,6 +390,12 @@ terminal.registerSignalHandlers();
         const paneId = pane.id;
         layoutManager.closePane();
         compositor.cleanupPane(paneId);  // Clear reflow timers and state
+
+        // Announce agent departure in chat (skip chat agents)
+        if (agent.type !== 'chat') {
+          broadcastSystemMessage(`${agent.name} (${agent.id}) left the session`);
+        }
+
         session.removeAgent(agent.id);
         handleResize();
       }
@@ -396,7 +427,7 @@ terminal.registerSignalHandlers();
     // Wire FIPAHub messages to MCP message queue and PTY injection
     const fipaPromptDelayMs = parseInt(process.env.BUKOWSKI_FIPA_PROMPT_DELAY_MS, 10) || 100;
     const fipaSubmitDelayMs = parseInt(process.env.BUKOWSKI_FIPA_SUBMIT_DELAY_MS, 10) || 80; // Legacy fixed delay
-    const fipaEchoTimeoutMs = parseInt(process.env.BUKOWSKI_FIPA_ECHO_TIMEOUT_MS, 10) || 250; // Max wait before forcing Enter
+    let fipaEchoTimeoutMs = parseInt(process.env.BUKOWSKI_FIPA_ECHO_TIMEOUT_MS, 10) || 1000; // Max wait before forcing Enter
 
     // Per-agent FIFO to prevent overlapping injections from racing.
     const fipaInjectQueues = new Map(); // agentId -> Promise chain
@@ -435,7 +466,7 @@ terminal.registerSignalHandlers();
 
         const timer = setTimeout(() => {
           if (!done) {
-            console.error(`[fipa-autoinject] echo timeout for ${agent.id}; sending Enter without echo`);
+            console.log(`[fipa-autoinject] echo timeout for ${agent.id}; sending Enter without echo`);
           }
           sendEnter(dataListener, timer);
         }, maxWaitMs);
@@ -523,14 +554,77 @@ terminal.registerSignalHandlers();
 
   // Create FIPA UI components
   const conversationList = new ConversationList(fipaHub.conversations);
-  const chatPane = new ChatPane(fipaHub.conversations);
+  chatPane = new ChatPane(fipaHub.conversations);
+
+  // Wire MCPServer agent connect/disconnect notifications to chat
+  mcpServer.on('external_agent:connected', ({ agentId }) => {
+    broadcastSystemMessage(`${agentId} joined the session`);
+  });
+  mcpServer.on('external_agent:disconnected', (agentId) => {
+    broadcastSystemMessage(`${agentId} left the session`);
+  });
 
   // Create overlay manager for modal UIs (ACL input, agent picker, etc.)
   const overlayManager = new OverlayManager();
 
   // Create compositor
-  const compositor = new Compositor(session, layoutManager, tabBar, chatPane, conversationList, overlayManager);
+  compositor = new Compositor(session, layoutManager, tabBar, chatPane, conversationList, overlayManager);
   compositor.startCursorBlink();
+
+  // Optional compositor health logging for debugging pane slowdowns
+  const metricsIntervalMs = parseInt(process.env.BUKOWSKI_COMPOSITOR_METRICS_MS, 10) || 0;
+
+  // Wrap compositor.draw to collect timing/frequency stats
+  let drawCount = 0;
+  let drawTimeTotal = 0;
+  let metricsTimer = null;
+  if (metricsIntervalMs > 0 && compositor && typeof compositor.draw === 'function') {
+    const originalDraw = compositor.draw.bind(compositor);
+    compositor.draw = (...args) => {
+      const start = performance.now();
+      const result = originalDraw(...args);
+      drawCount++;
+      drawTimeTotal += performance.now() - start;
+      return result;
+    };
+  }
+  if (metricsIntervalMs > 0) {
+    metricsTimer = setInterval(() => {
+      const ts = new Date().toISOString();
+      const panes = layoutManager.getAllPanes();
+      const paneCount = panes.length;
+      const paneHeights = panes.map(p => {
+        const a = session.getAgent(p.agentId);
+        return a ? a.getContentHeight() : 0;
+      });
+      const maxContentHeight = paneHeights.length ? Math.max(...paneHeights) : 0;
+
+      const drawStats = {
+        draws: drawCount,
+        avgMs: drawCount ? +(drawTimeTotal / drawCount).toFixed(2) : 0
+      };
+      drawCount = 0;
+      drawTimeTotal = 0;
+
+      const metrics = {
+        panes: paneCount,
+        frameCache: compositor.frameCache?.size || 0,
+        paneReflowPhases: compositor.paneReflowPhases?.size || 0,
+        reflowTimers: compositor.reflowTimers?.size || 0,
+        reflowMaxTimers: compositor.reflowMaxTimers?.size || 0,
+        scrollOffsets: compositor.scrollOffsets?.size || 0,
+        followTail: compositor.followTail?.size || 0,
+        scrollLocks: compositor.scrollLocks?.size || 0,
+        bufferBaseYs: compositor.bufferBaseYs?.size || 0,
+        clearEvents: compositor.clearEvents?.size || 0,
+        outputTimers: outputTimers?.size || 0,
+        agentLogBuffers: agentLogBuffers?.size || 0,
+        maxContentHeight,
+        drawStats
+      };
+      console.log(`[metrics] ${ts} compositor=${JSON.stringify(metrics)}`);
+    }, metricsIntervalMs);
+  }
 
   // Wire up terminal manager for signal handlers
   terminal.setSession(session);
@@ -1042,6 +1136,10 @@ terminal.registerSignalHandlers();
     });
 
     session.addAgent(newAgent);
+
+    // Announce new agent in chat
+    broadcastSystemMessage(`${newAgent.name} (${newAgent.id}) joined the session`);
+
     return newAgent;
   }
 
@@ -1192,6 +1290,7 @@ terminal.registerSignalHandlers();
     resolveAgentType,
     onCaptureAgentSessions: captureAgentSessions,
     onSetOutputSilence: (ms) => { outputSilenceMs = ms; },
+    onSetEchoTimeout: (ms) => { fipaEchoTimeoutMs = ms; },
     onShowStatusMessage: (msg, timeout) => compositor.showStatusMessage(msg, timeout)
   });
 
@@ -1370,6 +1469,7 @@ terminal.registerSignalHandlers();
 
   // Register shutdown callbacks for SIGINT/SIGTERM
   terminal.onShutdown(() => {
+    if (metricsTimer) clearInterval(metricsTimer);
     if (mcpServer) mcpServer.stop();
     if (ipcHub) ipcHub.stop();
     if (fipaHub) fipaHub.shutdown();

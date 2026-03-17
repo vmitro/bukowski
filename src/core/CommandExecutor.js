@@ -21,6 +21,7 @@ class CommandExecutor {
     // Callbacks for operations that need access to multi.js scope
     this.onCaptureAgentSessions = options.onCaptureAgentSessions || (() => Promise.resolve());
     this.onSetOutputSilence = options.onSetOutputSilence || (() => {});
+    this.onSetEchoTimeout = options.onSetEchoTimeout || (() => {});
     this.onShowStatusMessage = options.onShowStatusMessage || (() => {});
   }
 
@@ -172,6 +173,12 @@ class CommandExecutor {
       const sb = Math.max(0, parseInt(value, 10));
       if (!Number.isNaN(sb)) {
         process.env.BUKOWSKI_SCROLLBACK = String(sb);
+      }
+    } else if (['echotimeout', 'echo_timeout', 'echo-timeout', 'fipa_echo_timeout'].includes(key)) {
+      const ms = Math.max(0, parseInt(value, 10));
+      if (!Number.isNaN(ms)) {
+        this.onSetEchoTimeout(ms);
+        process.env.BUKOWSKI_FIPA_ECHO_TIMEOUT_MS = String(ms);
       }
     }
   }
