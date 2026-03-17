@@ -388,7 +388,10 @@ class LayoutManager {
    * Cycle focus to next/prev pane
    */
   cycleFocus(forward = true) {
-    const panes = this.getAllPanes();
+    // When zoomed, cycle through the saved (real) layout panes and re-zoom
+    const panes = this.zoomedPaneId && this.savedLayout
+      ? this._getAllPanesUncached(this.savedLayout)
+      : this.getAllPanes();
     if (panes.length < 2) return;
 
     const currentIdx = panes.findIndex(p => p.id === this.focusedPaneId);
@@ -401,7 +404,17 @@ class LayoutManager {
       ? (currentIdx + 1) % panes.length
       : (currentIdx - 1 + panes.length) % panes.length;
 
-    this.focusedPaneId = panes[nextIdx].id;
+    const nextPane = panes[nextIdx];
+    this.focusedPaneId = nextPane.id;
+
+    // Re-zoom on the new pane
+    if (this.zoomedPaneId) {
+      this.zoomedPaneId = nextPane.id;
+      const zoomPane = new Pane(nextPane.agentId);
+      zoomPane.id = nextPane.id;
+      this.layout = zoomPane;
+      this.invalidateCache();
+    }
   }
 
   /**
