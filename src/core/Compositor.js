@@ -46,6 +46,7 @@ class Compositor {
     this.stableContentHeights = new Map(); // paneId -> stable height (for status bar)
     this.clearEvents = new Map();         // paneId -> [timestamps] for CPS
     this.cpsWindowMs = parseInt(process.env.BUKOWSKI_CPS_WINDOW_MS, 10) || 5000;
+    this.drawTimestamps = [];              // sliding window for FPS
     this.bufferBaseYs = new Map();        // paneId -> last buffer.baseY (for trim detection)
     this.scrollbackStrategies = new Map(); // paneId -> strategy ('compensate-trim' | 'none')
     this.enableTrimCompensation = process.argv.includes('--debug-enable-compensations');
@@ -88,6 +89,16 @@ class Compositor {
     if (this.paneReflowPhases.get(paneId) !== 'reflowing') {
       this.enterOutputReflow(paneId);
     }
+  }
+
+  getFps() {
+    const now = Date.now();
+    const cutoff = now - this.cpsWindowMs;
+    while (this.drawTimestamps.length && this.drawTimestamps[0] < cutoff) {
+      this.drawTimestamps.shift();
+    }
+    if (this.drawTimestamps.length === 0) return 0;
+    return this.drawTimestamps.length / (this.cpsWindowMs / 1000);
   }
 
   getClearCps(paneId) {
@@ -521,6 +532,14 @@ class Compositor {
    * Main draw function - renders directly like index.js
    */
   draw() {
+    // Track draw timestamps for FPS calculation
+    const now = Date.now();
+    const cutoff = now - this.cpsWindowMs;
+    this.drawTimestamps.push(now);
+    while (this.drawTimestamps.length && this.drawTimestamps[0] < cutoff) {
+      this.drawTimestamps.shift();
+    }
+
     // During resize 'reflowing' phase, skip ALL draws to avoid showing intermediate states
     // (agents are processing SIGWINCH and producing transitional output)
     // NOTE: Output reflow is now per-pane, handled in renderPaneContent()
@@ -1000,7 +1019,8 @@ class Compositor {
       // Show lock indicator when viewport is frozen
       const lockIndicator = isLocked ? '🔒' : '';
       const cps = this.getClearCps(paneId);
-      right += `${lockIndicator}[${from}-${to}/${contentHeight}] ${pctStr} ${cps.toFixed(2)} CPS `;
+      const fps = this.getFps();
+      right += `${lockIndicator}[${from}-${to}/${contentHeight}] ${pctStr} ${fps.toFixed(1)}fps ${cps.toFixed(1)}cps `;
     }
 
     if (focusedAgent) {
@@ -1012,9 +1032,7 @@ class Compositor {
     let hint = '';
     const prefixState = this.inputRouter?.getPrefixState?.();
     if (prefixState) {
-      if (prefixState === 'fipa') {
-        hint = '(f)ipa: (r)eq (i)nfo (q)uery (c)fp (s)ub';
-      } else if (prefixState === 'layout') {
+      if (prefixState === 'layout') {
         hint = '(w)layout: (s)plit (v)split (c)lose (z)oom';
       } else if (prefixState === 'ipc') {
         hint = '(a)gent: (s)end (b)cast (l)og';
