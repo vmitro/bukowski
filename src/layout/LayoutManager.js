@@ -407,14 +407,40 @@ class LayoutManager {
     const nextPane = panes[nextIdx];
     this.focusedPaneId = nextPane.id;
 
-    // Re-zoom on the new pane
     if (this.zoomedPaneId) {
-      this.zoomedPaneId = nextPane.id;
-      const zoomPane = new Pane(nextPane.agentId);
-      zoomPane.id = nextPane.id;
-      this.layout = zoomPane;
-      this.invalidateCache();
+      this._rezoom(nextPane);
     }
+  }
+
+  /**
+   * Switch zoom to a different pane (internal helper)
+   */
+  _rezoom(pane) {
+    this.zoomedPaneId = pane.id;
+    this.focusedPaneId = pane.id;
+    const zoomPane = new Pane(pane.agentId);
+    zoomPane.id = pane.id;
+    this.layout = zoomPane;
+    this.invalidateCache();
+  }
+
+  /**
+   * Focus pane by agent ID, handling zoom mode.
+   * In zoom mode, switches the zoomed view to that agent's pane.
+   */
+  focusByAgent(agentId) {
+    // Find the pane in the real layout (savedLayout when zoomed)
+    const searchLayout = this.zoomedPaneId && this.savedLayout
+      ? this.savedLayout : this.layout;
+    const pane = this._findPaneByAgentUncached(agentId, searchLayout);
+    if (!pane) return false;
+
+    if (this.zoomedPaneId) {
+      this._rezoom(pane);
+    } else {
+      this.focusedPaneId = pane.id;
+    }
+    return true;
   }
 
   /**

@@ -1351,11 +1351,23 @@ terminal.registerSignalHandlers();
       const baseBtn = btn & ~(4 | 8 | 16); // Remove modifier bits
 
       if (mouseMatch[4] === 'M') {
-        // Left click (btn 0) - focus pane under mouse
+        // Left click (btn 0) - focus pane under mouse or tab bar click
         if (baseBtn === 0 && !isShift && !isCtrl && !isMeta) {
-          const pane = layoutManager.findPaneAt(mx, my);
-          if (pane && pane.id !== layoutManager.focusedPaneId) {
-            layoutManager.focusPane(pane.id);
+          if (my === 0) {
+            // Tab bar click - map x position to agent tab
+            const tabIndex = tabBar.getTabAtPosition(mx, compositor.cols);
+            if (tabIndex !== -1) {
+              const agents = session.getAllAgents();
+              if (tabIndex < agents.length) {
+                layoutManager.focusByAgent(agents[tabIndex].id);
+                handleResize();
+              }
+            }
+          } else {
+            const pane = layoutManager.findPaneAt(mx, my);
+            if (pane && pane.id !== layoutManager.focusedPaneId) {
+              layoutManager.focusPane(pane.id);
+            }
           }
         }
         // Ctrl+scroll wheel - vertical pane resize (adjust horizontal splits)
