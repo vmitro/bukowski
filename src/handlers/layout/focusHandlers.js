@@ -9,10 +9,12 @@ const focusHandlers = {
 
   focus_next(ctx, _result) {
     ctx.layoutManager.cycleFocus(true);
+    if (ctx.layoutManager.isZoomed()) ctx.onHandleResize();
   },
 
   focus_prev(ctx, _result) {
     ctx.layoutManager.cycleFocus(false);
+    if (ctx.layoutManager.isZoomed()) ctx.onHandleResize();
   },
 
   focus_chat(ctx, _result) {
