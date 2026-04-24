@@ -96,7 +96,13 @@ class Agent {
   resize(cols, rows) {
     // Use pane height as virtual terminal size
     const virtualRows = parseInt(process.env.BUKOWSKI_ROWS) || rows;
-    if (this.pty) this.pty.resize(cols, virtualRows);
+    if (this.pty && this.status === 'running') {
+      try {
+        this.pty.resize(cols, virtualRows);
+      } catch {
+        // PTY fd may have closed between our check and resize (process exited mid-call)
+      }
+    }
     if (this.terminal) this.terminal.resize(cols, virtualRows);
   }
 

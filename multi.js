@@ -334,9 +334,12 @@ terminal.registerSignalHandlers();
     if (!pane || !typeConfig) return false;
 
     // Build fresh args without resume, plus FIPA prompt
+    // Rebuild command too: saved command may be stale (e.g. 'node' from a prior install
+    // with a local claude entrypoint, while current install uses 'claude' from PATH)
     const baseArgs = typeConfig.args || [];
     const combinedArgs = [...baseArgs];
     const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, agent.type, combinedArgs);
+    agent.command = typeConfig.command;
     agent.args = [...combinedArgs, ...fipaArgs];
     agent.agentSessionId = null;
     agent.exitCode = null;
@@ -1018,8 +1021,9 @@ terminal.registerSignalHandlers();
         agent.agentSessionId = null;
       }
 
-      // If restoring a session, rebuild args from AGENT_TYPES + resume args
-      // Don't use saved agent.args - they may contain old resume args
+      // If restoring a session, rebuild command+args from AGENT_TYPES + resume args
+      // Don't use saved agent.args/command - they may contain old resume args or a
+      // stale command (e.g. 'node' from a prior install with a local entrypoint)
       // Also inject FIPA reminder prompt
       if (restoredSession) {
         const typeConfig = AGENT_TYPES[agent.type];
@@ -1031,6 +1035,7 @@ terminal.registerSignalHandlers();
           const resumeArgs = typeConfig.getResumeArgs?.(isValidUuid ? sessionId : null) || [];
           const combinedArgs = [...baseArgs, ...resumeArgs];
           const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, agent.type, combinedArgs);
+          agent.command = typeConfig.command;
           agent.args = [...combinedArgs, ...fipaArgs];
         }
       }
