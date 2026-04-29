@@ -446,10 +446,10 @@ terminal.registerSignalHandlers();
     // Wire FIPAHub messages to MCP message queue and PTY injection
     const fipaPromptDelayMs = parseInt(process.env.BUKOWSKI_FIPA_PROMPT_DELAY_MS, 10) || 100;
     const fipaSubmitDelayMs = parseInt(process.env.BUKOWSKI_FIPA_SUBMIT_DELAY_MS, 10) || 80; // Legacy fixed delay
-    let fipaEchoTimeoutMs = parseInt(process.env.BUKOWSKI_FIPA_ECHO_TIMEOUT_MS, 10) || 1000; // Max wait per attempt
+    let fipaEchoTimeoutMs = parseInt(process.env.BUKOWSKI_FIPA_ECHO_TIMEOUT_MS, 10) || 1000; // Max wait for echo
     const fipaQuietMs = parseInt(process.env.BUKOWSKI_FIPA_QUIET_MS, 10) || 250; // Required PTY-quiet window before injecting
     const fipaQuietMaxWaitMs = parseInt(process.env.BUKOWSKI_FIPA_QUIET_MAX_WAIT_MS, 10) || 3000; // Max time to wait for quiet
-    const fipaMaxAttempts = parseInt(process.env.BUKOWSKI_FIPA_MAX_ATTEMPTS, 10) || 2; // Echo attempts before giving up
+    const ANSI_STRIP_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|[\x00-\x08\x0b-\x1f\x7f]/g;
 
     // Per-agent FIFO to prevent overlapping injections from racing.
     const fipaInjectQueues = new Map(); // agentId -> Promise chain
@@ -487,56 +487,45 @@ terminal.registerSignalHandlers();
       fipaInjectQueues.set(agent.id, next);
     }
 
-    // One write+wait-for-echo attempt. Resolves to 'echoed' | 'timeout'.
-    function injectFipaAttempt(agent, prompt) {
-      return new Promise((resolve) => {
-        let done = false;
-        let buffer = '';
-        const maxBuffer = Math.max(prompt.length * 2, 256);
-        const settle = (outcome, disposable, timer) => {
-          if (done) return;
-          done = true;
-          if (timer) clearTimeout(timer);
-          if (disposable?.dispose) disposable.dispose();
-          resolve(outcome);
-        };
-        const timer = setTimeout(() => settle('timeout', dataListener, timer), fipaEchoTimeoutMs);
-        const dataListener = agent.pty.onData((data) => {
-          if (done) return;
-          buffer += data;
-          if (buffer.length > maxBuffer) buffer = buffer.slice(-maxBuffer);
-          if (buffer.includes(prompt)) settle('echoed', dataListener, timer);
-        });
-        agent.pty.write(prompt);
-      });
-    }
-
-    // Inject text into an agent PTY: wait for a quiet window first, then write
-    // and wait for the echo before sending Enter. Retry on echo timeout. If we
-    // never see the echo, clear the input line (Ctrl+U) instead of submitting
-    // a stray fragment — the message is still in the MCP queue, the agent will
-    // pick it up via get_pending_messages.
+    // Inject text into an agent PTY: wait for a quiet window, write the prompt
+    // exactly once, then wait for the echo before sending Enter. On echo
+    // timeout, send Enter anyway — TUIs like Claude Code paint the input box
+    // with cursor moves so the literal prompt rarely lands as a contiguous
+    // run in the PTY data stream, but the bytes themselves did get there.
+    // Never write the prompt twice (would duplicate text in the input box).
     async function injectFipaWithEcho(agent, prompt) {
       if (!agent?.pty) return;
       tapPtyForFipaQuiet(agent);
       await awaitPtyQuiet(agent, fipaQuietMs, fipaQuietMaxWaitMs);
 
-      for (let attempt = 1; attempt <= fipaMaxAttempts; attempt++) {
-        const outcome = await injectFipaAttempt(agent, prompt);
-        if (outcome === 'echoed') {
+      await new Promise((resolve) => {
+        let done = false;
+        let buffer = '';
+        const maxBuffer = Math.max(prompt.length * 4, 1024);
+        const settle = (echoed, disposable, timer) => {
+          if (done) return;
+          done = true;
+          if (timer) clearTimeout(timer);
+          if (disposable?.dispose) disposable.dispose();
+          if (!echoed) {
+            console.log(`[fipa-autoinject] echo timeout for ${agent.id}; sending Enter (TUI may have repainted)`);
+          }
           agent.pty.write('\r');
-          return;
-        }
-        if (attempt < fipaMaxAttempts) {
-          // Wipe what we just wrote and let the PTY settle before retrying.
-          try { agent.pty.write('\x15'); } catch { /* ignore */ }
-          await awaitPtyQuiet(agent, fipaQuietMs, fipaQuietMaxWaitMs);
-        }
-      }
-      // Final failure: clear the input line so we don't submit garbage. The
-      // payload is still queued in MCP for get_pending_messages.
-      try { agent.pty.write('\x15'); } catch { /* ignore */ }
-      console.log(`[fipa-autoinject] echo timeout for ${agent.id} after ${fipaMaxAttempts} attempts; cleared input, message remains in MCP queue`);
+          resolve();
+        };
+        const timer = setTimeout(() => settle(false, dataListener, timer), fipaEchoTimeoutMs);
+        const dataListener = agent.pty.onData((data) => {
+          if (done) return;
+          buffer += data;
+          if (buffer.length > maxBuffer) buffer = buffer.slice(-maxBuffer);
+          // Strip ANSI/control bytes from the rolling buffer before substring
+          // search — TUIs repaint with cursor moves and color codes that
+          // otherwise prevent the prompt from ever appearing contiguous.
+          const flat = buffer.replace(ANSI_STRIP_RE, '');
+          if (flat.includes(prompt)) settle(true, dataListener, timer);
+        });
+        agent.pty.write(prompt);
+      });
     }
 
     fipaHub.on('fipa:sent', ({ message, to }) => {
@@ -548,10 +537,21 @@ terminal.registerSignalHandlers();
       // For session agents with PTY, inject and auto-submit to trigger response
       const agent = session.getAgent(to);
       if (agent?.pty && message.sender?.name !== to) {
-        let prompt = formatFIPAForPTY(message);
-        // Gemini uses ! for shell mode - replace with . to avoid triggering it
-        if (agent.type === 'gemini') {
-          prompt = prompt.replace(/!/g, '.');
+        let prompt;
+        if (agent.type === 'claude') {
+          // Claude Code agents have the UserPromptSubmit hook installed; the
+          // hook injects message content as additionalContext. We only need a
+          // tiny wakeup nudge in the PTY — short strings are also more
+          // reliably echo-detected than long ones.
+          const sender = message.sender?.name || 'unknown';
+          const perf = message.performative || 'inform';
+          prompt = `[FIPA ${perf} from ${sender}] (see context)`;
+        } else {
+          prompt = formatFIPAForPTY(message);
+          // Gemini uses ! for shell mode - replace with . to avoid triggering it
+          if (agent.type === 'gemini') {
+            prompt = prompt.replace(/!/g, '.');
+          }
         }
         // Small delay to not interrupt mid-output
         setTimeout(() => {
