@@ -1,5 +1,8 @@
 /**
- * Vim cursor movement handlers
+ * Vim cursor movement handlers.
+ *
+ * `cursor.col` is a cell column. h/l step by one grapheme; line-end /
+ * first-nonblank land on a grapheme boundary. See src/utils/cellCoord.js.
  */
 
 const {
@@ -8,6 +11,14 @@ const {
   moveWordBackward,
   findCharOnLine
 } = require('../../utils/bufferText');
+const {
+  cellColFromCharIdx,
+  charIdxFromCellCol,
+  lineCellCount,
+  lastGraphemeCellCol,
+  stepGraphemeLeft,
+  stepGraphemeRight,
+} = require('../../utils/cellCoord');
 
 const cursorHandlers = {
   cursor_down(ctx, result) {
@@ -32,22 +43,30 @@ const cursorHandlers = {
   },
 
   cursor_left(ctx, result) {
+    const agent = ctx.getFocusedAgent();
+    if (!agent) return;
+    const lineText = agent.getLineText(ctx.vimState.normalCursor.line) || '';
+    let charIdx = charIdxFromCellCol(lineText, ctx.vimState.normalCursor.col);
     for (let i = 0; i < (result.count || 1); i++) {
-      if (ctx.vimState.normalCursor.col > 0) {
-        ctx.vimState.normalCursor.col--;
-      }
+      if (charIdx <= 0) break;
+      charIdx = stepGraphemeLeft(lineText, charIdx);
     }
+    ctx.vimState.normalCursor.col = cellColFromCharIdx(lineText, charIdx);
   },
 
   cursor_right(ctx, result) {
     const agent = ctx.getFocusedAgent();
     if (!agent) return;
     const lineText = agent.getLineText(ctx.vimState.normalCursor.line) || '';
+    const lastCol = lastGraphemeCellCol(lineText);
+    let charIdx = charIdxFromCellCol(lineText, ctx.vimState.normalCursor.col);
     for (let i = 0; i < (result.count || 1); i++) {
-      if (ctx.vimState.normalCursor.col < lineText.length - 1) {
-        ctx.vimState.normalCursor.col++;
-      }
+      const next = stepGraphemeRight(lineText, charIdx);
+      // vim 'l' stops on the last grapheme, doesn't move past it
+      if (cellColFromCharIdx(lineText, next) > lastCol) break;
+      charIdx = next;
     }
+    ctx.vimState.normalCursor.col = cellColFromCharIdx(lineText, charIdx);
   },
 
   cursor_line_start(ctx, _result) {
@@ -58,7 +77,7 @@ const cursorHandlers = {
     const agent = ctx.getFocusedAgent();
     if (agent) {
       const lineText = agent.getLineText(ctx.vimState.normalCursor.line) || '';
-      ctx.vimState.normalCursor.col = Math.max(0, lineText.length - 1);
+      ctx.vimState.normalCursor.col = lastGraphemeCellCol(lineText);
     }
   },
 
@@ -67,7 +86,8 @@ const cursorHandlers = {
     if (agent) {
       const lineText = agent.getLineText(ctx.vimState.normalCursor.line) || '';
       const match = lineText.match(/^\s*/);
-      ctx.vimState.normalCursor.col = match ? match[0].length : 0;
+      const charIdx = match ? match[0].length : 0;
+      ctx.vimState.normalCursor.col = cellColFromCharIdx(lineText, charIdx);
     }
   },
 

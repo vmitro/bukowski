@@ -1,6 +1,17 @@
 /**
- * Buffer text utilities - text extraction and word movement
+ * Buffer text utilities - text extraction and word movement.
+ *
+ * Cursor.col is a CELL COLUMN (display cells from line start). These helpers
+ * convert to JS-char index internally for word-class regex / slicing, then
+ * back to cell-col when writing cursor state. See src/utils/cellCoord.js.
  */
+
+const {
+  cellColFromCharIdx,
+  charIdxFromCellCol,
+  lineCellCount,
+  lastGraphemeCellCol,
+} = require('./cellCoord');
 
 /**
  * Extract selected text from agent buffer
@@ -12,7 +23,6 @@ function extractSelectedText(agent, vimState) {
   const anchor = vimState.visualAnchor;
   const cursor = vimState.visualCursor;
 
-  // Determine start and end
   let start, end;
   if (anchor.line < cursor.line || (anchor.line === cursor.line && anchor.col <= cursor.col)) {
     start = anchor;
@@ -27,16 +37,18 @@ function extractSelectedText(agent, vimState) {
     const lineText = agent.getLineText(i);
 
     if (vimState.mode === 'vline') {
-      // Visual line: full lines
       lines.push(lineText);
     } else {
-      // Visual char: partial lines
+      // Cols are cell-col; slice on JS-char idx. End is inclusive (vim semantics):
+      // step one grapheme past the end-cell to capture the whole grapheme there.
       if (i === start.line && i === end.line) {
-        lines.push(lineText.slice(start.col, end.col + 1));
+        const a = charIdxFromCellCol(lineText, start.col);
+        const b = charIdxFromCellCol(lineText, end.col + 1);
+        lines.push(lineText.slice(a, b));
       } else if (i === start.line) {
-        lines.push(lineText.slice(start.col));
+        lines.push(lineText.slice(charIdxFromCellCol(lineText, start.col)));
       } else if (i === end.line) {
-        lines.push(lineText.slice(0, end.col + 1));
+        lines.push(lineText.slice(0, charIdxFromCellCol(lineText, end.col + 1)));
       } else {
         lines.push(lineText);
       }
@@ -71,10 +83,15 @@ function extractLines(agent, startLine, count) {
  */
 function extractWord(agent, line, col) {
   const lineText = agent.getLineText(line) || '';
-  let start = col, end = col;
+  let start = charIdxFromCellCol(lineText, col);
+  let end = start;
   while (start > 0 && /\w/.test(lineText[start - 1])) start--;
   while (end < lineText.length && /\w/.test(lineText[end])) end++;
-  return { text: lineText.slice(start, end), startCol: start, endCol: end - 1 };
+  return {
+    text: lineText.slice(start, end),
+    startCol: cellColFromCharIdx(lineText, start),
+    endCol: Math.max(0, cellColFromCharIdx(lineText, end) - 1),
+  };
 }
 
 /**
@@ -86,7 +103,7 @@ function extractWord(agent, line, col) {
  */
 function extractToEndOfLine(agent, line, col) {
   const lineText = agent.getLineText(line) || '';
-  return lineText.slice(col);
+  return lineText.slice(charIdxFromCellCol(lineText, col));
 }
 
 /**
@@ -98,7 +115,8 @@ function extractToEndOfLine(agent, line, col) {
  */
 function extractFromStartOfLine(agent, line, col) {
   const lineText = agent.getLineText(line) || '';
-  return lineText.slice(0, col + 1);
+  // +1 in cell-col space means "include the grapheme at `col`".
+  return lineText.slice(0, charIdxFromCellCol(lineText, col + 1));
 }
 
 /**
@@ -123,27 +141,24 @@ function isWordChar(char, bigWord) {
  */
 function moveWordForward(agent, cursor, bigWord) {
   const contentHeight = agent.getContentHeight();
-  let { line, col } = cursor;
+  let line = cursor.line;
   let lineText = agent.getLineText(line) || '';
+  let col = charIdxFromCellCol(lineText, cursor.col);
 
-  // Skip current word
-  while (col < lineText.length && isWordChar(lineText[col], bigWord)) {
-    col++;
-  }
-  // Skip whitespace/non-word chars
+  while (col < lineText.length && isWordChar(lineText[col], bigWord)) col++;
   while (true) {
-    while (col < lineText.length && !isWordChar(lineText[col], bigWord)) {
-      col++;
-    }
+    while (col < lineText.length && !isWordChar(lineText[col], bigWord)) col++;
     if (col < lineText.length || line >= contentHeight - 1) break;
-    // Move to next line
     line++;
     col = 0;
     lineText = agent.getLineText(line) || '';
   }
 
   cursor.line = line;
-  cursor.col = Math.min(col, Math.max(0, lineText.length - 1));
+  // Clamp char-idx to last grapheme start, then convert to cell-col.
+  const clampedIdx = Math.min(col, lineText.length);
+  const cellCol = cellColFromCharIdx(lineText, clampedIdx);
+  cursor.col = Math.min(cellCol, lastGraphemeCellCol(lineText));
 }
 
 /**
@@ -154,28 +169,23 @@ function moveWordForward(agent, cursor, bigWord) {
  */
 function moveWordEnd(agent, cursor, bigWord) {
   const contentHeight = agent.getContentHeight();
-  let { line, col } = cursor;
+  let line = cursor.line;
   let lineText = agent.getLineText(line) || '';
+  let col = charIdxFromCellCol(lineText, cursor.col);
 
-  // Move at least one position
   col++;
-  // Skip whitespace/non-word chars
   while (true) {
-    while (col < lineText.length && !isWordChar(lineText[col], bigWord)) {
-      col++;
-    }
+    while (col < lineText.length && !isWordChar(lineText[col], bigWord)) col++;
     if (col < lineText.length || line >= contentHeight - 1) break;
     line++;
     col = 0;
     lineText = agent.getLineText(line) || '';
   }
-  // Skip to end of word
-  while (col < lineText.length - 1 && isWordChar(lineText[col + 1], bigWord)) {
-    col++;
-  }
+  while (col < lineText.length - 1 && isWordChar(lineText[col + 1], bigWord)) col++;
 
   cursor.line = line;
-  cursor.col = Math.min(col, Math.max(0, lineText.length - 1));
+  const clampedIdx = Math.min(col, Math.max(0, lineText.length - 1));
+  cursor.col = cellColFromCharIdx(lineText, clampedIdx);
 }
 
 /**
@@ -185,28 +195,22 @@ function moveWordEnd(agent, cursor, bigWord) {
  * @param {boolean} bigWord - If true, use WORD definition
  */
 function moveWordBackward(agent, cursor, bigWord) {
-  let { line, col } = cursor;
+  let line = cursor.line;
   let lineText = agent.getLineText(line) || '';
+  let col = charIdxFromCellCol(lineText, cursor.col);
 
-  // Move at least one position
   col--;
-  // Skip whitespace/non-word chars
   while (true) {
-    while (col >= 0 && !isWordChar(lineText[col], bigWord)) {
-      col--;
-    }
+    while (col >= 0 && !isWordChar(lineText[col], bigWord)) col--;
     if (col >= 0 || line <= 0) break;
     line--;
     lineText = agent.getLineText(line) || '';
     col = lineText.length - 1;
   }
-  // Skip to start of word
-  while (col > 0 && isWordChar(lineText[col - 1], bigWord)) {
-    col--;
-  }
+  while (col > 0 && isWordChar(lineText[col - 1], bigWord)) col--;
 
   cursor.line = line;
-  cursor.col = Math.max(0, col);
+  cursor.col = cellColFromCharIdx(lineText, Math.max(0, col));
 }
 
 /**
@@ -219,37 +223,37 @@ function moveWordBackward(agent, cursor, bigWord) {
  * @returns {number} New column position or -1 if not found
  */
 function findCharOnLine(lineText, startCol, char, type, count = 1) {
+  // startCol / return value are CELL COLUMNS. Internal scan is on JS-char idx.
   const forward = type === 'f' || type === 't';
   const til = type === 't' || type === 'T';
-  let col = startCol;
+  const startIdx = charIdxFromCellCol(lineText, startCol);
+  let foundIdx = -1;
   let found = 0;
 
   if (forward) {
-    for (let i = startCol + 1; i < lineText.length; i++) {
+    for (let i = startIdx + 1; i < lineText.length; i++) {
       if (lineText[i] === char) {
         found++;
-        col = i;
+        foundIdx = i;
         if (found >= count) break;
       }
     }
   } else {
-    for (let i = startCol - 1; i >= 0; i--) {
+    for (let i = startIdx - 1; i >= 0; i--) {
       if (lineText[i] === char) {
         found++;
-        col = i;
+        foundIdx = i;
         if (found >= count) break;
       }
     }
   }
 
-  if (found < count) return -1;  // Not found enough times
+  if (found < count) return -1;
 
-  // Adjust for til (t/T) - stop before/after the character
-  if (til) {
-    col = forward ? col - 1 : col + 1;
-  }
-
-  return col;
+  let cellCol = cellColFromCharIdx(lineText, foundIdx);
+  // For t/T, stop one cell before/after — using cell offsets, not char offsets.
+  if (til) cellCol = forward ? cellCol - 1 : cellCol + 1;
+  return cellCol;
 }
 
 module.exports = {

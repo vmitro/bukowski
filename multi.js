@@ -50,6 +50,14 @@ const {
   moveWordBackward,
   findCharOnLine
 } = require('./src/utils/bufferText');
+const {
+  cellColFromCharIdx,
+  charIdxFromCellCol,
+  lineCellCount,
+  lastGraphemeCellCol,
+  stepGraphemeLeft,
+  stepGraphemeRight,
+} = require('./src/utils/cellCoord');
 const { TerminalManager } = require('./src/core/TerminalManager');
 const { CommandExecutor } = require('./src/core/CommandExecutor');
 const { ActionDispatcher } = require('./src/handlers');
@@ -768,7 +776,11 @@ terminal.registerSignalHandlers();
         const line = agent.getLineText(i);
         let match;
         while ((match = regex.exec(line)) !== null) {
-          searchState.matches.push({ line: i, col: match.index, length: match[0].length });
+          // Convert JS-char index/length from regex.exec to cell-col coords
+          // so highlighter (which walks getLine cell-by-cell) matches up.
+          const startCell = cellColFromCharIdx(line, match.index);
+          const endCell = cellColFromCharIdx(line, match.index + match[0].length);
+          searchState.matches.push({ line: i, col: startCell, length: endCell - startCell });
         }
       }
     } catch {
@@ -867,16 +879,21 @@ terminal.registerSignalHandlers();
         case 'down':
           vimState.visualCursor.line = Math.min(contentHeight - 1, vimState.visualCursor.line + 1);
           break;
-        case 'left':
-          if (vimState.visualCursor.col > 0) {
-            vimState.visualCursor.col--;
-          }
+        case 'left': {
+          if (vimState.visualCursor.col <= 0) break;
+          const lineText = agent.getLineText(vimState.visualCursor.line) || '';
+          const charIdx = charIdxFromCellCol(lineText, vimState.visualCursor.col);
+          const prev = stepGraphemeLeft(lineText, charIdx);
+          vimState.visualCursor.col = cellColFromCharIdx(lineText, prev);
           break;
+        }
         case 'right': {
-          const lineText = agent.getLineText(vimState.visualCursor.line);
-          if (vimState.visualCursor.col < lineText.length - 1) {
-            vimState.visualCursor.col++;
-          }
+          const lineText = agent.getLineText(vimState.visualCursor.line) || '';
+          const lastCol = lastGraphemeCellCol(lineText);
+          if (vimState.visualCursor.col >= lastCol) break;
+          const charIdx = charIdxFromCellCol(lineText, vimState.visualCursor.col);
+          const next = stepGraphemeRight(lineText, charIdx);
+          vimState.visualCursor.col = cellColFromCharIdx(lineText, next);
           break;
         }
       }

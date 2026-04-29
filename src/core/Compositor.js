@@ -1,6 +1,9 @@
 // src/core/Compositor.js - Multi-viewport rendering compositor
 // Renders like index.js: direct line output with preserved ANSI codes
 
+const { walkAnsi, stripAnsi } = require('./ansiUtils');
+const { lineCellCount } = require('../utils/cellCoord');
+
 class Compositor {
   constructor(session, layoutManager, tabBar, chatPane, conversationList, overlayManager = null) {
     this.session = session;
@@ -665,10 +668,12 @@ class Compositor {
   }
 
   /**
-   * Strip ANSI codes (helper for chat input)
+   * Strip ANSI codes (helper for chat input). Used for visible-width math —
+   * must agree with fitToWidth's accounting, so route both through the same
+   * walker (handles CSI, OSC, DCS, surrogate pairs, combining marks, wide chars).
    */
   _stripAnsi(str) {
-    return str.replace(/\x1b\[[0-9;]*m/g, '');
+    return stripAnsi(str);
   }
 
   /**
@@ -818,34 +823,37 @@ class Compositor {
   }
 
   /**
-   * Fit line content to width, handling ANSI codes
+   * Fit line content to pane width.
+   *
+   * Operates in *cell-grid* coords, matching how Agent.getLine() lays out lines:
+   * each xterm cell becomes one grapheme token (a wide char + its placeholder
+   * cell are two cells, so the line already carries a literal ' ' for the
+   * trailing slot). One token = one column.
+   *
+   * The old version only recognized `m`-terminated CSI — any non-SGR escape
+   * (CUP, EL, OSC hyperlink, mode set, etc.) was rendered as visible chars and
+   * blew the width math. Routes through walkAnsi so the full vocabulary is
+   * passed through, and surrogate pairs / combining marks fold into one
+   * grapheme token instead of being miscounted.
    */
   fitToWidth(line, width) {
     let visibleLen = 0;
     let result = '';
-    let i = 0;
 
-    while (i < line.length && visibleLen < width) {
-      if (line[i] === '\x1b') {
-        // ANSI escape - copy until 'm'
-        const escEnd = line.indexOf('m', i);
-        if (escEnd !== -1) {
-          result += line.substring(i, escEnd + 1);
-          i = escEnd + 1;
-          continue;
-        }
+    for (const tok of walkAnsi(line)) {
+      if (tok.type === 'ansi') {
+        result += tok.value;
+        continue;
       }
-      result += line[i];
+      if (visibleLen >= width) break;
+      result += tok.value;
       visibleLen++;
-      i++;
     }
 
-    // Pad with spaces if needed
     if (visibleLen < width) {
       result += ' '.repeat(width - visibleLen);
     }
 
-    // Reset at end
     result += '\x1b[0m';
     return result;
   }
@@ -1070,7 +1078,12 @@ class Compositor {
   }
 
   /**
-   * Highlight search matches (like index.js highlightSearchMatches)
+   * Highlight search matches.
+   *
+   * `plainIdx` is a CELL COLUMN — incremented once per char-token from walkAnsi
+   * (one token per xterm cell, including wide-char placeholder cells). Match
+   * coords (`m.col`, `m.length`) are cell-col + cell-count, produced via
+   * cellColFromCharIdx in executeSearch.
    */
   highlightSearchMatches(line, plainLine, matches, lineIdx) {
     const currentMatch = this.searchState.matches[this.searchState.index];
@@ -1078,16 +1091,11 @@ class Compositor {
 
     let result = '';
     let plainIdx = 0;
-    let i = 0;
 
-    while (i < line.length) {
-      if (line[i] === '\x1b') {
-        const escEnd = line.indexOf('m', i);
-        if (escEnd !== -1) {
-          result += line.substring(i, escEnd + 1);
-          i = escEnd + 1;
-          continue;
-        }
+    for (const tok of walkAnsi(line)) {
+      if (tok.type === 'ansi') {
+        result += tok.value;
+        continue;
       }
 
       let inMatch = false;
@@ -1103,27 +1111,26 @@ class Compositor {
       }
 
       if (isCurrentMatchPos) {
-        result += `\x1b[30;103m${line[i]}\x1b[0m`;
+        result += `\x1b[30;103m${tok.value}\x1b[0m`;
       } else if (inMatch) {
-        result += `\x1b[43m${line[i]}\x1b[49m`;
+        result += `\x1b[43m${tok.value}\x1b[49m`;
       } else {
-        result += line[i];
+        result += tok.value;
       }
 
       plainIdx++;
-      i++;
     }
 
     return result;
   }
 
   /**
-   * Apply visual selection highlight (like index.js highlightVisualSelection)
+   * Apply visual selection highlight. `plainIdx` is a cell column; bounds are
+   * cell columns (visualAnchor.col, visualCursor.col).
    */
   applyVisualHighlight(line, plainLine, lineIdx) {
     const { visualAnchor, visualCursor, mode } = this.visualState;
 
-    // Determine selection bounds
     let startLine = visualAnchor.line;
     let startCol = visualAnchor.col;
     let endLine = visualCursor.line;
@@ -1141,46 +1148,40 @@ class Compositor {
       return line;
     }
 
+    const lineCells = lineCellCount(plainLine);
     let hlStart = 0;
-    let hlEnd = plainLine.length;
+    let hlEnd = lineCells;
 
-    if (mode === 'vline') {
-      // Full line
-    } else {
+    if (mode !== 'vline') {
       if (lineIdx === startLine) hlStart = startCol;
-      if (lineIdx === endLine) hlEnd = endCol + 1;
+      if (lineIdx === endLine) hlEnd = endCol + 1;  // inclusive end-cell
     }
 
     let result = '';
     let plainIdx = 0;
-    let i = 0;
 
-    while (i < line.length) {
-      if (line[i] === '\x1b') {
-        const escEnd = line.indexOf('m', i);
-        if (escEnd !== -1) {
-          result += line.substring(i, escEnd + 1);
-          i = escEnd + 1;
-          continue;
-        }
+    for (const tok of walkAnsi(line)) {
+      if (tok.type === 'ansi') {
+        result += tok.value;
+        continue;
       }
 
       const inHighlight = plainIdx >= hlStart && plainIdx < hlEnd;
       const isCursor = lineIdx === visualCursor.line && plainIdx === visualCursor.col;
 
       if (isCursor) {
-        result += `\x1b[4;7m${line[i]}\x1b[24;27m`;
+        result += `\x1b[4;7m${tok.value}\x1b[24;27m`;
       } else if (inHighlight) {
-        result += `\x1b[7m${line[i]}\x1b[27m`;
+        result += `\x1b[7m${tok.value}\x1b[27m`;
       } else {
-        result += line[i];
+        result += tok.value;
       }
 
       plainIdx++;
-      i++;
     }
 
-    if (lineIdx === visualCursor.line && visualCursor.col >= plainLine.length) {
+    // Cursor past end of line (e.g. on an empty line) — emit a marker cell.
+    if (lineIdx === visualCursor.line && visualCursor.col >= lineCells) {
       result += `\x1b[4;7m \x1b[24;27m`;
     }
 
@@ -1188,35 +1189,28 @@ class Compositor {
   }
 
   /**
-   * Insert cursor marker (like index.js insertCursorMarker)
+   * Insert cursor marker at cell column `col`. plainIdx walks cells via walkAnsi.
    */
   insertCursorMarker(line, plainLine, col) {
     let result = '';
     let plainIdx = 0;
-    let i = 0;
 
-    while (i < line.length) {
-      if (line[i] === '\x1b') {
-        const escEnd = line.indexOf('m', i);
-        if (escEnd !== -1) {
-          result += line.substring(i, escEnd + 1);
-          i = escEnd + 1;
-          continue;
-        }
+    for (const tok of walkAnsi(line)) {
+      if (tok.type === 'ansi') {
+        result += tok.value;
+        continue;
       }
 
       if (plainIdx === col) {
-        result += `\x1b[4;7m${line[i]}\x1b[24;27m`;
+        result += `\x1b[4;7m${tok.value}\x1b[24;27m`;
       } else {
-        result += line[i];
+        result += tok.value;
       }
 
       plainIdx++;
-      i++;
     }
 
     if (col >= plainIdx) {
-      // Pad with spaces to reach cursor position (use plainIdx, not plainLine.length)
       const padding = col - plainIdx;
       result += ' '.repeat(padding);
       result += `\x1b[4;7m \x1b[24;27m`;

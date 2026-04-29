@@ -5,6 +5,10 @@ const {
   moveWordEnd,
   moveWordBackward
 } = require('../../utils/bufferText');
+const {
+  cellColFromCharIdx,
+  lastGraphemeCellCol,
+} = require('../../utils/cellCoord');
 
 const visualHandlers = {
   mode_change(ctx, result) {
@@ -62,7 +66,7 @@ const visualHandlers = {
       ctx.vimState.visualCursor.line = Math.max(0, lastLine);
       if (ctx.vimState.mode === 'visual') {
         const lineText = focusedAgent.getLineText(lastLine);
-        ctx.vimState.visualCursor.col = Math.max(0, lineText.length - 1);
+        ctx.vimState.visualCursor.col = lastGraphemeCellCol(lineText);
       }
       ctx.ensureLineVisible(ctx.vimState.visualCursor.line);
     }
@@ -78,7 +82,7 @@ const visualHandlers = {
     const focusedAgent = ctx.getFocusedAgent();
     if (ctx.vimState.mode === 'visual' && focusedAgent) {
       const lineText = focusedAgent.getLineText(ctx.vimState.visualCursor.line) || '';
-      ctx.vimState.visualCursor.col = Math.max(0, lineText.length - 1);
+      ctx.vimState.visualCursor.col = lastGraphemeCellCol(lineText);
     }
   },
 
@@ -87,7 +91,8 @@ const visualHandlers = {
     if (ctx.vimState.mode === 'visual' && focusedAgent) {
       const lineText = focusedAgent.getLineText(ctx.vimState.visualCursor.line) || '';
       const match = lineText.match(/^\s*/);
-      ctx.vimState.visualCursor.col = match ? match[0].length : 0;
+      const charIdx = match ? match[0].length : 0;
+      ctx.vimState.visualCursor.col = cellColFromCharIdx(lineText, charIdx);
     }
   },
 
