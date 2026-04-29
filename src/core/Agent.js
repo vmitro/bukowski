@@ -4,6 +4,16 @@ const pty = require('node-pty');
 const { Terminal } = require('@xterm/headless');
 const { SerializeAddon } = require('@xterm/addon-serialize');
 
+const UUID_RE = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
+// Patterns agents print when they display their own resume command — most reliable
+// source of session ID, beats filesystem mtime guessing.
+const SESSION_ID_PATTERNS = {
+  claude: new RegExp(`--resume[^0-9a-f]*${UUID_RE}`, 'i'),
+  codex: new RegExp(`\\bresume[^0-9a-f]*${UUID_RE}`, 'i'),
+  gemini: new RegExp(`-r[^0-9a-f]*${UUID_RE}`, 'i')
+};
+const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
+
 class Agent {
   constructor(config) {
     this.id = config.id;
@@ -22,6 +32,8 @@ class Agent {
     this.socketPath = null;  // IPC socket path
     this.exitCode = null;
     this.spawnedAt = null;   // Timestamp when spawned (for session discovery)
+    this.sessionIdCaptured = false; // True once PTY-scraped (trumps mtime)
+    this._sessionIdScanBuffer = ''; // Rolling buffer for resume-line scrape
 
     // Line cache: invalidated on terminal writes
     this._lineCache = new Map();  // lineIndex -> { str, gen }
@@ -35,6 +47,8 @@ class Agent {
     if (this.pty) this.kill();
 
     this.spawnedAt = Date.now();
+    this.sessionIdCaptured = false;
+    this._sessionIdScanBuffer = '';
 
     // Use pane height as virtual terminal size (agents adapt output to fit)
     // BUKOWSKI_ROWS env var can override for testing
@@ -67,6 +81,7 @@ class Agent {
     this.pty.onData(data => {
       this.terminal.write(data);
       this._cacheGen++;  // Invalidate line cache
+      this._scanForSessionId(data);
 
       // Handle cursor position request (DSR) - respond with current cursor position
       // Apps like Codex send \x1b[6n and expect \x1b[{row};{col}R back
@@ -91,6 +106,22 @@ class Agent {
       this.pty = null;
     }
     this.status = 'stopped';
+  }
+
+  // Scrape the agent's own resume-command output (e.g. "claude --resume <uuid>"
+  // printed on /quit) for the session ID. Authoritative — beats mtime guessing.
+  // Keeps scanning so /resume-into-a-different-session inside the agent is picked up.
+  _scanForSessionId(data) {
+    const pattern = SESSION_ID_PATTERNS[this.type];
+    if (!pattern) return;
+    const clean = data.replace(ANSI_RE, '');
+    if (!clean) return;
+    this._sessionIdScanBuffer = (this._sessionIdScanBuffer + clean).slice(-2000);
+    const match = this._sessionIdScanBuffer.match(pattern);
+    if (match && match[1] !== this.agentSessionId) {
+      this.agentSessionId = match[1];
+      this.sessionIdCaptured = true;
+    }
   }
 
   resize(cols, rows) {

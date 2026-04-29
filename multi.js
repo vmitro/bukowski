@@ -974,6 +974,12 @@ terminal.registerSignalHandlers();
     const agents = session.getAllAgents().sort((a, b) => (a.spawnedAt || 0) - (b.spawnedAt || 0));
 
     for (const agent of agents) {
+      // PTY-scraped IDs (from "claude --resume <UUID>" printed at exit) are authoritative
+      if (agent.sessionIdCaptured && agent.agentSessionId) {
+        assignedIds.add(agent.agentSessionId);
+        continue;
+      }
+
       if (!agent.spawnedAt) {
         // Agent never spawned, preserve existing ID if any
         if (agent.agentSessionId) {
@@ -983,7 +989,7 @@ terminal.registerSignalHandlers();
       }
 
       try {
-        // Always look for most recently modified session (handles /resume switches)
+        // Fall back to filesystem mtime when no PTY scrape is available
         const sessionId = await findLatestSession(agent.type, cwd, agent.spawnedAt, assignedIds);
         if (sessionId) {
           agent.agentSessionId = sessionId;
