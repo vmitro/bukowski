@@ -297,6 +297,13 @@ terminal.registerSignalHandlers();
   const ANSI_OSC_RE = /\x1b\][^\x07]*\x07/g;
   const NEWLINE_RE = /\r?\n/;
 
+  // Per-agent dedup state: when a TUI repaints the same line many times in a
+  // row (status bars, test progress, "Cooking…" tickers) we collapse the runs
+  // into a single trailing "× N" marker emitted on the next distinct line.
+  // Without this, bukowski.log grows by GB on long sessions.
+  const agentLogLastLine = new Map(); // agentId -> last cleaned line written
+  const agentLogRepeats = new Map();  // agentId -> repeat count since last write
+
   function flushAgentLogQueue() {
     agentLogScheduled = false;
     if (agentLogQueue.length === 0 || !logStream) return;
@@ -305,9 +312,18 @@ terminal.registerSignalHandlers();
     for (const { agentId, line } of entries) {
       try {
         const clean = line.replace(ANSI_CSI_RE, '').replace(ANSI_OSC_RE, '');
-        if (clean.trim()) {
-          logStream.write(`${timestamp} [AGENT ${agentId}] ${clean}\n`);
+        if (!clean.trim()) continue;
+        if (agentLogLastLine.get(agentId) === clean) {
+          agentLogRepeats.set(agentId, (agentLogRepeats.get(agentId) || 0) + 1);
+          continue;
         }
+        const repeats = agentLogRepeats.get(agentId) || 0;
+        if (repeats > 0) {
+          logStream.write(`${timestamp} [AGENT ${agentId}] (× ${repeats + 1})\n`);
+          agentLogRepeats.set(agentId, 0);
+        }
+        logStream.write(`${timestamp} [AGENT ${agentId}] ${clean}\n`);
+        agentLogLastLine.set(agentId, clean);
       } catch { /* ignore logging errors */ }
     }
   }
