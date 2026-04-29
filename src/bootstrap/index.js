@@ -90,20 +90,23 @@ When you're unsure about something outside your expertise, consider asking anoth
 
 const FIPA_REMINDER_INLINE = FIPA_REMINDER.replace(/\n+/g, '. ');
 
-// Paths to bukowski's hook scripts for Claude Code agents. Both hooks share
-// the same job — peek the FIPA queue and surface pending messages — but they
-// fire at different points in the turn lifecycle:
+// Paths to bukowski's hook scripts for Claude Code agents. Each hook peeks
+// the FIPA queue and surfaces pending messages, but they fire at different
+// points in the turn lifecycle and apply different filters:
 //
-//   UserPromptSubmit: messages that arrived before the turn (visible at
-//                     submit, injected as additionalContext).
-//   Stop:             messages that arrived during the turn (only visible
-//                     at turn end; block the stop with a continuation
-//                     reason so Claude takes another turn to drain).
+//   UserPromptSubmit: any pending message visible at prompt submit
+//                     (additionalContext on the user turn).
+//   Stop:             any pending message at turn end — block the stop with
+//                     a continuation reason so Claude drains on the next turn.
+//   PostToolUse:      mid-turn interrupt for `request` performatives only;
+//                     announced at most once per arrival (server marks via
+//                     bukowski/peek_unannounced_requests).
 //
-// Resolved once at module load; both passed via --settings JSON so each
-// spawned Claude agent gets event-driven delivery without PTY-injected text.
+// Resolved once at module load; passed via --settings JSON so each spawned
+// Claude agent gets event-driven delivery without PTY-injected text.
 const FIPA_CLAUDE_USERPROMPT_HOOK = path.resolve(__dirname, '..', 'mcp', 'hooks', 'userprompt-submit.js');
 const FIPA_CLAUDE_STOP_HOOK = path.resolve(__dirname, '..', 'mcp', 'hooks', 'stop.js');
+const FIPA_CLAUDE_POSTTOOL_HOOK = path.resolve(__dirname, '..', 'mcp', 'hooks', 'posttool-use.js');
 const FIPA_CLAUDE_SETTINGS_JSON = JSON.stringify({
   hooks: {
     UserPromptSubmit: [
@@ -119,6 +122,13 @@ const FIPA_CLAUDE_SETTINGS_JSON = JSON.stringify({
           { type: 'command', command: `node ${FIPA_CLAUDE_STOP_HOOK}` }
         ]
       }
+    ],
+    PostToolUse: [
+      {
+        hooks: [
+          { type: 'command', command: `node ${FIPA_CLAUDE_POSTTOOL_HOOK}` }
+        ]
+      }
     ]
   }
 });
@@ -128,9 +138,11 @@ function createAgentTypes(claudePath, codexPath) {
   const claudeEntrypointExists = claudePath && claudePath !== 'claude' && fs.existsSync(claudePath);
   const claudeCommand = claudeEntrypointExists ? 'node' : 'claude';
   const claudeArgs = claudeEntrypointExists ? [claudePath] : [];
-  const claudeHookArgs = (fs.existsSync(FIPA_CLAUDE_USERPROMPT_HOOK) && fs.existsSync(FIPA_CLAUDE_STOP_HOOK))
-    ? ['--settings', FIPA_CLAUDE_SETTINGS_JSON]
-    : [];
+  const claudeHookArgs = (
+    fs.existsSync(FIPA_CLAUDE_USERPROMPT_HOOK) &&
+    fs.existsSync(FIPA_CLAUDE_STOP_HOOK) &&
+    fs.existsSync(FIPA_CLAUDE_POSTTOOL_HOOK)
+  ) ? ['--settings', FIPA_CLAUDE_SETTINGS_JSON] : [];
 
   return {
     claude: {

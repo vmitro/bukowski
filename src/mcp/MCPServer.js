@@ -413,6 +413,33 @@ class MCPServer extends EventEmitter {
         break;
       }
 
+      case 'bukowski/peek_unannounced_requests': {
+        // Atomic read+mark used by the Claude Code PostToolUse hook to deliver
+        // mid-turn interrupts for `request` performatives only. Each request
+        // is announced at most once per arrival; subsequent PostToolUse hooks
+        // skip it. If the agent ignores the mid-turn announce, the regular
+        // peek (Stop / UserPromptSubmit) still surfaces it as a safety net.
+        const targetId = params?.agentId || clientState.agentId;
+        const queue = (targetId && this.messageQueues.get(targetId)) || [];
+        const limit = Math.max(1, Math.min(10, params?.limit || 5));
+        const matches = [];
+        for (const m of queue) {
+          if (m.performative !== 'request') continue;
+          if (m._midTurnAnnounced) continue;
+          m._midTurnAnnounced = true;
+          let excerpt = '';
+          if (typeof m.content === 'string') {
+            excerpt = m.content.length > 200 ? m.content.slice(0, 200) + '…' : m.content;
+          } else if (m.content != null) {
+            try { excerpt = JSON.stringify(m.content).slice(0, 200); } catch { excerpt = ''; }
+          }
+          matches.push({ sender: m.sender?.name || null, excerpt });
+          if (matches.length >= limit) break;
+        }
+        this._sendResult(socket, id, { count: matches.length, previews: matches });
+        break;
+      }
+
       default:
         this._sendError(socket, id, -32601, 'Method not found');
     }
