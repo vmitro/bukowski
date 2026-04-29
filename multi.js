@@ -430,10 +430,38 @@ terminal.registerSignalHandlers();
     // Wire FIPAHub messages to MCP message queue and PTY injection
     const fipaPromptDelayMs = parseInt(process.env.BUKOWSKI_FIPA_PROMPT_DELAY_MS, 10) || 100;
     const fipaSubmitDelayMs = parseInt(process.env.BUKOWSKI_FIPA_SUBMIT_DELAY_MS, 10) || 80; // Legacy fixed delay
-    let fipaEchoTimeoutMs = parseInt(process.env.BUKOWSKI_FIPA_ECHO_TIMEOUT_MS, 10) || 1000; // Max wait before forcing Enter
+    let fipaEchoTimeoutMs = parseInt(process.env.BUKOWSKI_FIPA_ECHO_TIMEOUT_MS, 10) || 1000; // Max wait per attempt
+    const fipaQuietMs = parseInt(process.env.BUKOWSKI_FIPA_QUIET_MS, 10) || 250; // Required PTY-quiet window before injecting
+    const fipaQuietMaxWaitMs = parseInt(process.env.BUKOWSKI_FIPA_QUIET_MAX_WAIT_MS, 10) || 3000; // Max time to wait for quiet
+    const fipaMaxAttempts = parseInt(process.env.BUKOWSKI_FIPA_MAX_ATTEMPTS, 10) || 2; // Echo attempts before giving up
 
     // Per-agent FIFO to prevent overlapping injections from racing.
     const fipaInjectQueues = new Map(); // agentId -> Promise chain
+
+    // Last time we saw bytes from each agent's PTY; used to detect quiet windows
+    // before injecting. Keyed by agent.id; populated via tapPtyForFipaQuiet().
+    const lastPtyDataAt = new Map();
+    const ptyTapped = new Set();
+    function tapPtyForFipaQuiet(agent) {
+      if (!agent?.pty) return;
+      if (ptyTapped.has(agent.id)) return;
+      ptyTapped.add(agent.id);
+      lastPtyDataAt.set(agent.id, Date.now());
+      agent.pty.onData(() => { lastPtyDataAt.set(agent.id, Date.now()); });
+    }
+
+    function awaitPtyQuiet(agent, quietMs, maxWaitMs) {
+      return new Promise((resolve) => {
+        const start = Date.now();
+        const tick = () => {
+          const last = lastPtyDataAt.get(agent.id) || 0;
+          if (Date.now() - last >= quietMs) return resolve(true);
+          if (Date.now() - start >= maxWaitMs) return resolve(false);
+          setTimeout(tick, Math.max(20, Math.min(quietMs, 50)));
+        };
+        tick();
+      });
+    }
 
     function enqueueFipaInject(agent, prompt) {
       if (!agent?.pty) return;
@@ -443,50 +471,56 @@ terminal.registerSignalHandlers();
       fipaInjectQueues.set(agent.id, next);
     }
 
-    // Inject text into an agent PTY and wait for the echo before sending Enter.
-    // Falls back to a short timeout so we don't hang if no echo arrives.
-    function injectFipaWithEcho(agent, prompt) {
-      if (!agent?.pty) return Promise.resolve();
-
+    // One write+wait-for-echo attempt. Resolves to 'echoed' | 'timeout'.
+    function injectFipaAttempt(agent, prompt) {
       return new Promise((resolve) => {
         let done = false;
         let buffer = '';
-        const maxWaitMs = Math.max(fipaEchoTimeoutMs, fipaSubmitDelayMs, 150); // Ensure a sensible minimum
         const maxBuffer = Math.max(prompt.length * 2, 256);
-
-        const cleanup = (disposable, timer) => {
-          if (timer) clearTimeout(timer);
-          if (disposable?.dispose) disposable.dispose();
-        };
-
-        const sendEnter = (disposable, timer) => {
+        const settle = (outcome, disposable, timer) => {
           if (done) return;
           done = true;
-          cleanup(disposable, timer);
-          agent.pty.write('\r');
-          resolve();
+          if (timer) clearTimeout(timer);
+          if (disposable?.dispose) disposable.dispose();
+          resolve(outcome);
         };
-
-        const timer = setTimeout(() => {
-          if (!done) {
-            console.log(`[fipa-autoinject] echo timeout for ${agent.id}; sending Enter without echo`);
-          }
-          sendEnter(dataListener, timer);
-        }, maxWaitMs);
-
+        const timer = setTimeout(() => settle('timeout', dataListener, timer), fipaEchoTimeoutMs);
         const dataListener = agent.pty.onData((data) => {
           if (done) return;
           buffer += data;
-          if (buffer.length > maxBuffer) {
-            buffer = buffer.slice(-maxBuffer);
-          }
-          if (buffer.includes(prompt)) {
-            sendEnter(dataListener, timer);
-          }
+          if (buffer.length > maxBuffer) buffer = buffer.slice(-maxBuffer);
+          if (buffer.includes(prompt)) settle('echoed', dataListener, timer);
         });
-
         agent.pty.write(prompt);
       });
+    }
+
+    // Inject text into an agent PTY: wait for a quiet window first, then write
+    // and wait for the echo before sending Enter. Retry on echo timeout. If we
+    // never see the echo, clear the input line (Ctrl+U) instead of submitting
+    // a stray fragment — the message is still in the MCP queue, the agent will
+    // pick it up via get_pending_messages.
+    async function injectFipaWithEcho(agent, prompt) {
+      if (!agent?.pty) return;
+      tapPtyForFipaQuiet(agent);
+      await awaitPtyQuiet(agent, fipaQuietMs, fipaQuietMaxWaitMs);
+
+      for (let attempt = 1; attempt <= fipaMaxAttempts; attempt++) {
+        const outcome = await injectFipaAttempt(agent, prompt);
+        if (outcome === 'echoed') {
+          agent.pty.write('\r');
+          return;
+        }
+        if (attempt < fipaMaxAttempts) {
+          // Wipe what we just wrote and let the PTY settle before retrying.
+          try { agent.pty.write('\x15'); } catch { /* ignore */ }
+          await awaitPtyQuiet(agent, fipaQuietMs, fipaQuietMaxWaitMs);
+        }
+      }
+      // Final failure: clear the input line so we don't submit garbage. The
+      // payload is still queued in MCP for get_pending_messages.
+      try { agent.pty.write('\x15'); } catch { /* ignore */ }
+      console.log(`[fipa-autoinject] echo timeout for ${agent.id} after ${fipaMaxAttempts} attempts; cleared input, message remains in MCP queue`);
     }
 
     fipaHub.on('fipa:sent', ({ message, to }) => {
