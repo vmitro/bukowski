@@ -518,9 +518,16 @@ terminal.registerSignalHandlers();
     function formatFIPAForPTY(message) {
       const sender = message.sender?.name || 'unknown';
       const perf = message.performative || 'inform';
-      const content = typeof message.content === 'string'
-        ? message.content
-        : JSON.stringify(message.content, null, 2);
+      // null/undefined content is legitimate (e.g. fipa_agree) — render as empty
+      // rather than letting JSON.stringify(undefined) return undefined and crash .replace below.
+      let content;
+      if (typeof message.content === 'string') {
+        content = message.content;
+      } else if (message.content == null) {
+        content = '';
+      } else {
+        content = JSON.stringify(message.content, null, 2);
+      }
 
       // Escape newlines for single-line input
       const escaped = content.replace(/\n/g, ' ');

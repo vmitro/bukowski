@@ -401,20 +401,35 @@ class MCPServer extends EventEmitter {
    * @param {string} callerAgentId
    */
   async _handleToolCall(toolName, args, callerAgentId) {
+    // Ensure required content-bearing args are non-empty strings. Some MCP clients
+    // skip schema validation, and a missing arg used to crash the host process when
+    // it reached formatFIPAForPTY in multi.js.
+    const requireString = (field) => {
+      const v = args?.[field];
+      if (typeof v !== 'string' || v.length === 0) {
+        throw new Error(`${toolName} requires a non-empty string "${field}" argument`);
+      }
+    };
+
     switch (toolName) {
       case 'fipa_request':
+        requireString('to'); requireString('action');
         return this._sendFipaMessage('request', callerAgentId, args.to, args.action, args.conversationId);
 
       case 'fipa_inform':
+        requireString('to'); requireString('content');
         return this._sendFipaMessage('inform', callerAgentId, args.to, args.content, args.conversationId);
 
       case 'fipa_query_if':
+        requireString('to'); requireString('proposition');
         return this._sendFipaMessage('query-if', callerAgentId, args.to, args.proposition, args.conversationId);
 
       case 'fipa_query_ref':
+        requireString('to'); requireString('reference');
         return this._sendFipaMessage('query-ref', callerAgentId, args.to, args.reference, args.conversationId);
 
       case 'fipa_cfp': {
+        requireString('task');
         const recipients = this.session.getAllAgents()
           .filter(a => a.id !== callerAgentId)
           .map(a => a.id);
@@ -425,12 +440,15 @@ class MCPServer extends EventEmitter {
       }
 
       case 'fipa_propose':
+        requireString('to'); requireString('proposal');
         return this._sendFipaMessage('propose', callerAgentId, args.to, args.proposal, args.conversationId);
 
       case 'fipa_agree':
+        requireString('to');
         return this._sendFipaMessage('agree', callerAgentId, args.to, null, args.conversationId);
 
       case 'fipa_refuse':
+        requireString('to'); requireString('reason');
         return this._sendFipaMessage('refuse', callerAgentId, args.to, args.reason, args.conversationId);
 
       case 'list_agents': {
