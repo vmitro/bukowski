@@ -1,4 +1,10 @@
-// search.js - Search handler for bukowski
+// search.js - Search handler for bukowski.
+//
+// Match.col is a CELL COLUMN (not JS-char index). Convert from regex.exec's
+// JS-char index via cellColFromCharIdx so the match aligns with the
+// highlighters in single.js, which walk getLine cell-by-cell.
+
+const { cellColFromCharIdx } = require('./src/utils/cellCoord');
 
 class SearchHandler {
   constructor(viewport) {
@@ -47,7 +53,9 @@ class SearchHandler {
         const line = vp.getLineText(i);
         let match;
         while ((match = regex.exec(line)) !== null) {
-          this.matches.push({ line: i, col: match.index, length: match[0].length });
+          const startCell = cellColFromCharIdx(line, match.index);
+          const endCell = cellColFromCharIdx(line, match.index + match[0].length);
+          this.matches.push({ line: i, col: startCell, length: endCell - startCell });
         }
       }
     } catch (e) {

@@ -8,6 +8,8 @@ const { Terminal } = require('@xterm/headless');
 const { SerializeAddon } = require('@xterm/addon-serialize');
 const { VimHandler } = require('./vim');
 const { SearchHandler } = require('./search');
+const { walkAnsi } = require('./src/core/ansiUtils');
+const { lineCellCount } = require('./src/utils/cellCoord');
 
 // Load quotes from quotes.txt (format: text\n— author\n\n)
 const fs = require('fs');
@@ -277,12 +279,13 @@ class Viewport {
           line = this.highlightSearchMatches(lineIdx, line, plainLine);
         }
       } else if (this.mode === 'vline') {
-        // V-LINE mode: use character-by-character highlighting (same as visual)
+        // V-LINE mode: highlight full lines via cell-col bounds.
         const isSelected = lineIdx >= selStart.line && lineIdx <= selEnd.line;
         if (isSelected) {
-          // Highlight entire line by setting hlStart=0 and hlEnd=line length
           const fullLineStart = { line: lineIdx, col: 0 };
-          const fullLineEnd = { line: lineIdx, col: Math.max(0, plainLine.length - 1) };
+          // selEnd.col is inclusive — point at last grapheme's start cell so
+          // the +1 inside highlightVisualSelection yields the full line.
+          const fullLineEnd = { line: lineIdx, col: Math.max(0, lineCellCount(plainLine) - 1) };
           line = this.highlightVisualSelection(lineIdx, line, plainLine, fullLineStart, fullLineEnd, cursor);
         }
       } else if (this.mode === 'visual') {
@@ -367,72 +370,58 @@ class Viewport {
   nextMatch() { this.search.next(); }
   prevMatch() { this.search.prev(); }
 
-  // Highlight character-level visual selection
+  // Highlight character-level visual selection.
+  //
+  // Bounds (selStart.col, selEnd.col, cursor.col) are cell columns. plainIdx
+  // walks cells by stepping `tok.width` per grapheme-token from walkAnsi
+  // (this getLine omits placeholder cells, so a wide token covers 2 cells).
   highlightVisualSelection(lineIdx, line, plainLine, selStart, selEnd, cursor) {
     if (lineIdx < selStart.line || lineIdx > selEnd.line) {
-      // Not in selection, but maybe show cursor
       if (lineIdx === cursor.line) {
         return this.insertCursorMarker(line, plainLine, cursor.col);
       }
       return line;
     }
 
-    // Determine highlight range for this line
+    const lineCells = lineCellCount(plainLine);
     let hlStart = 0;
-    let hlEnd = plainLine.length;
+    let hlEnd = lineCells;
 
-    if (lineIdx === selStart.line) {
-      hlStart = selStart.col;
-    }
-    if (lineIdx === selEnd.line) {
-      hlEnd = selEnd.col + 1;
-    }
+    if (lineIdx === selStart.line) hlStart = selStart.col;
+    if (lineIdx === selEnd.line) hlEnd = selEnd.col + 1;  // inclusive
 
-    // Build highlighted line using plain text positions
-    // Since line has ANSI codes, we work character by character
     let result = '';
     let plainIdx = 0;
-    let i = 0;
 
-    while (i < line.length) {
-      // Check for ANSI escape sequence
-      if (line[i] === '\x1b') {
-        const escEnd = line.indexOf('m', i);
-        if (escEnd !== -1) {
-          result += line.substring(i, escEnd + 1);
-          i = escEnd + 1;
-          continue;
-        }
+    for (const tok of walkAnsi(line)) {
+      if (tok.type === 'ansi') {
+        result += tok.value;
+        continue;
       }
 
-      // Regular character
-      const char = line[i];
       const inHighlight = plainIdx >= hlStart && plainIdx < hlEnd;
       const isCursor = lineIdx === cursor.line && plainIdx === cursor.col;
 
       if (isCursor) {
-        // Cursor: underline + inverse
-        result += `\x1b[4;7m${char}\x1b[24;27m`;
+        result += `\x1b[4;7m${tok.value}\x1b[24;27m`;
       } else if (inHighlight) {
-        // Selection: inverse
-        result += `\x1b[7m${char}\x1b[27m`;
+        result += `\x1b[7m${tok.value}\x1b[27m`;
       } else {
-        result += char;
+        result += tok.value;
       }
 
-      plainIdx++;
-      i++;
+      plainIdx += tok.width;
     }
 
-    // If cursor is past end of line, show it
-    if (lineIdx === cursor.line && cursor.col >= plainLine.length) {
+    if (lineIdx === cursor.line && cursor.col >= lineCells) {
       result += `\x1b[4;7m \x1b[24;27m`;
     }
 
     return result;
   }
 
-  // Highlight search matches on a line
+  // Highlight search matches. plainIdx walks cells (tok.width per grapheme
+  // since this getLine omits wide-char placeholder cells).
   highlightSearchMatches(lineIdx, line, plainLine) {
     const matches = this.search.matches.filter(m => m.line === lineIdx);
     if (matches.length === 0) return line;
@@ -442,20 +431,13 @@ class Viewport {
 
     let result = '';
     let plainIdx = 0;
-    let i = 0;
 
-    while (i < line.length) {
-      // Skip ANSI escape sequences
-      if (line[i] === '\x1b') {
-        const escEnd = line.indexOf('m', i);
-        if (escEnd !== -1) {
-          result += line.substring(i, escEnd + 1);
-          i = escEnd + 1;
-          continue;
-        }
+    for (const tok of walkAnsi(line)) {
+      if (tok.type === 'ansi') {
+        result += tok.value;
+        continue;
       }
 
-      // Check if this position is in a match
       let inMatch = false;
       let isCurrentMatchPos = false;
       for (const m of matches) {
@@ -469,49 +451,40 @@ class Viewport {
       }
 
       if (isCurrentMatchPos) {
-        // Current match: bright yellow bg + black fg
-        result += `\x1b[30;103m${line[i]}\x1b[0m`;
+        result += `\x1b[30;103m${tok.value}\x1b[0m`;
       } else if (inMatch) {
-        // Other matches: yellow bg
-        result += `\x1b[43m${line[i]}\x1b[49m`;
+        result += `\x1b[43m${tok.value}\x1b[49m`;
       } else {
-        result += line[i];
+        result += tok.value;
       }
 
-      plainIdx++;
-      i++;
+      plainIdx += tok.width;
     }
 
     return result;
   }
 
-  // Insert cursor marker at position (for lines not in selection)
+  // Insert cursor marker at cell column `col`.
   insertCursorMarker(line, plainLine, col) {
     let result = '';
     let plainIdx = 0;
-    let i = 0;
 
-    while (i < line.length) {
-      if (line[i] === '\x1b') {
-        const escEnd = line.indexOf('m', i);
-        if (escEnd !== -1) {
-          result += line.substring(i, escEnd + 1);
-          i = escEnd + 1;
-          continue;
-        }
+    for (const tok of walkAnsi(line)) {
+      if (tok.type === 'ansi') {
+        result += tok.value;
+        continue;
       }
 
       if (plainIdx === col) {
-        result += `\x1b[4;7m${line[i]}\x1b[24;27m`;
+        result += `\x1b[4;7m${tok.value}\x1b[24;27m`;
       } else {
-        result += line[i];
+        result += tok.value;
       }
 
-      plainIdx++;
-      i++;
+      plainIdx += tok.width;
     }
 
-    if (col >= plainLine.length) {
+    if (col >= lineCellCount(plainLine)) {
       result += `\x1b[4;7m \x1b[24;27m`;
     }
 

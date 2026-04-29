@@ -1,4 +1,17 @@
-// vim.js - Vim mode handler for bukowski
+// vim.js - Vim mode handler for bukowski.
+//
+// `cursor.col` is a cell column (display cells from line start); h/l step by
+// grapheme so the cursor never lands inside a wide char or surrogate pair.
+// Producers here pair with search.js (cell-col matches) and single.js's
+// highlighters (walk getLine cell-by-cell). See src/utils/cellCoord.js.
+
+const {
+  cellColFromCharIdx,
+  charIdxFromCellCol,
+  lastGraphemeCellCol,
+  stepGraphemeLeft,
+  stepGraphemeRight,
+} = require('./src/utils/cellCoord');
 
 class VimHandler {
   constructor(viewport) {
@@ -74,21 +87,35 @@ class VimHandler {
         this.ensureLineVisible(cursor.line);
         vp.draw();
         return true;
-      case 'h':
-        cursor.col = Math.max(0, cursor.col - count);
+      case 'h': {
+        const lineText = vp.getLineText(cursor.line);
+        let charIdx = charIdxFromCellCol(lineText, cursor.col);
+        for (let i = 0; i < count && charIdx > 0; i++) {
+          charIdx = stepGraphemeLeft(lineText, charIdx);
+        }
+        cursor.col = cellColFromCharIdx(lineText, charIdx);
         vp.draw();
         return true;
-      case 'l':
-        const lineLen = vp.getLineText(cursor.line).length;
-        cursor.col = Math.min(Math.max(0, lineLen - 1), cursor.col + count);
+      }
+      case 'l': {
+        const lineText = vp.getLineText(cursor.line);
+        const lastCol = lastGraphemeCellCol(lineText);
+        let charIdx = charIdxFromCellCol(lineText, cursor.col);
+        for (let i = 0; i < count; i++) {
+          const next = stepGraphemeRight(lineText, charIdx);
+          if (cellColFromCharIdx(lineText, next) > lastCol) break;
+          charIdx = next;
+        }
+        cursor.col = cellColFromCharIdx(lineText, charIdx);
         vp.draw();
         return true;
+      }
       case '0':
         cursor.col = 0;
         vp.draw();
         return true;
       case '$':
-        cursor.col = Math.max(0, vp.getLineText(cursor.line).length - 1);
+        cursor.col = lastGraphemeCellCol(vp.getLineText(cursor.line));
         vp.draw();
         return true;
       case '\x04':  // Ctrl+d
@@ -146,8 +173,8 @@ class VimHandler {
 
   clampNormalCol() {
     const vp = this.vp;
-    const lineLen = vp.getLineText(vp.normalCursor.line).length;
-    vp.normalCursor.col = Math.min(vp.normalCursor.col, Math.max(0, lineLen - 1));
+    const lineText = vp.getLineText(vp.normalCursor.line);
+    vp.normalCursor.col = Math.min(vp.normalCursor.col, lastGraphemeCellCol(lineText));
   }
 
   // Character-level visual mode (v)
@@ -167,21 +194,35 @@ class VimHandler {
         this.ensureLineVisible(vp.visualCursor.line);
         vp.draw();
         return true;
-      case 'h':
-        vp.visualCursor.col = Math.max(0, vp.visualCursor.col - count);
+      case 'h': {
+        const lineText = vp.getLineText(vp.visualCursor.line);
+        let charIdx = charIdxFromCellCol(lineText, vp.visualCursor.col);
+        for (let i = 0; i < count && charIdx > 0; i++) {
+          charIdx = stepGraphemeLeft(lineText, charIdx);
+        }
+        vp.visualCursor.col = cellColFromCharIdx(lineText, charIdx);
         vp.draw();
         return true;
-      case 'l':
-        const lineLen = vp.getLineText(vp.visualCursor.line).length;
-        vp.visualCursor.col = Math.min(lineLen - 1, vp.visualCursor.col + count);
+      }
+      case 'l': {
+        const lineText = vp.getLineText(vp.visualCursor.line);
+        const lastCol = lastGraphemeCellCol(lineText);
+        let charIdx = charIdxFromCellCol(lineText, vp.visualCursor.col);
+        for (let i = 0; i < count; i++) {
+          const next = stepGraphemeRight(lineText, charIdx);
+          if (cellColFromCharIdx(lineText, next) > lastCol) break;
+          charIdx = next;
+        }
+        vp.visualCursor.col = cellColFromCharIdx(lineText, charIdx);
         vp.draw();
         return true;
+      }
       case '0':
         vp.visualCursor.col = 0;
         vp.draw();
         return true;
       case '$':
-        vp.visualCursor.col = Math.max(0, vp.getLineText(vp.visualCursor.line).length - 1);
+        vp.visualCursor.col = lastGraphemeCellCol(vp.getLineText(vp.visualCursor.line));
         vp.draw();
         return true;
       case 'G':
@@ -272,8 +313,8 @@ class VimHandler {
 
   clampCursorCol() {
     const vp = this.vp;
-    const lineLen = vp.getLineText(vp.visualCursor.line).length;
-    vp.visualCursor.col = Math.min(vp.visualCursor.col, Math.max(0, lineLen - 1));
+    const lineText = vp.getLineText(vp.visualCursor.line);
+    vp.visualCursor.col = Math.min(vp.visualCursor.col, lastGraphemeCellCol(lineText));
   }
 
   ensureLineVisible(line) {
@@ -315,21 +356,22 @@ class VimHandler {
         end = anchor;
       }
 
+      // Cell-col → JS-char idx for slicing. End col is inclusive in vim
+      // semantics: step one cell past to capture the whole grapheme there.
       if (start.line === end.line) {
-        // Single line
         const line = vp.getLineText(start.line);
-        text = line.substring(start.col, end.col + 1);
+        const a = charIdxFromCellCol(line, start.col);
+        const b = charIdxFromCellCol(line, end.col + 1);
+        text = line.substring(a, b);
       } else {
-        // Multi-line
         const lines = [];
-        // First line: from start.col to end
-        lines.push(vp.getLineText(start.line).substring(start.col));
-        // Middle lines: full
+        const firstLine = vp.getLineText(start.line);
+        lines.push(firstLine.substring(charIdxFromCellCol(firstLine, start.col)));
         for (let i = start.line + 1; i < end.line; i++) {
           lines.push(vp.getLineText(i));
         }
-        // Last line: from start to end.col
-        lines.push(vp.getLineText(end.line).substring(0, end.col + 1));
+        const lastLine = vp.getLineText(end.line);
+        lines.push(lastLine.substring(0, charIdxFromCellCol(lastLine, end.col + 1)));
         text = lines.join('\n');
       }
     }
