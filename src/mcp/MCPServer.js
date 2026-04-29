@@ -389,6 +389,30 @@ class MCPServer extends EventEmitter {
         }
         break;
 
+      case 'bukowski/peek_messages': {
+        // Non-consuming peek used by sideband channels (e.g. the Claude Code
+        // UserPromptSubmit hook). Caller may pass an explicit agentId; we
+        // fall back to the client's own identity. Not exposed as an MCP tool.
+        const targetId = params?.agentId || clientState.agentId;
+        const queue = (targetId && this.messageQueues.get(targetId)) || [];
+        const limit = Math.max(1, Math.min(20, params?.limit || 5));
+        const previews = queue.slice(0, limit).map((m) => {
+          let excerpt = '';
+          if (typeof m.content === 'string') {
+            excerpt = m.content.length > 160 ? m.content.slice(0, 160) + '…' : m.content;
+          } else if (m.content != null) {
+            try { excerpt = JSON.stringify(m.content).slice(0, 160); } catch { excerpt = ''; }
+          }
+          return {
+            sender: m.sender?.name || null,
+            performative: m.performative || null,
+            excerpt
+          };
+        });
+        this._sendResult(socket, id, { count: queue.length, previews });
+        break;
+      }
+
       default:
         this._sendError(socket, id, -32601, 'Method not found');
     }

@@ -90,16 +90,36 @@ When you're unsure about something outside your expertise, consider asking anoth
 
 const FIPA_REMINDER_INLINE = FIPA_REMINDER.replace(/\n+/g, '. ');
 
+// Path to bukowski's UserPromptSubmit hook script for Claude Code.
+// Resolved once at module load; passed via --settings so each spawned Claude
+// agent picks up FIPA messages via in-band context injection rather than
+// relying on PTY-rendered text the TUI may repaint.
+const FIPA_CLAUDE_HOOK_SCRIPT = path.resolve(__dirname, '..', 'mcp', 'hooks', 'userprompt-submit.js');
+const FIPA_CLAUDE_SETTINGS_JSON = JSON.stringify({
+  hooks: {
+    UserPromptSubmit: [
+      {
+        hooks: [
+          { type: 'command', command: `node ${FIPA_CLAUDE_HOOK_SCRIPT}` }
+        ]
+      }
+    ]
+  }
+});
+
 // Create agent type configurations
 function createAgentTypes(claudePath, codexPath) {
   const claudeEntrypointExists = claudePath && claudePath !== 'claude' && fs.existsSync(claudePath);
   const claudeCommand = claudeEntrypointExists ? 'node' : 'claude';
   const claudeArgs = claudeEntrypointExists ? [claudePath] : [];
+  const claudeHookArgs = fs.existsSync(FIPA_CLAUDE_HOOK_SCRIPT)
+    ? ['--settings', FIPA_CLAUDE_SETTINGS_JSON]
+    : [];
 
   return {
     claude: {
       command: claudeCommand,
-      args: claudeArgs,
+      args: [...claudeArgs, ...claudeHookArgs],
       name: 'Claude',
       promptFlag: '--append-system-prompt',
       getResumeArgs: (sessionId) => sessionId
