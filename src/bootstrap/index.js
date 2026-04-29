@@ -90,17 +90,33 @@ When you're unsure about something outside your expertise, consider asking anoth
 
 const FIPA_REMINDER_INLINE = FIPA_REMINDER.replace(/\n+/g, '. ');
 
-// Path to bukowski's UserPromptSubmit hook script for Claude Code.
-// Resolved once at module load; passed via --settings so each spawned Claude
-// agent picks up FIPA messages via in-band context injection rather than
-// relying on PTY-rendered text the TUI may repaint.
-const FIPA_CLAUDE_HOOK_SCRIPT = path.resolve(__dirname, '..', 'mcp', 'hooks', 'userprompt-submit.js');
+// Paths to bukowski's hook scripts for Claude Code agents. Both hooks share
+// the same job — peek the FIPA queue and surface pending messages — but they
+// fire at different points in the turn lifecycle:
+//
+//   UserPromptSubmit: messages that arrived before the turn (visible at
+//                     submit, injected as additionalContext).
+//   Stop:             messages that arrived during the turn (only visible
+//                     at turn end; block the stop with a continuation
+//                     reason so Claude takes another turn to drain).
+//
+// Resolved once at module load; both passed via --settings JSON so each
+// spawned Claude agent gets event-driven delivery without PTY-injected text.
+const FIPA_CLAUDE_USERPROMPT_HOOK = path.resolve(__dirname, '..', 'mcp', 'hooks', 'userprompt-submit.js');
+const FIPA_CLAUDE_STOP_HOOK = path.resolve(__dirname, '..', 'mcp', 'hooks', 'stop.js');
 const FIPA_CLAUDE_SETTINGS_JSON = JSON.stringify({
   hooks: {
     UserPromptSubmit: [
       {
         hooks: [
-          { type: 'command', command: `node ${FIPA_CLAUDE_HOOK_SCRIPT}` }
+          { type: 'command', command: `node ${FIPA_CLAUDE_USERPROMPT_HOOK}` }
+        ]
+      }
+    ],
+    Stop: [
+      {
+        hooks: [
+          { type: 'command', command: `node ${FIPA_CLAUDE_STOP_HOOK}` }
         ]
       }
     ]
@@ -112,7 +128,7 @@ function createAgentTypes(claudePath, codexPath) {
   const claudeEntrypointExists = claudePath && claudePath !== 'claude' && fs.existsSync(claudePath);
   const claudeCommand = claudeEntrypointExists ? 'node' : 'claude';
   const claudeArgs = claudeEntrypointExists ? [claudePath] : [];
-  const claudeHookArgs = fs.existsSync(FIPA_CLAUDE_HOOK_SCRIPT)
+  const claudeHookArgs = (fs.existsSync(FIPA_CLAUDE_USERPROMPT_HOOK) && fs.existsSync(FIPA_CLAUDE_STOP_HOOK))
     ? ['--settings', FIPA_CLAUDE_SETTINGS_JSON]
     : [];
 
