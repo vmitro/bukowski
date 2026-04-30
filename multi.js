@@ -504,7 +504,16 @@ terminal.registerSignalHandlers();
     async function injectFipaWithEcho(agent, prompt) {
       if (!agent?.pty) return;
       tapPtyForFipaQuiet(agent);
-      await awaitPtyQuiet(agent, fipaQuietMs, fipaQuietMaxWaitMs);
+      const quiet = await awaitPtyQuiet(agent, fipaQuietMs, fipaQuietMaxWaitMs);
+      // If the TUI never went quiet (e.g. /compact spinner, animated tool
+      // output), skip injection entirely. The message is already in the MCP
+      // queue; Claude's hooks will surface it on the next turn boundary.
+      // Writing into a busy redraw produces scattered character ghosts in
+      // the input box and corrupts the user's view.
+      if (!quiet) {
+        console.log(`[fipa-autoinject] skip ${agent.id}: PTY never quiet (${fipaQuietMaxWaitMs}ms); message stays in queue`);
+        return;
+      }
 
       await new Promise((resolve) => {
         let done = false;
