@@ -7,7 +7,7 @@ class InputRouter {
     this.ipc = ipcHub;
     this.fipa = fipaHub;          // FIPA ACL hub for agent communication
 
-    this.mode = 'insert';         // 'insert' | 'normal' | 'visual' | 'visual-line' | 'search' | 'chat'
+    this.mode = 'insert';         // 'insert' | 'normal' | 'visual' | 'visual-line' | 'visual-block' | 'search' | 'chat'
     this.prefixActive = false;    // CTRL+Space was pressed
     this.layoutPrefix = false;    // Waiting for layout command (after 'w')
     this.ipcPrefix = false;       // Waiting for IPC command (after 'a')
@@ -60,7 +60,7 @@ class InputRouter {
       if (this.mode === 'search') {
         return { action: 'search_cancel' };
       }
-      if (this.mode === 'visual' || this.mode === 'visual-line') {
+      if (this.mode === 'visual' || this.mode === 'visual-line' || this.mode === 'visual-block') {
         this.mode = 'normal';
         return { action: 'visual_cancel' };
       }
@@ -115,6 +115,7 @@ class InputRouter {
 
       case 'visual':
       case 'visual-line':
+      case 'visual-block':
         return this.handleVisualMode(data);
 
       case 'search':
@@ -157,6 +158,10 @@ class InputRouter {
       case 'V':
         this.mode = 'visual-line';
         return { action: 'mode_change', mode: 'visual-line', start: 'current' };
+
+      case '\x16':  // Ctrl-V via prefix
+        this.mode = 'visual-block';
+        return { action: 'mode_change', mode: 'visual-block', start: 'current' };
 
       // Layout prefix
       case 'w':
@@ -732,6 +737,10 @@ class InputRouter {
         this.mode = 'visual-line';
         return { action: 'mode_change', mode: 'visual-line', start: 'cursor' };
 
+      case '\x16':  // Ctrl-V
+        this.mode = 'visual-block';
+        return { action: 'mode_change', mode: 'visual-block', start: 'cursor' };
+
       // Search
       case '/':
         this.mode = 'search';
@@ -787,6 +796,7 @@ class InputRouter {
    */
   handleVisualMode(data) {
     const isLine = this.mode === 'visual-line';
+    const isBlock = this.mode === 'visual-block';
 
     // Handle register selection in visual mode
     if (data === '"') {
@@ -908,11 +918,11 @@ class InputRouter {
 
       // Cancel selection
       case 'v':
-        if (!isLine) {
+        if (this.mode === 'visual') {
           this.mode = 'normal';
           return { action: 'visual_cancel' };
         }
-        // Switch to char visual
+        // From line/block → switch to char visual
         this.mode = 'visual';
         return { action: 'mode_change', mode: 'visual' };
 
@@ -921,9 +931,18 @@ class InputRouter {
           this.mode = 'normal';
           return { action: 'visual_cancel' };
         }
-        // Switch to line visual
+        // From char/block → switch to line visual
         this.mode = 'visual-line';
         return { action: 'mode_change', mode: 'visual-line' };
+
+      case '\x16':  // Ctrl-V
+        if (isBlock) {
+          this.mode = 'normal';
+          return { action: 'visual_cancel' };
+        }
+        // From char/line → switch to block visual
+        this.mode = 'visual-block';
+        return { action: 'mode_change', mode: 'visual-block' };
 
       default:
         return { action: 'unknown_visual', key: data };

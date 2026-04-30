@@ -10,7 +10,7 @@ const aclHandlers = {
 
     // Extract selected text if in visual mode
     let text = '';
-    if (ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline') {
+    if (ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline' || ctx.vimState.mode === 'vblock') {
       text = extractSelectedText(focusedAgent, ctx.vimState);
     }
 

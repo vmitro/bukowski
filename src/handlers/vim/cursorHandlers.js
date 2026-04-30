@@ -136,7 +136,7 @@ const cursorHandlers = {
 
   extend_find_char(ctx, result) {
     const agent = ctx.getFocusedAgent();
-    if ((ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline') && agent) {
+    if ((ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline' || ctx.vimState.mode === 'vblock') && agent) {
       const lineText = agent.getLineText(ctx.vimState.visualCursor.line) || '';
       const newCol = findCharOnLine(lineText, ctx.vimState.visualCursor.col, result.char, result.type, result.count || 1);
       if (newCol >= 0) {

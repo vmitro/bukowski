@@ -911,7 +911,9 @@ terminal.registerSignalHandlers();
     const text = extractSelectedText(agent, vimState);
     if (!text) return;
 
-    const type = vimState.mode === 'vline' ? 'line' : 'char';
+    const type = vimState.mode === 'vline' ? 'line'
+      : vimState.mode === 'vblock' ? 'block'
+      : 'char';
     const reg = targetRegister?.toLowerCase() || null;
     const append = targetRegister && /[A-Z]/.test(targetRegister);
 

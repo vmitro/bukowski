@@ -23,6 +23,22 @@ function extractSelectedText(agent, vimState) {
   const anchor = vimState.visualAnchor;
   const cursor = vimState.visualCursor;
 
+  // Block-wise: rectangle from opposing corners; one slice per row.
+  if (vimState.mode === 'vblock') {
+    const startLine = Math.min(anchor.line, cursor.line);
+    const endLine = Math.max(anchor.line, cursor.line);
+    const startCol = Math.min(anchor.col, cursor.col);
+    const endCol = Math.max(anchor.col, cursor.col);
+    const lines = [];
+    for (let i = startLine; i <= endLine; i++) {
+      const lineText = agent.getLineText(i) || '';
+      const a = charIdxFromCellCol(lineText, startCol);
+      const b = charIdxFromCellCol(lineText, endCol + 1);  // inclusive end-cell
+      lines.push(lineText.slice(a, b));
+    }
+    return lines.join('\n');
+  }
+
   let start, end;
   if (anchor.line < cursor.line || (anchor.line === cursor.line && anchor.col <= cursor.col)) {
     start = anchor;

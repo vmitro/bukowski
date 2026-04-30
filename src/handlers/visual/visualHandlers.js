@@ -10,6 +10,11 @@ const {
   lastGraphemeCellCol,
 } = require('../../utils/cellCoord');
 
+function isVisualMode(ctx) {
+  const m = ctx.vimState.mode;
+  return m === 'visual' || m === 'vline' || m === 'vblock';
+}
+
 const visualHandlers = {
   mode_change(ctx, result) {
     const focusedAgent = ctx.getFocusedAgent();
@@ -32,17 +37,26 @@ const visualHandlers = {
       // Enter visual line mode
       const prevMode = ctx.vimState.mode;
       ctx.onEnterVisualMode('vline', prevMode);
+    } else if (result.mode === 'visual-block') {
+      // Enter visual block mode; if already in another visual mode, keep
+      // anchor/cursor and just retag the mode (no re-seeding from buffer).
+      const prevMode = ctx.vimState.mode;
+      if (prevMode === 'visual' || prevMode === 'vline') {
+        ctx.vimState.mode = 'vblock';
+      } else {
+        ctx.onEnterVisualMode('vblock', prevMode);
+      }
     }
   },
 
   extend_selection(ctx, result) {
-    if (ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline') {
+    if (isVisualMode(ctx)) {
       ctx.onMoveVisualCursor(result.dir, result.count || 1);
     }
   },
 
   extend_half_page(ctx, result) {
-    if (ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline') {
+    if (isVisualMode(ctx)) {
       const focusedPane = ctx.getFocusedPane();
       const halfPage = Math.floor((focusedPane?.bounds.height || 12) / 2);
       ctx.onMoveVisualCursor(result.dir, halfPage);
@@ -50,37 +64,39 @@ const visualHandlers = {
   },
 
   extend_to_top(ctx, _result) {
-    if (ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline') {
+    if (isVisualMode(ctx)) {
       ctx.vimState.visualCursor.line = 0;
       if (ctx.vimState.mode === 'visual') {
         ctx.vimState.visualCursor.col = 0;
       }
+      // For vblock: keep col so the rectangle's left/right edge is preserved.
       ctx.ensureLineVisible(0);
     }
   },
 
   extend_to_bottom(ctx, _result) {
     const focusedAgent = ctx.getFocusedAgent();
-    if ((ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline') && focusedAgent) {
+    if (isVisualMode(ctx) && focusedAgent) {
       const lastLine = focusedAgent.getContentHeight() - 1;
       ctx.vimState.visualCursor.line = Math.max(0, lastLine);
       if (ctx.vimState.mode === 'visual') {
         const lineText = focusedAgent.getLineText(lastLine);
         ctx.vimState.visualCursor.col = lastGraphemeCellCol(lineText);
       }
+      // For vblock: keep col.
       ctx.ensureLineVisible(ctx.vimState.visualCursor.line);
     }
   },
 
   extend_line_start(ctx, _result) {
-    if (ctx.vimState.mode === 'visual') {
+    if (ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vblock') {
       ctx.vimState.visualCursor.col = 0;
     }
   },
 
   extend_line_end(ctx, _result) {
     const focusedAgent = ctx.getFocusedAgent();
-    if (ctx.vimState.mode === 'visual' && focusedAgent) {
+    if ((ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vblock') && focusedAgent) {
       const lineText = focusedAgent.getLineText(ctx.vimState.visualCursor.line) || '';
       ctx.vimState.visualCursor.col = lastGraphemeCellCol(lineText);
     }
@@ -88,7 +104,7 @@ const visualHandlers = {
 
   extend_first_nonblank(ctx, _result) {
     const focusedAgent = ctx.getFocusedAgent();
-    if (ctx.vimState.mode === 'visual' && focusedAgent) {
+    if ((ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vblock') && focusedAgent) {
       const lineText = focusedAgent.getLineText(ctx.vimState.visualCursor.line) || '';
       const match = lineText.match(/^\s*/);
       const charIdx = match ? match[0].length : 0;
@@ -98,7 +114,7 @@ const visualHandlers = {
 
   extend_word_forward(ctx, result) {
     const focusedAgent = ctx.getFocusedAgent();
-    if ((ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline') && focusedAgent) {
+    if (isVisualMode(ctx) && focusedAgent) {
       for (let i = 0; i < (result.count || 1); i++) {
         moveWordForward(focusedAgent, ctx.vimState.visualCursor, result.bigWord);
       }
@@ -108,7 +124,7 @@ const visualHandlers = {
 
   extend_word_end(ctx, result) {
     const focusedAgent = ctx.getFocusedAgent();
-    if ((ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline') && focusedAgent) {
+    if (isVisualMode(ctx) && focusedAgent) {
       for (let i = 0; i < (result.count || 1); i++) {
         moveWordEnd(focusedAgent, ctx.vimState.visualCursor, result.bigWord);
       }
@@ -118,7 +134,7 @@ const visualHandlers = {
 
   extend_word_backward(ctx, result) {
     const focusedAgent = ctx.getFocusedAgent();
-    if ((ctx.vimState.mode === 'visual' || ctx.vimState.mode === 'vline') && focusedAgent) {
+    if (isVisualMode(ctx) && focusedAgent) {
       for (let i = 0; i < (result.count || 1); i++) {
         moveWordBackward(focusedAgent, ctx.vimState.visualCursor, result.bigWord);
       }

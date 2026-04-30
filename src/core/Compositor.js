@@ -790,7 +790,7 @@ class Compositor {
           }
 
           // Visual selection highlights
-          if (this.visualState && (this.visualState.mode === 'visual' || this.visualState.mode === 'vline')) {
+          if (this.visualState && (this.visualState.mode === 'visual' || this.visualState.mode === 'vline' || this.visualState.mode === 'vblock')) {
             lineContent = this.applyVisualHighlight(lineContent, plainLine, bufferLine);
           }
 
@@ -976,7 +976,7 @@ class Compositor {
 
     // Mode indicator
     const mode = this.inputRouter?.mode;
-    const modeNames = { insert: 'INSERT', normal: 'NORMAL', visual: 'VISUAL', 'visual-line': 'V-LINE', search: 'SEARCH', command: 'COMMAND', chat: 'CHAT', 'acl-send': 'ACL' };
+    const modeNames = { insert: 'INSERT', normal: 'NORMAL', visual: 'VISUAL', 'visual-line': 'V-LINE', 'visual-block': 'V-BLOCK', search: 'SEARCH', command: 'COMMAND', chat: 'CHAT', 'acl-send': 'ACL' };
     if (mode && modeNames[mode]) {
       left += `[${modeNames[mode]}] `;
     }
@@ -1056,7 +1056,7 @@ class Compositor {
       hint = 'CTRL+Space:cmd CTRL+C:normal';
     } else if (mode === 'normal') {
       hint = 'i:insert /:search ::cmd';
-    } else if (mode === 'visual' || mode === 'visual-line') {
+    } else if (mode === 'visual' || mode === 'visual-line' || mode === 'visual-block') {
       hint = 'y:yank Esc:cancel';
     } else if (mode === 'chat') {
       hint = 'Tab:agent Ctrl+P:perf Enter:send Esc:exit';
@@ -1127,18 +1127,34 @@ class Compositor {
   /**
    * Apply visual selection highlight. `plainIdx` is a cell column; bounds are
    * cell columns (visualAnchor.col, visualCursor.col).
+   *
+   * Three modes:
+   *   - 'visual'  — char-wise: highlight from start.col to end.col (inclusive)
+   *                 across [startLine..endLine], with first/last lines truncated.
+   *   - 'vline'   — line-wise: highlight whole line for every row in range.
+   *   - 'vblock'  — block-wise: rectangle [min(anchor.col,cursor.col)..max+1]
+   *                 cell-cols on every row in [startLine..endLine].
    */
   applyVisualHighlight(line, plainLine, lineIdx) {
     const { visualAnchor, visualCursor, mode } = this.visualState;
 
-    let startLine = visualAnchor.line;
-    let startCol = visualAnchor.col;
-    let endLine = visualCursor.line;
-    let endCol = visualCursor.col;
+    let startLine, endLine, startCol, endCol;
 
-    if (startLine > endLine || (startLine === endLine && startCol > endCol)) {
-      [startLine, endLine] = [endLine, startLine];
-      [startCol, endCol] = [endCol, startCol];
+    if (mode === 'vblock') {
+      // Block: rectangle from opposing corners.
+      startLine = Math.min(visualAnchor.line, visualCursor.line);
+      endLine = Math.max(visualAnchor.line, visualCursor.line);
+      startCol = Math.min(visualAnchor.col, visualCursor.col);
+      endCol = Math.max(visualAnchor.col, visualCursor.col);
+    } else {
+      startLine = visualAnchor.line;
+      startCol = visualAnchor.col;
+      endLine = visualCursor.line;
+      endCol = visualCursor.col;
+      if (startLine > endLine || (startLine === endLine && startCol > endCol)) {
+        [startLine, endLine] = [endLine, startLine];
+        [startCol, endCol] = [endCol, startCol];
+      }
     }
 
     if (lineIdx < startLine || lineIdx > endLine) {
@@ -1152,7 +1168,10 @@ class Compositor {
     let hlStart = 0;
     let hlEnd = lineCells;
 
-    if (mode !== 'vline') {
+    if (mode === 'vblock') {
+      hlStart = startCol;
+      hlEnd = endCol + 1;  // inclusive end-cell on every row
+    } else if (mode !== 'vline') {
       if (lineIdx === startLine) hlStart = startCol;
       if (lineIdx === endLine) hlEnd = endCol + 1;  // inclusive end-cell
     }
