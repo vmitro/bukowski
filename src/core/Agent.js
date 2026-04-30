@@ -271,13 +271,17 @@ class Agent {
     const line = buffer.getLine(index);
     if (!line) return '';
 
-    // OPTIMIZED: array.join() + trimEnd() instead of += and regex
+    // Preserve cell layout: empty/NUL cells become ' ', wide-char placeholder
+    // cells (width 0) are dropped so the wide grapheme stays one JS char. This
+    // keeps cellColFromCharIdx aligned with on-screen columns even when the
+    // pane was painted via cursor positioning (gaps left as NUL, not spaces).
     const chars = [];
     for (let i = 0; i < line.length; i++) {
       const cell = line.getCell(i);
       if (!cell) break;
+      if (cell.getWidth() === 0) continue;
       const char = cell.getChars();
-      if (char) chars.push(char);
+      chars.push(char || ' ');
     }
     return chars.join('').trimEnd();
   }
