@@ -9,7 +9,11 @@ const {
   moveWordForward,
   moveWordEnd,
   moveWordBackward,
-  findCharOnLine
+  findCharOnLine,
+  findParagraphForward,
+  findParagraphBackward,
+  findMatchingBracket,
+  wordUnderCursor
 } = require('../../utils/bufferText');
 const {
   cellColFromCharIdx,
@@ -143,6 +147,112 @@ const cursorHandlers = {
         ctx.vimState.visualCursor.col = newCol;
       }
     }
+  },
+
+  // H / M / L — cursor to top/middle/bottom of viewport.
+  cursor_viewport_top(ctx, result) {
+    const pane = ctx.getFocusedPane();
+    if (!pane) return;
+    const scrollY = ctx.getScrollOffset(pane.id);
+    const offset = Math.max(0, (result.count || 1) - 1);
+    ctx.vimState.normalCursor.line = scrollY + offset;
+    ctx.vimState.normalCursor.col = 0;
+  },
+
+  cursor_viewport_middle(ctx, _result) {
+    const pane = ctx.getFocusedPane();
+    if (!pane) return;
+    const scrollY = ctx.getScrollOffset(pane.id);
+    ctx.vimState.normalCursor.line = scrollY + Math.floor(pane.bounds.height / 2);
+    ctx.vimState.normalCursor.col = 0;
+  },
+
+  cursor_viewport_bottom(ctx, result) {
+    const pane = ctx.getFocusedPane();
+    if (!pane) return;
+    const scrollY = ctx.getScrollOffset(pane.id);
+    const offset = Math.max(0, (result.count || 1) - 1);
+    ctx.vimState.normalCursor.line = scrollY + pane.bounds.height - 1 - offset;
+    ctx.vimState.normalCursor.col = 0;
+  },
+
+  // { / } — paragraph navigation (blank line as separator).
+  paragraph_forward(ctx, result) {
+    const agent = ctx.getFocusedAgent();
+    if (!agent) return;
+    let line = ctx.vimState.normalCursor.line;
+    for (let i = 0; i < (result.count || 1); i++) {
+      line = findParagraphForward(agent, line);
+    }
+    ctx.vimState.normalCursor.line = line;
+    ctx.vimState.normalCursor.col = 0;
+    ctx.ensureLineVisible(line);
+  },
+
+  paragraph_backward(ctx, result) {
+    const agent = ctx.getFocusedAgent();
+    if (!agent) return;
+    let line = ctx.vimState.normalCursor.line;
+    for (let i = 0; i < (result.count || 1); i++) {
+      line = findParagraphBackward(agent, line);
+    }
+    ctx.vimState.normalCursor.line = line;
+    ctx.vimState.normalCursor.col = 0;
+    ctx.ensureLineVisible(line);
+  },
+
+  // % — jump to matching bracket.
+  match_bracket(ctx, _result) {
+    const agent = ctx.getFocusedAgent();
+    if (!agent) return;
+    const cursor = ctx.vimState.normalCursor;
+    const target = findMatchingBracket(agent, cursor.line, cursor.col);
+    if (!target) return;
+    cursor.line = target.line;
+    cursor.col = target.col;
+    ctx.ensureLineVisible(cursor.line);
+  },
+
+  // * / # — search word under cursor forward / backward.
+  search_word_under_cursor(ctx, result) {
+    const agent = ctx.getFocusedAgent();
+    if (!agent) return;
+    const cursor = ctx.vimState.normalCursor;
+    const word = wordUnderCursor(agent, cursor.line, cursor.col);
+    if (!word) return;
+    ctx.searchState.pattern = `\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`;
+    ctx.searchState.direction = result.direction || 'forward';
+    ctx.onExecuteSearch();
+    // executeSearch lands index at 0 (first match in buffer). For #, advance
+    // to the match nearest above the cursor; for * the next match below.
+    if (!ctx.searchState.matches?.length) return;
+    const matches = ctx.searchState.matches;
+    if (result.direction === 'backward') {
+      let idx = matches.length - 1;
+      for (let i = matches.length - 1; i >= 0; i--) {
+        if (matches[i].line < cursor.line ||
+            (matches[i].line === cursor.line && matches[i].col < cursor.col)) {
+          idx = i;
+          break;
+        }
+      }
+      ctx.searchState.index = idx;
+    } else {
+      let idx = 0;
+      for (let i = 0; i < matches.length; i++) {
+        if (matches[i].line > cursor.line ||
+            (matches[i].line === cursor.line && matches[i].col > cursor.col)) {
+          idx = i;
+          break;
+        }
+      }
+      ctx.searchState.index = idx;
+    }
+    ctx.onJumpToMatch();
+    // Move cursor to the match itself, vim-style.
+    const m = matches[ctx.searchState.index];
+    cursor.line = m.line;
+    cursor.col = m.col;
   }
 };
 

@@ -632,6 +632,17 @@ class InputRouter {
       return { action: 'noop' };
     }
 
+    // Handle z-prefix (zz, zt, zb) for cursor-line viewport alignment.
+    if (this.pendingMotion === 'z') {
+      this.pendingMotion = null;
+      switch (data) {
+        case 'z': return { action: 'scroll_align_middle' };
+        case 't': return { action: 'scroll_align_top' };
+        case 'b': return { action: 'scroll_align_bottom' };
+        default: return { action: 'noop' };
+      }
+    }
+
     // Handle operator-pending mode (after y, d, etc.)
     if (this.pendingOperator) {
       return this.handleOperatorMotion(data);
@@ -692,6 +703,27 @@ class InputRouter {
       case 'T':
         this.pendingFind = 'T';
         return { action: 'await_char', find: 'T' };
+
+      // Viewport position (H/M/L)
+      case 'H': return { action: 'cursor_viewport_top', count };
+      case 'M': return { action: 'cursor_viewport_middle' };
+      case 'L': return { action: 'cursor_viewport_bottom', count };
+
+      // Paragraph navigation
+      case '{': return { action: 'paragraph_backward', count };
+      case '}': return { action: 'paragraph_forward', count };
+
+      // Match bracket
+      case '%': return { action: 'match_bracket' };
+
+      // Search word under cursor
+      case '*': return { action: 'search_word_under_cursor', direction: 'forward' };
+      case '#': return { action: 'search_word_under_cursor', direction: 'backward' };
+
+      // z-prefix scroll alignment (zz/zt/zb)
+      case 'z':
+        this.pendingMotion = 'z';
+        return { action: 'await_motion', pending: 'z' };
 
       // Repeat last find
       case ';':
@@ -817,6 +849,18 @@ class InputRouter {
       return { action: 'noop' };
     }
 
+    // z-prefix scroll alignment (zz/zt/zb) — extend selection unaffected,
+    // viewport alignment uses the visual cursor (handled by handler).
+    if (this.pendingMotion === 'z') {
+      this.pendingMotion = null;
+      switch (data) {
+        case 'z': return { action: 'scroll_align_middle' };
+        case 't': return { action: 'scroll_align_top' };
+        case 'b': return { action: 'scroll_align_bottom' };
+        default: return { action: 'noop' };
+      }
+    }
+
     // Handle pending find (f/F/t/T waiting for character)
     if (this.pendingFind) {
       const findType = this.pendingFind;
@@ -884,6 +928,23 @@ class InputRouter {
       // Page navigation while selecting
       case '\x04': return { action: 'extend_half_page', dir: 'down', line: isLine };
       case '\x15': return { action: 'extend_half_page', dir: 'up', line: isLine };
+
+      // Viewport position (H/M/L)
+      case 'H': return { action: 'extend_viewport_top', count, line: isLine };
+      case 'M': return { action: 'extend_viewport_middle', line: isLine };
+      case 'L': return { action: 'extend_viewport_bottom', count, line: isLine };
+
+      // Paragraph navigation
+      case '{': return { action: 'extend_paragraph_backward', count, line: isLine };
+      case '}': return { action: 'extend_paragraph_forward', count, line: isLine };
+
+      // Match bracket
+      case '%': return { action: 'extend_match_bracket', line: isLine };
+
+      // z-prefix scroll alignment (zz/zt/zb)
+      case 'z':
+        this.pendingMotion = 'z';
+        return { action: 'await_motion', pending: 'z' };
 
       // Search (extend selection to match)
       case '/':

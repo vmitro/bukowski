@@ -3,7 +3,10 @@
 const {
   moveWordForward,
   moveWordEnd,
-  moveWordBackward
+  moveWordBackward,
+  findParagraphForward,
+  findParagraphBackward,
+  findMatchingBracket
 } = require('../../utils/bufferText');
 const {
   cellColFromCharIdx,
@@ -144,6 +147,71 @@ const visualHandlers = {
 
   visual_cancel(ctx, _result) {
     ctx.vimState.mode = 'normal';
+  },
+
+  // H / M / L — extend to top/middle/bottom of viewport.
+  extend_viewport_top(ctx, result) {
+    if (!isVisualMode(ctx)) return;
+    const pane = ctx.getFocusedPane();
+    if (!pane) return;
+    const scrollY = ctx.getScrollOffset(pane.id);
+    const offset = Math.max(0, (result.count || 1) - 1);
+    ctx.vimState.visualCursor.line = scrollY + offset;
+    ctx.ensureLineVisible(ctx.vimState.visualCursor.line);
+  },
+
+  extend_viewport_middle(ctx, _result) {
+    if (!isVisualMode(ctx)) return;
+    const pane = ctx.getFocusedPane();
+    if (!pane) return;
+    const scrollY = ctx.getScrollOffset(pane.id);
+    ctx.vimState.visualCursor.line = scrollY + Math.floor(pane.bounds.height / 2);
+    ctx.ensureLineVisible(ctx.vimState.visualCursor.line);
+  },
+
+  extend_viewport_bottom(ctx, result) {
+    if (!isVisualMode(ctx)) return;
+    const pane = ctx.getFocusedPane();
+    if (!pane) return;
+    const scrollY = ctx.getScrollOffset(pane.id);
+    const offset = Math.max(0, (result.count || 1) - 1);
+    ctx.vimState.visualCursor.line = scrollY + pane.bounds.height - 1 - offset;
+    ctx.ensureLineVisible(ctx.vimState.visualCursor.line);
+  },
+
+  // { / } — paragraph navigation while extending.
+  extend_paragraph_forward(ctx, result) {
+    const agent = ctx.getFocusedAgent();
+    if (!isVisualMode(ctx) || !agent) return;
+    let line = ctx.vimState.visualCursor.line;
+    for (let i = 0; i < (result.count || 1); i++) {
+      line = findParagraphForward(agent, line);
+    }
+    ctx.vimState.visualCursor.line = line;
+    ctx.ensureLineVisible(line);
+  },
+
+  extend_paragraph_backward(ctx, result) {
+    const agent = ctx.getFocusedAgent();
+    if (!isVisualMode(ctx) || !agent) return;
+    let line = ctx.vimState.visualCursor.line;
+    for (let i = 0; i < (result.count || 1); i++) {
+      line = findParagraphBackward(agent, line);
+    }
+    ctx.vimState.visualCursor.line = line;
+    ctx.ensureLineVisible(line);
+  },
+
+  // % — extend to matching bracket.
+  extend_match_bracket(ctx, _result) {
+    const agent = ctx.getFocusedAgent();
+    if (!isVisualMode(ctx) || !agent) return;
+    const cursor = ctx.vimState.visualCursor;
+    const target = findMatchingBracket(agent, cursor.line, cursor.col);
+    if (!target) return;
+    cursor.line = target.line;
+    cursor.col = target.col;
+    ctx.ensureLineVisible(cursor.line);
   }
 };
 

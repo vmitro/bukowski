@@ -272,6 +272,120 @@ function findCharOnLine(lineText, startCol, char, type, count = 1) {
   return cellCol;
 }
 
+/**
+ * Find the next paragraph boundary forward (first blank line below `line`).
+ * If `line` itself is blank, skip the current run of blanks first so we land
+ * on a *different* paragraph boundary, vim-style. Returns last line index if
+ * no further blank line exists.
+ */
+function findParagraphForward(agent, line) {
+  const total = agent.getContentHeight();
+  let i = line;
+  // Skip the current blank-line run, if any.
+  while (i < total && /^\s*$/.test(agent.getLineText(i) || '')) i++;
+  // Walk to the next blank line.
+  while (i < total && !/^\s*$/.test(agent.getLineText(i) || '')) i++;
+  return Math.min(i, total - 1);
+}
+
+/**
+ * Find the next paragraph boundary backward (first blank line above `line`).
+ * Mirror of findParagraphForward.
+ */
+function findParagraphBackward(agent, line) {
+  let i = line;
+  while (i > 0 && /^\s*$/.test(agent.getLineText(i) || '')) i--;
+  while (i > 0 && !/^\s*$/.test(agent.getLineText(i) || '')) i--;
+  return Math.max(0, i);
+}
+
+const BRACKET_PAIRS = { '(': ')', '[': ']', '{': '}', ')': '(', ']': '[', '}': '{' };
+const BRACKET_FORWARD = new Set(['(', '[', '{']);
+
+/**
+ * Find the bracket matching the one at (line, col). If no bracket is at the
+ * cursor, scan forward on the same line for the first bracket. Returns
+ * `{line, col}` (cell-col) of the matching bracket, or null if unmatched.
+ */
+function findMatchingBracket(agent, line, col) {
+  const total = agent.getContentHeight();
+  let lineText = agent.getLineText(line) || '';
+  let charIdx = charIdxFromCellCol(lineText, col);
+
+  // If not on a bracket, scan forward on this line for one.
+  while (charIdx < lineText.length && !BRACKET_PAIRS[lineText[charIdx]]) charIdx++;
+  if (charIdx >= lineText.length) return null;
+
+  const open = lineText[charIdx];
+  const target = BRACKET_PAIRS[open];
+  const forward = BRACKET_FORWARD.has(open);
+  let depth = 1;
+
+  if (forward) {
+    let i = line, c = charIdx + 1;
+    while (i < total) {
+      if (c >= lineText.length) {
+        i++;
+        if (i >= total) break;
+        lineText = agent.getLineText(i) || '';
+        c = 0;
+        continue;
+      }
+      const ch = lineText[c];
+      if (ch === open) depth++;
+      else if (ch === target) {
+        depth--;
+        if (depth === 0) return { line: i, col: cellColFromCharIdx(lineText, c) };
+      }
+      c++;
+    }
+  } else {
+    let i = line, c = charIdx - 1;
+    while (i >= 0) {
+      if (c < 0) {
+        i--;
+        if (i < 0) break;
+        lineText = agent.getLineText(i) || '';
+        c = lineText.length - 1;
+        continue;
+      }
+      const ch = lineText[c];
+      if (ch === open) depth++;
+      else if (ch === target) {
+        depth--;
+        if (depth === 0) return { line: i, col: cellColFromCharIdx(lineText, c) };
+      }
+      c--;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Word under cursor — used by `*` and `#`. Returns the word text or null.
+ */
+function wordUnderCursor(agent, line, col) {
+  const lineText = agent.getLineText(line) || '';
+  const idx = charIdxFromCellCol(lineText, col);
+  if (!/\w/.test(lineText[idx] || '')) {
+    // Not on a word char; scan forward for one (vim falls back to next word).
+    let j = idx;
+    while (j < lineText.length && !/\w/.test(lineText[j])) j++;
+    if (j >= lineText.length) return null;
+    return readWordAt(lineText, j);
+  }
+  return readWordAt(lineText, idx);
+}
+
+function readWordAt(lineText, idx) {
+  let s = idx;
+  while (s > 0 && /\w/.test(lineText[s - 1])) s--;
+  let e = idx;
+  while (e < lineText.length && /\w/.test(lineText[e])) e++;
+  return lineText.slice(s, e);
+}
+
 module.exports = {
   extractSelectedText,
   extractLines,
@@ -282,5 +396,9 @@ module.exports = {
   moveWordForward,
   moveWordEnd,
   moveWordBackward,
-  findCharOnLine
+  findCharOnLine,
+  findParagraphForward,
+  findParagraphBackward,
+  findMatchingBracket,
+  wordUnderCursor
 };
