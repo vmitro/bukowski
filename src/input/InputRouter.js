@@ -21,6 +21,7 @@ class InputRouter {
 
     // Character find state (f/F/t/T)
     this.pendingFind = null;        // 'f' | 'F' | 't' | 'T' | null
+    this.pendingTextObject = null;  // 'i' | 'a' | null — awaiting object char
     this.lastFind = null;           // { type: 'f'|'F'|'t'|'T', char: string } for ; and ,
 
     // Command mode state
@@ -51,6 +52,7 @@ class InputRouter {
       this.pendingOperator = null;
       this.pendingMotion = null;
       this.pendingFind = null;
+      this.pendingTextObject = null;
       this.commandBuffer = '';
 
       if (this.mode === 'command') {
@@ -522,6 +524,27 @@ class InputRouter {
     const register = this.selectedRegister;
     const count = parseInt(this.pendingCount) || 1;
 
+    // Text-object prefix: yi<obj>, ya<obj>, di<obj>, da<obj>. Stash operator
+    // state and wait for the object char (next call to handleData lands here
+    // because pendingOperator is still set).
+    if (data === 'i' || data === 'a') {
+      if (!this.pendingTextObject) {
+        this.pendingTextObject = data;
+        // Keep operator/register; restore on next call.
+        return { action: 'await_text_object', around: data === 'a' };
+      }
+    }
+
+    if (this.pendingTextObject) {
+      const around = this.pendingTextObject === 'a';
+      this.pendingTextObject = null;
+      this.pendingOperator = null;
+      this.selectedRegister = null;
+      this.pendingCount = '';
+      const actionPrefix = operator === 'y' ? 'yank' : 'delete';
+      return { action: `${actionPrefix}_text_object`, kind: data, around, register };
+    }
+
     this.pendingOperator = null;
     this.selectedRegister = null;
     this.pendingCount = '';
@@ -861,6 +884,13 @@ class InputRouter {
       }
     }
 
+    // Text object selection in visual mode: viw, vaw, vi", va(, etc.
+    if (this.pendingTextObject) {
+      const around = this.pendingTextObject === 'a';
+      this.pendingTextObject = null;
+      return { action: 'extend_text_object', kind: data, around };
+    }
+
     // Handle pending find (f/F/t/T waiting for character)
     if (this.pendingFind) {
       const findType = this.pendingFind;
@@ -945,6 +975,14 @@ class InputRouter {
       case 'z':
         this.pendingMotion = 'z';
         return { action: 'await_motion', pending: 'z' };
+
+      // Text-object prefix (iw, aw, i", a(, etc.) — block in vline since
+      // line-mode selections are line-granular by definition.
+      case 'i':
+      case 'a':
+        if (isLine) return { action: 'noop' };
+        this.pendingTextObject = data;
+        return { action: 'await_text_object', around: data === 'a' };
 
       // Search (extend selection to match)
       case '/':

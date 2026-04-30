@@ -386,6 +386,205 @@ function readWordAt(lineText, idx) {
   return lineText.slice(s, e);
 }
 
+/**
+ * Text-object range: returns {startLine, startCol, endLine, endCol} as
+ * cell-cols, or null if no object found at the cursor. `kind` is one of:
+ *   'w' | 'W' — word / WORD (around=true adds trailing whitespace)
+ *   '"' | "'" | '`' — same-line quoted run
+ *   '(' | ')' | 'b' | '[' | ']' | '{' | '}' | 'B' — bracket pair (multi-line)
+ *   'p' — paragraph (around=true adds the trailing blank-line run)
+ */
+function findTextObject(agent, line, col, kind, around) {
+  if (kind === 'w' || kind === 'W') return findWordTextObject(agent, line, col, kind === 'W', around);
+  if (kind === '"' || kind === "'" || kind === '`') return findQuoteTextObject(agent, line, col, kind, around);
+  if ('()b[]{}B'.includes(kind)) return findBracketTextObject(agent, line, col, kind, around);
+  if (kind === 'p') return findParagraphTextObject(agent, line, around);
+  return null;
+}
+
+function findWordTextObject(agent, line, col, bigWord, around) {
+  const lineText = agent.getLineText(line) || '';
+  if (!lineText) return null;
+  const idx = charIdxFromCellCol(lineText, col);
+  const ch = lineText[idx];
+  if (ch === undefined) return null;
+
+  const cls = bigWord ? bigWordClass : wordClass;
+  const startClass = cls(ch);
+
+  // Expand to the run of same-class characters around idx.
+  let s = idx, e = idx;
+  while (s > 0 && cls(lineText[s - 1]) === startClass) s--;
+  while (e < lineText.length - 1 && cls(lineText[e + 1]) === startClass) e++;
+
+  if (around) {
+    // 'aw' adds trailing whitespace; if there's none, fall back to leading.
+    if (e + 1 < lineText.length && /\s/.test(lineText[e + 1])) {
+      while (e + 1 < lineText.length && /\s/.test(lineText[e + 1])) e++;
+    } else if (s > 0 && /\s/.test(lineText[s - 1])) {
+      while (s > 0 && /\s/.test(lineText[s - 1])) s--;
+    }
+  }
+
+  return {
+    startLine: line, startCol: cellColFromCharIdx(lineText, s),
+    endLine: line, endCol: cellColFromCharIdx(lineText, e)
+  };
+}
+
+function wordClass(ch) {
+  if (!ch) return 'eof';
+  if (/\s/.test(ch)) return 'space';
+  if (/\w/.test(ch)) return 'word';
+  return 'punct';
+}
+
+function bigWordClass(ch) {
+  if (!ch) return 'eof';
+  if (/\s/.test(ch)) return 'space';
+  return 'word';
+}
+
+function findQuoteTextObject(agent, line, col, quote, around) {
+  const lineText = agent.getLineText(line) || '';
+  const idx = charIdxFromCellCol(lineText, col);
+
+  // Find the surrounding quote pair on the same line. If cursor is between
+  // two quotes, use those; otherwise take the next pair on the line.
+  const positions = [];
+  for (let i = 0; i < lineText.length; i++) {
+    if (lineText[i] === quote) positions.push(i);
+  }
+  if (positions.length < 2) return null;
+
+  let openIdx = -1, closeIdx = -1;
+  for (let i = 0; i + 1 < positions.length; i += 2) {
+    const a = positions[i], b = positions[i + 1];
+    if (idx >= a && idx <= b) { openIdx = a; closeIdx = b; break; }
+    if (a > idx) { openIdx = a; closeIdx = b; break; }
+  }
+  if (openIdx < 0) return null;
+
+  let s, e;
+  if (around) {
+    s = openIdx;
+    e = closeIdx;
+  } else {
+    s = openIdx + 1;
+    e = closeIdx - 1;
+    if (s > e) return null;  // empty quote run
+  }
+
+  return {
+    startLine: line, startCol: cellColFromCharIdx(lineText, s),
+    endLine: line, endCol: cellColFromCharIdx(lineText, e)
+  };
+}
+
+const BRACKET_OBJECT_OPEN = {
+  '(': '(', ')': '(', 'b': '(',
+  '[': '[', ']': '[',
+  '{': '{', '}': '{', 'B': '{'
+};
+
+function findBracketTextObject(agent, line, col, kind, around) {
+  const open = BRACKET_OBJECT_OPEN[kind];
+  if (!open) return null;
+  const close = { '(': ')', '[': ']', '{': '}' }[open];
+
+  // Locate the enclosing pair: walk backward from cursor for an unmatched open,
+  // then findMatchingBracket from there to get the close.
+  const openPos = findEnclosingOpen(agent, line, col, open, close);
+  if (!openPos) return null;
+  const closePos = findMatchingBracket(agent, openPos.line, openPos.col);
+  if (!closePos) return null;
+
+  const startLine = openPos.line, endLine = closePos.line;
+  const openLineText = agent.getLineText(startLine) || '';
+  const closeLineText = agent.getLineText(endLine) || '';
+  const openCharIdx = charIdxFromCellCol(openLineText, openPos.col);
+  const closeCharIdx = charIdxFromCellCol(closeLineText, closePos.col);
+
+  let startCol, endCol;
+  if (around) {
+    startCol = openPos.col;
+    endCol = closePos.col;
+  } else {
+    // Inner: skip the bracket itself. If they're on the same line, content
+    // runs from openCharIdx+1 .. closeCharIdx-1.
+    if (startLine === endLine) {
+      const sIdx = openCharIdx + 1, eIdx = closeCharIdx - 1;
+      if (sIdx > eIdx) return null;
+      startCol = cellColFromCharIdx(openLineText, sIdx);
+      endCol = cellColFromCharIdx(closeLineText, eIdx);
+    } else {
+      startCol = cellColFromCharIdx(openLineText, openCharIdx + 1);
+      endCol = closeCharIdx > 0
+        ? cellColFromCharIdx(closeLineText, closeCharIdx - 1)
+        : 0;
+    }
+  }
+
+  return { startLine, startCol, endLine, endCol };
+}
+
+function findEnclosingOpen(agent, line, col, open, close) {
+  // Walk back from (line, col), tracking depth, until we find an unmatched open.
+  let l = line;
+  let lineText = agent.getLineText(l) || '';
+  let c = charIdxFromCellCol(lineText, col);
+  let depth = 0;
+
+  // If cursor sits *on* an open bracket, that's the enclosing one.
+  if (lineText[c] === open) {
+    return { line: l, col: cellColFromCharIdx(lineText, c) };
+  }
+
+  while (l >= 0) {
+    while (c >= 0) {
+      const ch = lineText[c];
+      if (ch === close) depth++;
+      else if (ch === open) {
+        if (depth === 0) return { line: l, col: cellColFromCharIdx(lineText, c) };
+        depth--;
+      }
+      c--;
+    }
+    l--;
+    if (l < 0) break;
+    lineText = agent.getLineText(l) || '';
+    c = lineText.length - 1;
+  }
+  return null;
+}
+
+function findParagraphTextObject(agent, line, around) {
+  const total = agent.getContentHeight();
+  const isBlank = (i) => /^\s*$/.test(agent.getLineText(i) || '');
+
+  // Walk back to start of current run (blank or non-blank).
+  let s = line;
+  const onBlank = isBlank(s);
+  while (s > 0 && isBlank(s - 1) === onBlank) s--;
+
+  // Walk forward to end of current run.
+  let e = line;
+  while (e < total - 1 && isBlank(e + 1) === onBlank) e++;
+
+  if (around) {
+    // 'ap' adds the next blank-line run (or non-blank if we started blank).
+    let extE = e;
+    while (extE < total - 1 && isBlank(extE + 1) !== onBlank) extE++;
+    e = extE;
+  }
+
+  const endLineText = agent.getLineText(e) || '';
+  return {
+    startLine: s, startCol: 0,
+    endLine: e, endCol: Math.max(0, lineCellCount(endLineText) - 1)
+  };
+}
+
 module.exports = {
   extractSelectedText,
   extractLines,
@@ -400,5 +599,6 @@ module.exports = {
   findParagraphForward,
   findParagraphBackward,
   findMatchingBracket,
-  wordUnderCursor
+  wordUnderCursor,
+  findTextObject
 };

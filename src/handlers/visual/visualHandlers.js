@@ -6,7 +6,8 @@ const {
   moveWordBackward,
   findParagraphForward,
   findParagraphBackward,
-  findMatchingBracket
+  findMatchingBracket,
+  findTextObject
 } = require('../../utils/bufferText');
 const {
   cellColFromCharIdx,
@@ -212,6 +213,21 @@ const visualHandlers = {
     cursor.line = target.line;
     cursor.col = target.col;
     ctx.ensureLineVisible(cursor.line);
+  },
+
+  // Text object in visual mode (viw, vaw, vi", va(, etc.). Repositions
+  // anchor/cursor to cover the object; switches to char-visual if invoked
+  // from block (a rectangular text-object would need different semantics).
+  extend_text_object(ctx, result) {
+    const agent = ctx.getFocusedAgent();
+    if (!isVisualMode(ctx) || !agent) return;
+    const cursor = ctx.vimState.visualCursor;
+    const obj = findTextObject(agent, cursor.line, cursor.col, result.kind, result.around);
+    if (!obj) return;
+    if (ctx.vimState.mode === 'vblock') ctx.vimState.mode = 'visual';
+    ctx.vimState.visualAnchor = { line: obj.startLine, col: obj.startCol };
+    ctx.vimState.visualCursor = { line: obj.endLine, col: obj.endCol };
+    ctx.ensureLineVisible(obj.endLine);
   }
 };
 

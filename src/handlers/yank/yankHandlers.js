@@ -4,7 +4,8 @@ const {
   extractLines,
   extractWord,
   extractToEndOfLine,
-  extractFromStartOfLine
+  extractFromStartOfLine,
+  findTextObject
 } = require('../../utils/bufferText');
 
 const yankHandlers = {
@@ -163,6 +164,39 @@ const yankHandlers = {
   delete_to_start(_ctx, _result) {},
   delete_to_end(_ctx, _result) {},
 
+  // yi<obj>, ya<obj> — set the visual selection to the text object then yank.
+  // Uses the existing yankSelection path (reads vimState.visualAnchor/Cursor).
+  yank_text_object(ctx, result) {
+    const focusedAgent = ctx.getFocusedAgent();
+    if (!focusedAgent) return;
+    const cursor = ctx.vimState.normalCursor;
+    const obj = findTextObject(focusedAgent, cursor.line, cursor.col, result.kind, result.around);
+    if (!obj) return;
+    const prevMode = ctx.vimState.mode;
+    ctx.vimState.mode = 'visual';
+    ctx.vimState.visualAnchor = { line: obj.startLine, col: obj.startCol };
+    ctx.vimState.visualCursor = { line: obj.endLine, col: obj.endCol };
+    ctx.onYankSelection(result.register);
+    // yankSelection resets mode to 'normal' when done. If for any reason it
+    // didn't run (e.g., empty selection), restore explicitly.
+    if (ctx.vimState.mode !== 'normal') ctx.vimState.mode = prevMode;
+  },
+
+  // Read-only terminal: delete behaves as yank.
+  delete_text_object(ctx, result) {
+    const focusedAgent = ctx.getFocusedAgent();
+    if (!focusedAgent) return;
+    const cursor = ctx.vimState.normalCursor;
+    const obj = findTextObject(focusedAgent, cursor.line, cursor.col, result.kind, result.around);
+    if (!obj) return;
+    const prevMode = ctx.vimState.mode;
+    ctx.vimState.mode = 'visual';
+    ctx.vimState.visualAnchor = { line: obj.startLine, col: obj.startCol };
+    ctx.vimState.visualCursor = { line: obj.endLine, col: obj.endCol };
+    ctx.onYankSelection(result.register);
+    if (ctx.vimState.mode !== 'normal') ctx.vimState.mode = prevMode;
+  },
+
   paste(ctx, result) {
     ctx.onPasteFromRegister(result.after, result.register);
   },
@@ -178,6 +212,7 @@ const yankHandlers = {
 
   // These are handled by InputRouter state, nothing to do here
   await_motion(_ctx, _result) {},
+  await_text_object(_ctx, _result) {},
   operator_cancelled(_ctx, _result) {},
   invalid_motion(_ctx, _result) {},
   invalid_register(_ctx, _result) {}
