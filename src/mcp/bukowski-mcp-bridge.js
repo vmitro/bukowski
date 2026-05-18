@@ -278,7 +278,9 @@ function tryConnectToBukowski() {
     const sessionAgentId = process.env.BUKOWSKI_AGENT_ID || null;
 
     // Send init message (fire and forget - don't block)
-    // Include ancestor PIDs so MCPServer can match to session agent by PTY PID
+    // Include ancestor PIDs so MCPServer can match to session agent by PTY PID,
+    // and cwd so external agents get named after the directory they run in
+    // (e.g. claude started in ~/azra registers as claude-azra-1).
     const initMsg = JSON.stringify({
       jsonrpc: '2.0',
       id: '__init__',
@@ -286,7 +288,8 @@ function tryConnectToBukowski() {
       params: {
         agentType,
         agentId: sessionAgentId,      // null if external, set if session agent
-        ancestorPids: getAncestorPids() // For session agent matching
+        ancestorPids: getAncestorPids(), // For session agent matching
+        cwd: process.cwd()            // For external-agent host naming
       }
     }) + '\n';
     socket.write(initMsg);
@@ -385,7 +388,7 @@ const TOOLS = [
       type: 'object',
       required: ['to', 'action'],
       properties: {
-        to: { type: 'string', description: 'Target agent ID (e.g., "claude-1", "codex-1")' },
+        to: { type: 'string', description: 'Target agent ID. Session agents: "claude-1", "codex-1". External clients use their cwd basename: a claude REPL in ~/azra is "claude-azra-1". Use list_agents to discover.' },
         action: { type: 'string', description: 'The action to request the agent perform' },
         conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }

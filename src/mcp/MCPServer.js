@@ -5,6 +5,7 @@ const EventEmitter = require('events');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
+const { hostFromCwd } = require('../utils/host');
 
 /**
  * MCPServer
@@ -41,6 +42,19 @@ class MCPServer extends EventEmitter {
 
     // Counter for generating unique agent IDs
     this.agentCounters = new Map();  // type -> count
+
+    // Federation hub, attached by the host process once it's running.
+    // Used so `list_agents` can also surface remote agents reachable
+    // through other bukowski instances.
+    this.federationHub = null;
+  }
+
+  /**
+   * Attach the federation hub so list_agents includes remote peers.
+   * Idempotent; pass null to detach.
+   */
+  attachFederation(hub) {
+    this.federationHub = hub || null;
   }
 
   /**
@@ -55,7 +69,7 @@ class MCPServer extends EventEmitter {
           type: 'object',
           required: ['to', 'action'],
           properties: {
-            to: { type: 'string', description: 'Target agent ID (e.g., "claude-1", "codex-1")' },
+            to: { type: 'string', description: 'Target agent ID. Session agents: "claude-1", "codex-1". External clients use their cwd basename: a claude REPL in ~/azra is "claude-azra-1". Use list_agents to discover.' },
             action: { type: 'string', description: 'The action to request the agent perform' },
             conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
           }
@@ -354,8 +368,10 @@ class MCPServer extends EventEmitter {
         }
 
         if (!assignedId && params?.agentType) {
-          // External agent via bridge - assign a unique ID
-          assignedId = this._assignAgentId(params.agentType, socket);
+          // External agent via bridge - assign a unique ID. Host segment comes
+          // from the bridge's cwd basename so a claude REPL in ~/azra shows up
+          // as claude-azra-1; legacy bridges with no cwd land as claude-ext-1.
+          assignedId = this._assignAgentId(params.agentType, socket, params.cwd);
         }
 
         clientState.agentId = assignedId;
@@ -481,9 +497,15 @@ class MCPServer extends EventEmitter {
 
       case 'fipa_cfp': {
         requireString('task');
-        const recipients = this.session.getAllAgents()
-          .filter(a => a.id !== callerAgentId)
+        const localRecipients = this.session.getAllAgents()
+          .filter(a => a.id !== callerAgentId && a.type !== 'chat')
           .map(a => a.id);
+        const externalRecipients = Array.from(this.externalAgents.keys())
+          .filter(id => id !== callerAgentId);
+        const federatedRecipients = this.federationHub?.remoteAgents
+          ? Array.from(this.federationHub.remoteAgents.keys())
+          : [];
+        const recipients = [...localRecipients, ...externalRecipients, ...federatedRecipients];
         return this.fipaHub.cfp(callerAgentId, recipients, {
           task: args.task,
           deadline: args.deadline
@@ -503,7 +525,7 @@ class MCPServer extends EventEmitter {
         return this._sendFipaMessage('refuse', callerAgentId, args.to, args.reason, args.conversationId);
 
       case 'list_agents': {
-        // Include both session agents and external agents
+        // Local session agents.
         const sessionAgents = this.session.getAllAgents().map(a => ({
           id: a.id,
           name: a.name,
@@ -511,14 +533,33 @@ class MCPServer extends EventEmitter {
           source: 'session'
         }));
 
+        // External bridge clients (claude/codex/gemini REPLs connected
+        // from outside any bukowski's session).
         const externalAgents = this.getExternalAgents().map(a => ({
           id: a.id,
           name: a.id,
           type: a.type,
+          host: a.host,
           source: 'external'
         }));
 
-        return [...sessionAgents, ...externalAgents];
+        // Agents living in other bukowski instances, reachable via
+        // federation. The `id` here is the federated form (claude-vladimir-1)
+        // — that's what callers pass to fipa_* tools.
+        const federatedAgents = [];
+        if (this.federationHub?.remoteAgents) {
+          for (const [federatedId, info] of this.federationHub.remoteAgents) {
+            federatedAgents.push({
+              id: federatedId,
+              name: federatedId,
+              type: info.type,
+              host: info.peerHost,
+              source: 'federated'
+            });
+          }
+        }
+
+        return [...sessionAgents, ...externalAgents, ...federatedAgents];
       }
 
       case 'get_pending_messages': {
@@ -529,24 +570,31 @@ class MCPServer extends EventEmitter {
       }
 
       case 'get_conversations': {
+        // ConversationManager is not itself iterable; its Map of
+        // conversations lives at .conversations. Each value is a
+        // Conversation object whose canonical shape comes from
+        // getSummary(): {id, initiator, protocol, state, messageCount,
+        // duration, isComplete, participants}.
         const status = args.status || 'all';
-        const conversations = [];
-        for (const [convId, conv] of this.fipaHub.conversations) {
-          if (conv.from === callerAgentId || conv.to === callerAgentId ||
-              (Array.isArray(conv.to) && conv.to.includes(callerAgentId))) {
-            if (status === 'all' || conv.state === status) {
-              conversations.push({
-                id: convId,
-                from: conv.from,
-                to: conv.to,
-                performative: conv.performative,
-                state: conv.state,
-                messageCount: conv.messages?.length || 0
-              });
-            }
-          }
+        const convMap = this.fipaHub?.conversations?.conversations;
+        if (!convMap) return [];
+
+        const out = [];
+        for (const conv of convMap.values()) {
+          let summary;
+          try { summary = conv.getSummary(); }
+          catch { continue; }
+
+          if (!summary.participants.includes(callerAgentId)) continue;
+
+          // Map status filter to summary fields. ConversationManager
+          // exposes `state` from the protocol and `isComplete` directly.
+          if (status === 'completed' && !summary.isComplete) continue;
+          if (status === 'active' && summary.isComplete) continue;
+
+          out.push(summary);
         }
-        return conversations;
+        return out;
       }
 
       case 'register_agent': {
@@ -572,11 +620,13 @@ class MCPServer extends EventEmitter {
       throw new Error('FIPA Hub not available');
     }
 
-    // Validate target agent exists (session, external, or special "user" identity)
+    // Validate target agent exists (session, external, federated, or
+    // the special "user" identity).
     const sessionAgent = this.session.getAgent(to);
     const externalAgent = this.externalAgents.get(to);
+    const federatedAgent = this.federationHub?.resolveRemote?.(to) || null;
     const isUser = to === 'user';
-    if (!sessionAgent && !externalAgent && !isUser) {
+    if (!sessionAgent && !externalAgent && !federatedAgent && !isUser) {
       throw new Error(`Unknown agent: ${to}`);
     }
 
@@ -639,18 +689,23 @@ class MCPServer extends EventEmitter {
    * @private
    * @param {string} agentType - Type of agent (claude, codex, gemini, unknown)
    * @param {net.Socket} socket - The socket connection
+   * @param {string} [cwd] - Bridge's cwd; basename becomes the host segment
    * @returns {string} Assigned agent ID
    */
-  _assignAgentId(agentType, socket) {
-    // Get next number for this agent type
-    const count = (this.agentCounters.get(agentType) || 0) + 1;
-    this.agentCounters.set(agentType, count);
+  _assignAgentId(agentType, socket, cwd) {
+    const host = hostFromCwd(cwd);
 
-    const agentId = `${agentType}-ext-${count}`;
+    // Counter is per <type, host> so each origin directory has its own n.
+    const counterKey = `${agentType}-${host}`;
+    const count = (this.agentCounters.get(counterKey) || 0) + 1;
+    this.agentCounters.set(counterKey, count);
+
+    const agentId = `${agentType}-${host}-${count}`;
 
     // Track the external agent
     this.externalAgents.set(agentId, {
       type: agentType,
+      host,
       registeredAt: Date.now(),
       socket
     });
@@ -674,6 +729,7 @@ class MCPServer extends EventEmitter {
     return Array.from(this.externalAgents.entries()).map(([id, info]) => ({
       id,
       type: info.type,
+      host: info.host,
       registeredAt: info.registeredAt
     }));
   }

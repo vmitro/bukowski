@@ -4,12 +4,14 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const EventEmitter = require('events');
 
 // Default session directory
 const DEFAULT_SESSION_DIR = path.join(os.homedir(), '.config', 'bukowski', 'sessions');
 
-class Session {
+class Session extends EventEmitter {
   constructor(name) {
+    super();
     this.id = crypto.randomUUID();
     this.name = name;
     this.agents = new Map();      // agentId -> Agent
@@ -23,6 +25,7 @@ class Session {
   addAgent(agent) {
     this.agents.set(agent.id, agent);
     this.updatedAt = new Date().toISOString();
+    this.emit('agent:added', agent);
   }
 
   removeAgent(agentId) {
@@ -34,6 +37,7 @@ class Session {
       }
       this.agents.delete(agentId);
       this.updatedAt = new Date().toISOString();
+      this.emit('agent:removed', agent);
     }
   }
 

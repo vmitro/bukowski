@@ -86,16 +86,29 @@ class ChatAgent extends EventEmitter {
   }
 
   _setupListeners() {
-    // Listen for ALL messages involving "user" (not just one conversation)
-    // This makes the chat pane a unified view of user<->agent communication
+    // Inclusion rules for what shows up in this chat pane:
+    //   1. Anything involving "user" anywhere — preserves the original
+    //      "unified user<->agent view" behavior across conversations.
+    //   2. Anything addressed to this ChatAgent's own id (chat-<convId>) —
+    //      agents replying to a @chat broadcast often address the chat
+    //      pseudo-agent directly rather than `user`, since list_agents
+    //      surfaces both.
+    //   3. Anything bound to this chat's conversationId — catches threaded
+    //      replies that agents drop in the conversation without an
+    //      explicit user/chat-id recipient.
     this.conversations.on('message:received', ({ message, conversation }) => {
       const sender = message.sender?.name;
       const receivers = Array.isArray(message.receiver)
         ? message.receiver.map(r => r.name)
         : [message.receiver?.name];
 
-      // Show if user is sender or receiver
-      if (sender === 'user' || receivers.includes('user')) {
+      const involvesUser = sender === 'user' || receivers.includes('user');
+      const involvesThisChat = sender === this.id || receivers.includes(this.id);
+      const inThisConversation =
+        conversation?.id === this.conversationId
+        || message.conversationId === this.conversationId;
+
+      if (involvesUser || involvesThisChat || inThisConversation) {
         this._addMessage(message);
       }
     });
@@ -128,18 +141,28 @@ class ChatAgent extends EventEmitter {
     // Extract clean content
     let content = this._extractContent(fipaMessage);
 
-    // Add mention for direct messages (skip for broadcasts)
+    // Add mention prefix.
+    //   single recipient → `@<name> <body>`
+    //   multi-recipient  → `@{a, b, c} <body>`  (one rendered line, no
+    //                      duplicates per-recipient — the chat pane
+    //                      issues a single multi-receiver FIPA message
+    //                      for @chat / @swarm broadcasts)
+    // Skip if content already mentions any recipient, or if the only
+    // recipient name starts with `@` (e.g. `@all`).
     const receivers = Array.isArray(fipaMessage.receiver)
       ? fipaMessage.receiver
       : [fipaMessage.receiver];
 
-    // Don't add @mention for broadcasts (multiple receivers) or @all
-    const isBroadcast = receivers.length > 1 || fipaMessage.isBroadcast?.();
-    if (!isBroadcast && receivers.length === 1) {
+    if (receivers.length === 1) {
       const target = receivers[0]?.name;
-      // Skip if target starts with @ (like @all) or content already mentions target
       if (target && !target.startsWith('@') && !content.includes(`@${target}`)) {
         content = `@${target} ${content}`;
+      }
+    } else if (receivers.length > 1) {
+      const names = receivers.map(r => r?.name).filter(Boolean);
+      const alreadyMentioned = names.some(n => content.includes(`@${n}`));
+      if (names.length > 0 && !alreadyMentioned) {
+        content = `@{${names.join(', ')}} ${content}`;
       }
     }
 
@@ -738,10 +761,16 @@ class ChatAgent extends EventEmitter {
   }
 
   cycleTargetAgent(direction = 1) {
-    // Get all available agents (excluding self/chat agents)
-    // Plus special "@chat" broadcast option (for "@chat is this true?" memes)
+    // Direct targets, plus two broadcast handles:
+    //   @chat  — every agent in THIS bukowski's session (local only)
+    //   @swarm — every reachable agent across the federation
+    //            (local session + every federated peer)
+    // @swarm is only offered when there's at least one federated agent
+    // visible; otherwise it's an alias for @chat with extra typing.
     const agents = this._getAvailableAgents();
-    const targets = [...agents.map(a => a.id), '@chat'];
+    const hasFederated = agents.some(a => a.source === 'federated');
+    const broadcasts = hasFederated ? ['@chat', '@swarm'] : ['@chat'];
+    const targets = [...agents.map(a => a.id), ...broadcasts];
     if (targets.length === 0) return;
 
     const currentIdx = targets.indexOf(this.targetAgent);
@@ -790,16 +819,40 @@ class ChatAgent extends EventEmitter {
     // Send via FIPA - include conversationId to keep messages in same conversation
     const opts = { conversationId: this.conversationId };
 
-    // Handle @chat broadcast - send to all agents
-    const isBroadcast = this.targetAgent === '@chat';
-    const targets = isBroadcast
-      ? this._getAvailableAgents().map(a => a.id)
-      : [this.targetAgent];
+    // Broadcast handles:
+    //   @chat  — local session agents only (this bukowski)
+    //   @swarm — local + every federated peer agent
+    const isLocalBroadcast = this.targetAgent === '@chat';
+    const isSwarmBroadcast = this.targetAgent === '@swarm';
+    let targets;
+    if (isLocalBroadcast) {
+      targets = this._getAvailableAgents()
+        .filter(a => a.source !== 'federated')
+        .map(a => a.id);
+    } else if (isSwarmBroadcast) {
+      targets = this._getAvailableAgents().map(a => a.id);
+    } else {
+      targets = [this.targetAgent];
+    }
 
     if (targets.length === 0) return;
 
+    // For broadcasts (@chat / @swarm) issue ONE multi-receiver FIPA
+    // message instead of N separate ones. That way the chat pane shows
+    // a single rendered line with `@{a, b, c}` rather than N duplicates
+    // of the same body. Each receiver still gets its own IPC delivery
+    // and PTY nudge via FIPAHub.send's multi-recipient path. For
+    // single-recipient sends `dest` is just the id string.
+    const isBroadcast = isLocalBroadcast || isSwarmBroadcast;
+    const dest = isBroadcast ? targets : targets[0];
+    // Iterate exactly once per send call. The previous code looped over
+    // every target even for broadcasts; with array-receiver support
+    // that's no longer needed.
+    const iterCount = isBroadcast ? 1 : targets.length;
+
     try {
-      for (const target of targets) {
+      for (let i = 0; i < iterCount; i++) {
+        const target = isBroadcast ? dest : targets[i];
         switch (this.performative) {
           case 'request':
             this.fipaHub.request(fromAgent.id, target, content, opts);

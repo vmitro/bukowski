@@ -20,6 +20,20 @@ class IPCHub extends EventEmitter {
     this.messageLog = [];              // Recent messages for debugging
     this.maxLogSize = 100;
     this.template = IAC_DEFAULT_TEMPLATE;
+
+    // Federation router. Set by attachFederation(). Has shape
+    //   { resolveRemote(id), forwardIpcMessage(msg), federateSenderId(localId) }
+    // When the recipient of a routeMessage call isn't local but is known
+    // to the federation, the message is forwarded across instead of
+    // returning delivery:failed. Local routing keeps its existing path.
+    this.federation = null;
+  }
+
+  /**
+   * Attach a federation router. Idempotent; pass null to detach.
+   */
+  attachFederation(router) {
+    this.federation = router || null;
   }
 
   /**
@@ -162,34 +176,61 @@ class IPCHub extends EventEmitter {
   }
 
   /**
-   * Route message to appropriate recipients
+   * Route message to appropriate recipients. If the unicast target isn't
+   * locally connected but federation knows of it, hand off; otherwise
+   * fall through to delivery:failed.
    */
   routeMessage(message) {
-    // Handle responses to pending requests
-    if (message.type === 'response' && message.replyTo) {
-      const pending = this.pendingRequests.get(message.replyTo);
-      if (pending) {
-        clearTimeout(pending.timeout);
-        pending.resolve(message.payload);
-        this.pendingRequests.delete(message.replyTo);
-        return;
-      }
-    }
+    if (this._tryResolvePending(message)) return;
 
-    // Route to recipients
     if (message.to === '*') {
-      // Broadcast to all except sender
       for (const [id, socket] of this.agentSockets) {
-        if (id !== message.from) {
-          this.deliverToSocket(socket, message);
-        }
+        if (id !== message.from) this.deliverToSocket(socket, message);
       }
     } else {
       const socket = this.agentSockets.get(message.to);
       if (socket) {
         this.deliverToSocket(socket, message);
+      } else if (this.federation && this.federation.resolveRemote(message.to)) {
+        // Non-local target known to a federated peer. Stamp sender into
+        // its federated form (so the peer can address replies back), then
+        // hand off — FederationHub rewrites `to` to the peer's local id.
+        //
+        // We rewrite the IPC-level `from` AND, when this is a FIPA
+        // envelope, the embedded FIPAMessage's `sender.name`. The receiving
+        // bukowski reconstructs the FIPAMessage from payload._fipaMessage,
+        // so without this rewrite peers see the original local id (e.g.
+        // "claude-1" on both sides) — replies then go to the wrong agent
+        // ("loopback") and chat attribution is wrong.
+        const federatedFrom = this.federation.federateSenderId
+          ? this.federation.federateSenderId(message.from)
+          : message.from;
+        let forwarded;
+        const innerSender = message.payload?._fipaMessage?.sender;
+        if (innerSender && innerSender.name !== federatedFrom) {
+          forwarded = {
+            ...message,
+            from: federatedFrom,
+            payload: {
+              ...message.payload,
+              _fipaMessage: {
+                ...message.payload._fipaMessage,
+                sender: { ...innerSender, name: federatedFrom }
+              }
+            }
+          };
+        } else {
+          forwarded = { ...message, from: federatedFrom };
+        }
+        const ok = this.federation.forwardIpcMessage(forwarded);
+        if (!ok) {
+          this.emit('delivery:failed', {
+            messageId: message.id,
+            to: message.to,
+            reason: 'federation_forward_failed'
+          });
+        }
       } else {
-        // Agent not connected, emit error
         this.emit('delivery:failed', {
           messageId: message.id,
           to: message.to,
@@ -198,8 +239,51 @@ class IPCHub extends EventEmitter {
       }
     }
 
-    // Emit for logging/UI
     this.emit('message', message);
+  }
+
+  /**
+   * Inject a message arriving from a federated peer. Local-only delivery —
+   * never re-forwards, even if the target isn't here (the peer routed to us
+   * thinking we have the target; if we don't, that's a delivery failure,
+   * not a reason to bounce the message around).
+   */
+  injectFederatedMessage(message) {
+    if (this._tryResolvePending(message)) return;
+
+    if (message.to === '*') {
+      for (const [id, socket] of this.agentSockets) {
+        if (id !== message.from) this.deliverToSocket(socket, message);
+      }
+    } else {
+      const socket = this.agentSockets.get(message.to);
+      if (socket) {
+        this.deliverToSocket(socket, message);
+      } else {
+        this.emit('delivery:failed', {
+          messageId: message.id,
+          to: message.to,
+          reason: 'federated_target_not_local'
+        });
+      }
+    }
+
+    this.emit('message', message);
+  }
+
+  /**
+   * Resolve a pending outbound request waiting on this response. Shared
+   * by both routing entrypoints. Returns true if the message was consumed.
+   * @private
+   */
+  _tryResolvePending(message) {
+    if (message.type !== 'response' || !message.replyTo) return false;
+    const pending = this.pendingRequests.get(message.replyTo);
+    if (!pending) return false;
+    clearTimeout(pending.timeout);
+    pending.resolve(message.payload);
+    this.pendingRequests.delete(message.replyTo);
+    return true;
   }
 
   /**

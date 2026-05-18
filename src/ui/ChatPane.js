@@ -30,8 +30,13 @@ class ChatPane extends EventEmitter {
     this.showTimestamps = options.showTimestamps ?? true;
     this.showPerformatives = options.showPerformatives ?? false; // Hidden by default
     this.timeFormat = options.timeFormat || 'HH:mm';
-    this.maxNickWidth = options.maxNickWidth || 12;
+    // Widened from 12 to fit federated nicks like 'claude-vladimir-1'.
+    this.maxNickWidth = options.maxNickWidth || 18;
     this.colorScheme = options.colorScheme || 'default';
+    // Local host segment — set this to e.g. 'azra' so the chat can tint
+    // federated senders (anything whose nick matches `<type>-<host>-<n>`
+    // with a host that isn't ours) differently.
+    this.localHost = options.localHost || null;
 
     // Chat history per conversation
     this.chatHistory = new Map(); // conversationId -> ChatMessage[]
@@ -154,7 +159,23 @@ class ChatPane extends EventEmitter {
       content: prefix + content,
       raw: fipaMessage,
       style: this._getMessageStyle(performative),
+      isFederated: this._isFederatedNick(sender),
     };
+  }
+
+  /**
+   * True if `sender` looks like `<type>-<host>-<n>` with a host segment
+   * that isn't this bukowski's. Used to tint federated chatter so users
+   * can tell at a glance which messages crossed the wire.
+   * @private
+   */
+  _isFederatedNick(sender) {
+    if (!this.localHost || typeof sender !== 'string') return false;
+    // Strict shape: type-host-n where n is digits. Avoids false positives
+    // on hyphenated names that aren't federated.
+    const m = sender.match(/^[A-Za-z][A-Za-z0-9]*-([A-Za-z0-9_-]+)-\d+$/);
+    if (!m) return false;
+    return m[1] !== this.localHost;
   }
 
   /**
@@ -353,8 +374,12 @@ class ChatPane extends EventEmitter {
     // Wrap content
     const contentLines = this._wrapText(msg.content, contentWidth);
 
-    // First line with sender
-    const firstLine = `\x1b[90m${time}\x1b[36m${sender}\x1b[90m │\x1b[0m ${attrs}${fg}${contentLines[0] || ''}\x1b[0m`;
+    // First line with sender — magenta if federated (crossed the wire),
+    // cyan for local, yellow-dim for system.
+    const nickColor = msg.isSystem
+      ? '\x1b[2;33m'
+      : (msg.isFederated ? '\x1b[35m' : '\x1b[36m');
+    const firstLine = `\x1b[90m${time}${nickColor}${sender}\x1b[90m │\x1b[0m ${attrs}${fg}${contentLines[0] || ''}\x1b[0m`;
     lines.push(firstLine);
 
     // Continuation lines

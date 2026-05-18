@@ -38,6 +38,9 @@ const { RegisterManager } = require('./src/input/RegisterManager');
 const { findLatestSession } = require('./src/utils/agentSessions');
 const { OverlayManager } = require('./src/ui/OverlayManager');
 const { MCPServer } = require('./src/mcp/MCPServer');
+const { PeerRegistry } = require('./src/federation/PeerRegistry');
+const { FederationHub } = require('./src/federation/FederationHub');
+const { FIPAMessage: FIPAMessageClass } = require('./src/acl/FIPAMessage');
 const {
   extractSelectedText,
   extractLines,
@@ -70,6 +73,8 @@ const AGENT_TYPES = createAgentTypes(claudePath, codexPath);
 // Lazy-initialized UI singletons (set later in startup)
 let chatPane = null;
 let compositor = null;
+let peerRegistry = null;
+let federationHub = null;
 
 // Load quotes for splash screen
 const quotesPath = path.join(__dirname, 'quotes.txt');
@@ -228,9 +233,12 @@ terminal.registerSignalHandlers();
           // Check if we don't already have this agent
           if (!session.getAgent(agentData.id)) {
             const chatAgent = ChatAgent.fromJSON(agentData, fipaHub.conversations, fipaHub);
-            // Set available agents for target selection
-            const realAgents = session.getAllAgents().filter(a => a.type !== 'chat');
-            chatAgent.setAvailableAgents(realAgents);
+            // Include federated peers so @chat broadcasts reach them too.
+            chatAgent.setAvailableAgents(
+              (typeof getReachableAgents === 'function')
+                ? getReachableAgents()
+                : session.getAllAgents().filter(a => a.type !== 'chat')
+            );
             session.addAgent(chatAgent);
             flushPendingChatErrors();
           }
@@ -545,40 +553,44 @@ terminal.registerSignalHandlers();
       });
     }
 
-    fipaHub.on('fipa:sent', ({ message, to }) => {
-      if (!to) return;
+    // Canonical "deliver a FIPA message to a local recipient" path. Used
+    // by both the local fipa:sent emitter and the federation `forward`
+    // handler. Without the federation branch, messages arriving from
+    // peer bukowskis hit IPCHub.injectFederatedMessage which can't reach
+    // MCP-bridge-based agents (they live in mcpServer.messageQueues, not
+    // ipcHub.agentSockets) — silent drop.
+    function deliverFipaToLocal(message, to) {
+      if (!to || !message) return;
 
-      // Queue for MCP polling
       mcpServer.queueMessage(to, message);
 
-      // For session agents with PTY, inject and auto-submit to trigger response
       const agent = session.getAgent(to);
+      // PTY-backed coding agents need an in-pane nudge so they react to
+      // the message (Claude has hooks; codex/gemini get the formatted
+      // prompt typed into their input). ChatAgents are NOT poked here —
+      // they subscribe to ConversationManager.message:received and render
+      // the sender's name + content directly. Calling agent.write() on a
+      // ChatAgent would shove "[FIPA inform from X]" into the user's
+      // input buffer, which is what the previous version did wrong.
       if (agent?.pty && message.sender?.name !== to) {
         let prompt;
         if (agent.type === 'claude') {
-          // Claude Code agents have the UserPromptSubmit hook installed; the
-          // hook injects message content as additionalContext. We only need a
-          // tiny wakeup nudge in the PTY — short strings are also more
-          // reliably echo-detected than long ones.
           const sender = message.sender?.name || 'unknown';
           const perf = message.performative || 'inform';
           prompt = `[FIPA ${perf} from ${sender}] (see context)`;
         } else {
           prompt = formatFIPAForPTY(message);
-          // Gemini uses ! for shell mode - replace with . to avoid triggering it
           if (agent.type === 'gemini') {
             prompt = prompt.replace(/!/g, '.');
           }
         }
-        // Small delay to not interrupt mid-output
         setTimeout(() => {
           enqueueFipaInject(agent, prompt);
         }, fipaPromptDelayMs);
-      } else if (agent?.type === 'chat') {
-        const prompt = formatFIPAForPTY(message);
-        agent.write(prompt);
       }
-    });
+    }
+
+    fipaHub.on('fipa:sent', ({ message, to }) => deliverFipaToLocal(message, to));
 
     // Format FIPA message for PTY injection (no trailing newline - sent separately)
     // Short messages: include content. Long messages: just notify to check inbox.
@@ -625,13 +637,197 @@ terminal.registerSignalHandlers();
     } catch {
       // Ignore - discovery file is optional
     }
+
+    // Snapshot of every agent the chat pane can address — local session
+    // agents plus federated agents reachable via peers. Used at chat-pane
+    // creation and re-pushed to all existing chat agents whenever the
+    // federated roster changes, so `@chat` broadcasts and the target
+    // picker reflect what's actually out there.
+    function getReachableAgents() {
+      // Plain objects (not Agent instances) so each entry can carry a
+      // `source` tag — the chat pane uses it to distinguish @chat
+      // (local-only broadcast) from @swarm (federated broadcast).
+      const local = session.getAllAgents()
+        .filter(a => a.type !== 'chat')
+        .map(a => ({ id: a.id, name: a.name, type: a.type, source: 'session' }));
+      const federated = federationHub?.remoteAgents
+        ? Array.from(federationHub.remoteAgents.entries()).map(([fid, info]) => ({
+            id: fid,
+            name: fid,
+            type: info.type,
+            source: 'federated'
+          }))
+        : [];
+      return [...local, ...federated];
+    }
+    function syncChatAgentsRoster() {
+      const reachable = getReachableAgents();
+      for (const agent of session.getAllAgents()) {
+        if (agent.type === 'chat' && typeof agent.setAvailableAgents === 'function') {
+          try { agent.setAvailableAgents(reachable); } catch { /* ignore */ }
+        }
+      }
+    }
+
+    // Peer discovery + federation transport + roster sync + routing.
+    // Phase 1: PeerRegistry advertises this bukowski under a host name
+    //          derived from cwd and learns about siblings.
+    // Phase 2: FederationHub opens a listen socket and dials siblings.
+    // Phase 3: Local session agents are propagated via the roster; remote
+    //          agents are kept in FederationHub.remoteAgents.
+    // Phase 4: IPCHub consults the federation when a target isn't local,
+    //          and FederationHub.forward events deliver inbound back
+    //          through IPCHub.injectFederatedMessage.
+    try {
+      peerRegistry = new PeerRegistry({
+        sessionId: session.id,
+        ipcSocket: ipcHub.getSocketPath?.() || null,
+        mcpSocket: socketPath
+      });
+      const resolvedHost = peerRegistry.start();
+      process.env.BUKOWSKI_HOST = resolvedHost;
+      peerRegistry.on('peer:appeared', (peer) => {
+        broadcastSystemMessage(`peer ${peer.host} (pid ${peer.pid}) joined`);
+      });
+      peerRegistry.on('peer:gone', (peer) => {
+        broadcastSystemMessage(`peer ${peer.host} (pid ${peer.pid}) left`);
+      });
+
+      // Federated agent id for a local session agent. ChatAgents and
+      // external bridge clients aren't federated (they stay confined to
+      // their connected bukowski).
+      const isFederatable = (agent) => !!agent && agent.type !== 'chat' && !!agent.pty;
+      const federatedIdFor = (agent) => `${agent.type}-${resolvedHost}-${_localCount(agent)}`;
+      // Stable per-(type,host) numbering across the session's lifetime.
+      // We use the existing local id's trailing number when present,
+      // falling back to the order of addAgent calls.
+      const _typeCounters = new Map();
+      function _localCount(agent) {
+        // Prefer the numeric suffix the local Agent already has (e.g.
+        // 'claude-1' -> 1); otherwise mint one.
+        const m = /-(\d+)$/.exec(agent.id || '');
+        if (m) return parseInt(m[1], 10);
+        const n = (_typeCounters.get(agent.type) || 0) + 1;
+        _typeCounters.set(agent.type, n);
+        return n;
+      }
+      function snapshotLocalRoster() {
+        return session.getAllAgents()
+          .filter(isFederatable)
+          .map(a => ({ localId: a.id, type: a.type, federatedId: federatedIdFor(a) }));
+      }
+
+      federationHub = new FederationHub({
+        host: resolvedHost,
+        sessionId: session.id,
+        peerRegistry,
+        getLocalRoster: snapshotLocalRoster
+      });
+      federationHub.on('peer:connected', ({ host, direction }) => {
+        broadcastSystemMessage(`federation: connected to ${host} (${direction})`);
+      });
+      federationHub.on('peer:disconnected', ({ host, reason }) => {
+        broadcastSystemMessage(`federation: disconnected from ${host} (${reason})`);
+        // Fail any FIPA requests waiting on agents that lived on this peer,
+        // instead of letting them sit on the default 30s timeout.
+        try {
+          const n = fipaHub.failPendingForHost(host);
+          if (n > 0) broadcastSystemMessage(`federation: ${n} in-flight request(s) to ${host} failed`);
+        } catch { /* ignore */ }
+      });
+
+      // Inbound forwards from peers. `to` was already rewritten by the
+      // sender's FederationHub down to the recipient's local id. For
+      // FIPA payloads (the common case) we reconstruct the FIPAMessage,
+      // track it in the conversation manager so ChatPane sees it, and
+      // hand it to the same delivery helper used by local sends — that
+      // queues on mcpServer for the agent's bridge to poll and fires
+      // the PTY wakeup nudge. Non-FIPA payloads fall back to IPCHub.
+      federationHub.on('forward', ({ payload }) => {
+        if (!payload || !payload.ipcMessage) return;
+        const ipcMsg = payload.ipcMessage;
+        const fipaData = ipcMsg.payload?._fipaMessage;
+        if (fipaData) {
+          let fipaMessage;
+          try { fipaMessage = FIPAMessageClass.fromJSON(fipaData); }
+          catch (err) {
+            console.error('federation: failed to parse incoming FIPA:', err.message);
+            return;
+          }
+          try { fipaHub.conversations.handleMessage(fipaMessage); } catch { /* ignore */ }
+          deliverFipaToLocal(fipaMessage, ipcMsg.to);
+        } else {
+          try { ipcHub.injectFederatedMessage(ipcMsg); }
+          catch (err) { console.error('federation: inbound delivery failed:', err.message); }
+        }
+      });
+
+      // Attach the federation router to IPCHub so non-local targets
+      // route through the wire instead of failing.
+      ipcHub.attachFederation({
+        resolveRemote: (id) => federationHub.resolveRemote(id),
+        forwardIpcMessage: (msg) => federationHub.forwardIpcMessage(msg),
+        federateSenderId: (localId) => {
+          if (!localId) return localId;
+          const agent = session.getAgent(localId);
+          if (agent && isFederatable(agent)) return federatedIdFor(agent);
+          return localId;  // already federated, or non-federatable sender
+        }
+      });
+
+      // Propagate local session changes to peers.
+      const onAgentAdded = (agent) => {
+        if (isFederatable(agent)) {
+          federationHub.announceLocalAgent({
+            localId: agent.id, type: agent.type, federatedId: federatedIdFor(agent)
+          });
+        }
+        syncChatAgentsRoster();
+      };
+      const onAgentRemoved = (agent) => {
+        if (isFederatable(agent)) {
+          federationHub.announceLocalRemoval({
+            localId: agent.id, type: agent.type, federatedId: federatedIdFor(agent)
+          });
+        }
+        syncChatAgentsRoster();
+      };
+      session.on('agent:added', onAgentAdded);
+      session.on('agent:removed', onAgentRemoved);
+
+      // Re-sync chat panes whenever the federated roster changes so
+      // their @chat broadcast (and target picker) sees peer agents.
+      federationHub.on('peer:connected', () => syncChatAgentsRoster());
+      federationHub.on('peer:disconnected', () => syncChatAgentsRoster());
+      federationHub.on('roster', () => syncChatAgentsRoster());
+
+      const fedSocketPath = await federationHub.start();
+      // Re-advertise with fedSocket so siblings know how to dial us.
+      peerRegistry.update({ fedSocket: fedSocketPath });
+
+      // MCPServer surfaces federated agents in list_agents.
+      try { mcpServer.attachFederation(federationHub); } catch { /* ignore */ }
+
+      terminal.onShutdown(() => {
+        try { session.off('agent:added', onAgentAdded); } catch { /* ignore */ }
+        try { session.off('agent:removed', onAgentRemoved); } catch { /* ignore */ }
+        try { ipcHub.attachFederation(null); } catch { /* ignore */ }
+        try { mcpServer.attachFederation(null); } catch { /* ignore */ }
+        try { federationHub.stop(); } catch { /* ignore */ }
+        try { peerRegistry.stop(); } catch { /* ignore */ }
+      });
+    } catch (err) {
+      console.error('Warning: peer registry/federation failed to start:', err.message);
+    }
   } catch (err) {
     console.error('Warning: MCP server failed to start:', err.message);
   }
 
   // Create FIPA UI components
   const conversationList = new ConversationList(fipaHub.conversations);
-  chatPane = new ChatPane(fipaHub.conversations);
+  chatPane = new ChatPane(fipaHub.conversations, {
+    localHost: peerRegistry ? peerRegistry.getHost() : null
+  });
 
   // Wire MCPServer agent connect/disconnect notifications to chat
   mcpServer.on('external_agent:connected', ({ agentId }) => {
@@ -1252,7 +1448,12 @@ terminal.registerSignalHandlers();
   function createChatPane(conversationId, splitDir = 'horizontal') {
     // Create ChatAgent
     const chatAgent = new ChatAgent(conversationId, fipaHub.conversations, fipaHub);
-    chatAgent.setAvailableAgents(session.getAllAgents().filter(a => a.type !== 'chat'));
+    // Include federated peers so @chat broadcasts reach them too.
+    chatAgent.setAvailableAgents(
+      (typeof getReachableAgents === 'function')
+        ? getReachableAgents()
+        : session.getAllAgents().filter(a => a.type !== 'chat')
+    );
 
     // Add to session
     session.addAgent(chatAgent);

@@ -281,6 +281,20 @@ class FIPAHub extends EventEmitter {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
+   * Normalize a `to` argument into an AgentIdentifier or array of them.
+   * Each convenience method accepts either a single id string or an array
+   * of id strings — passing an array produces a single multi-receiver
+   * FIPAMessage (the chat pane renders it once with `@{a, b, c}` instead
+   * of one duplicate per recipient).
+   * @private
+   */
+  _toReceiver(to) {
+    return Array.isArray(to)
+      ? to.map(id => new AgentIdentifier(id))
+      : new AgentIdentifier(to);
+  }
+
+  /**
    * Send a REQUEST message
    * @param {string} from - Sender agent ID
    * @param {string} to - Receiver agent ID
@@ -291,7 +305,7 @@ class FIPAHub extends EventEmitter {
   async request(from, to, action, options = {}) {
     const message = request(
       new AgentIdentifier(from),
-      new AgentIdentifier(to),
+      this._toReceiver(to),
       action,
       options
     );
@@ -308,7 +322,7 @@ class FIPAHub extends EventEmitter {
   async inform(from, to, information, options = {}) {
     const message = inform(
       new AgentIdentifier(from),
-      new AgentIdentifier(to),
+      this._toReceiver(to),
       information,
       options
     );
@@ -326,7 +340,7 @@ class FIPAHub extends EventEmitter {
   async queryIf(from, to, question, options = {}) {
     const message = queryIf(
       new AgentIdentifier(from),
-      new AgentIdentifier(to),
+      this._toReceiver(to),
       question,
       options
     );
@@ -344,7 +358,7 @@ class FIPAHub extends EventEmitter {
   async queryRef(from, to, reference, options = {}) {
     const message = queryRef(
       new AgentIdentifier(from),
-      new AgentIdentifier(to),
+      this._toReceiver(to),
       reference,
       options
     );
@@ -381,7 +395,7 @@ class FIPAHub extends EventEmitter {
   async subscribe(from, to, subscription, options = {}) {
     const message = subscribe(
       new AgentIdentifier(from),
-      new AgentIdentifier(to),
+      this._toReceiver(to),
       subscription,
       options
     );
@@ -398,7 +412,7 @@ class FIPAHub extends EventEmitter {
   async propose(from, to, proposal, options = {}) {
     const message = propose(
       new AgentIdentifier(from),
-      new AgentIdentifier(to),
+      this._toReceiver(to),
       proposal,
       options
     );
@@ -415,7 +429,7 @@ class FIPAHub extends EventEmitter {
   async agree(from, to, content = {}, options = {}) {
     const message = agree(
       new AgentIdentifier(from),
-      new AgentIdentifier(to),
+      this._toReceiver(to),
       content,
       options
     );
@@ -432,7 +446,7 @@ class FIPAHub extends EventEmitter {
   async refuse(from, to, reason, options = {}) {
     const message = refuse(
       new AgentIdentifier(from),
-      new AgentIdentifier(to),
+      this._toReceiver(to),
       reason,
       options
     );
@@ -539,6 +553,29 @@ class FIPAHub extends EventEmitter {
   // ═══════════════════════════════════════════════════════════════════════════
   // Lifecycle
   // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Fail any in-flight requests whose target lives on the now-gone host.
+   * Called by the federation glue on peer:disconnected so the user doesn't
+   * wait out the default 30s timeout for a peer that's already gone.
+   * @param {string} host - the disconnected peer's host segment
+   */
+  failPendingForHost(host) {
+    if (!host) return 0;
+    const fedRe = /^[A-Za-z][A-Za-z0-9]*-([A-Za-z0-9_-]+)-\d+$/;
+    let failed = 0;
+    for (const [id, pending] of Array.from(this.pendingFIPA.entries())) {
+      const target = pending.message?.receiver?.name || '';
+      const m = fedRe.exec(target);
+      if (!m || m[1] !== host) continue;
+      clearTimeout(pending.timeout);
+      this.pendingFIPA.delete(id);
+      this.emit('peer_lost', { message: pending.message, host });
+      try { pending.resolve(null); } catch { /* ignore */ }
+      failed++;
+    }
+    return failed;
+  }
 
   /**
    * Shutdown FIPA hub
