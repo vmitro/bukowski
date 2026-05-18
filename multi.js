@@ -459,6 +459,21 @@ terminal.registerSignalHandlers();
     // This ensures agents connect to THIS instance's MCP server, not another instance's
     process.env.BUKOWSKI_MCP_SOCKET = socketPath;
 
+    // Auto-register the bukowski MCP entry with whichever CLIs the user
+    // actually has (claude/codex/gemini), so a fresh checkout + `node
+    // multi.js` boots into a working FIPA setup without a separate
+    // `bukowski-mcp install` step. Idempotent — only writes when the
+    // entry is missing or its bridge path is stale, so subsequent
+    // startups are a cheap config read. Honors BUKOWSKI_NO_AUTO_INSTALL
+    // and the ~/.bukowski/.no-auto-install marker dropped by an
+    // explicit `bukowski-mcp uninstall`.
+    try {
+      const { autoInstallIfNeeded } = require('./src/mcp/install');
+      autoInstallIfNeeded();
+    } catch (err) {
+      console.error('mcp auto-install skipped:', err.message);
+    }
+
     // Wire FIPAHub messages to MCP message queue and PTY injection
     const fipaPromptDelayMs = parseInt(process.env.BUKOWSKI_FIPA_PROMPT_DELAY_MS, 10) || 100;
     const fipaSubmitDelayMs = parseInt(process.env.BUKOWSKI_FIPA_SUBMIT_DELAY_MS, 10) || 80; // Legacy fixed delay

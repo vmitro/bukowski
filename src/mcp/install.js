@@ -16,6 +16,11 @@ const CONFIG_PATHS = {
   gemini: path.join(os.homedir(), '.gemini', 'settings.json')
 };
 
+// Marker that records an explicit `bukowski-mcp uninstall`. Startup
+// auto-install checks for this and bails so an explicit uninstall sticks
+// even though every later boot would otherwise reinstall.
+const AUTO_INSTALL_MARKER = path.join(os.homedir(), '.bukowski', '.no-auto-install');
+
 /**
  * Read JSON config file
  */
@@ -232,6 +237,10 @@ function uninstallGemini() {
  * Install bukowski MCP server for all agents
  */
 function installAll() {
+  // Explicit install: clear the "stay off" marker so future bukowski
+  // startups will re-install if the user nukes the config later.
+  try { fs.unlinkSync(AUTO_INSTALL_MARKER); } catch { /* ignore */ }
+
   const results = {
     claude: { installed: false, error: null },
     codex: { installed: false, error: null },
@@ -263,6 +272,13 @@ function installAll() {
  * Uninstall bukowski MCP server from all agents
  */
 function uninstallAll() {
+  // Explicit uninstall: drop a marker so the next bukowski startup
+  // doesn't quietly re-install behind the user's back.
+  try {
+    fs.mkdirSync(path.dirname(AUTO_INSTALL_MARKER), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(AUTO_INSTALL_MARKER, `${new Date().toISOString()}\n`);
+  } catch { /* ignore */ }
+
   const results = {
     claude: { uninstalled: false, error: null },
     codex: { uninstalled: false, error: null },
@@ -288,6 +304,80 @@ function uninstallAll() {
   }
 
   return results;
+}
+
+/**
+ * Per-agent "is the user even using this CLI?" probe. If neither the
+ * config file exists nor the binary is on PATH, the user almost
+ * certainly doesn't use the agent; auto-install skips it rather than
+ * littering ~/.{claude,codex,gemini}* with config they didn't ask for.
+ * Explicit `bukowski-mcp install` ignores this and writes everywhere.
+ */
+function _hasAgent(agent) {
+  if (fs.existsSync(CONFIG_PATHS[agent])) return true;
+  return commandExists(agent);
+}
+
+/**
+ * Per-agent "is the bukowski entry missing OR pointing at a stale bridge
+ * path?" check. Drives idempotent startup behavior so we only write
+ * when something would actually change.
+ */
+function _claudeNeedsInstall() {
+  const cfg = readJSON(CONFIG_PATHS.claude);
+  const entry = cfg?.mcpServers?.bukowski;
+  if (!entry) return true;
+  if (entry.args?.[0] !== BRIDGE_SCRIPT) return true;
+  return false;
+}
+function _codexNeedsInstall() {
+  let content;
+  try { content = fs.readFileSync(CONFIG_PATHS.codex, 'utf-8'); }
+  catch { return true; }
+  if (!content.includes('[mcp_servers.bukowski]')) return true;
+  if (!content.includes(`"${BRIDGE_SCRIPT}"`)) return true;
+  return false;
+}
+function _geminiNeedsInstall() {
+  const cfg = readJSON(CONFIG_PATHS.gemini);
+  const entry = cfg?.mcpServers?.bukowski;
+  if (!entry) return true;
+  if (entry.args?.[0] !== BRIDGE_SCRIPT) return true;
+  return false;
+}
+
+/**
+ * Idempotent auto-install for bukowski startup. Bails on
+ * BUKOWSKI_NO_AUTO_INSTALL or the user's `bukowski-mcp uninstall`
+ * marker; otherwise writes the bukowski entry for every agent that
+ * looks like it's actually in use (config exists or binary on PATH)
+ * and whose current entry is missing or stale. Returns a summary
+ * `{ skipped?: string, installed: { claude, codex, gemini }, errors: {...} }`.
+ */
+function autoInstallIfNeeded() {
+  if (process.env.BUKOWSKI_NO_AUTO_INSTALL) return { skipped: 'env' };
+  try { if (fs.existsSync(AUTO_INSTALL_MARKER)) return { skipped: 'marker' }; }
+  catch { /* ignore */ }
+
+  const summary = {
+    installed: { claude: false, codex: false, gemini: false },
+    errors: {}
+  };
+
+  if (_hasAgent('claude') && _claudeNeedsInstall()) {
+    try { installClaude(); summary.installed.claude = true; }
+    catch (err) { summary.errors.claude = err.message; }
+  }
+  if (_hasAgent('codex') && _codexNeedsInstall()) {
+    try { installCodex(); summary.installed.codex = true; }
+    catch (err) { summary.errors.codex = err.message; }
+  }
+  if (_hasAgent('gemini') && _geminiNeedsInstall()) {
+    try { installGemini(); summary.installed.gemini = true; }
+    catch (err) { summary.errors.gemini = err.message; }
+  }
+
+  return summary;
 }
 
 /**
@@ -339,6 +429,7 @@ function checkStatus() {
 module.exports = {
   installAll,
   uninstallAll,
+  autoInstallIfNeeded,
   checkStatus,
   installClaude,
   installCodex,
@@ -347,5 +438,6 @@ module.exports = {
   uninstallCodex,
   uninstallGemini,
   CONFIG_PATHS,
-  BRIDGE_SCRIPT
+  BRIDGE_SCRIPT,
+  AUTO_INSTALL_MARKER
 };
