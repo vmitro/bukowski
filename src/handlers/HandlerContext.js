@@ -64,19 +64,25 @@ class HandlerContext {
     return this.layoutManager.focusedPaneId;
   }
 
-  // Ensure a line is visible in the focused pane
+  // Ensure a line is visible in the focused pane.
+  // Routes through scrollPane so followTail/scrollLocks update and the
+  // draw loop won't snap the viewport back to bottom mid-motion.
   ensureLineVisible(line) {
     const paneId = this.getFocusedPaneId();
     const pane = this.layoutManager.findPane(paneId);
     if (!pane) return;
 
-    let scrollY = this.compositor.scrollOffsets.get(paneId) || 0;
+    const scrollY = this.compositor.scrollOffsets.get(paneId) || 0;
     const { height } = pane.bounds;
 
+    let delta = 0;
     if (line < scrollY) {
-      this.compositor.scrollOffsets.set(paneId, line);
+      delta = line - scrollY;
     } else if (line >= scrollY + height) {
-      this.compositor.scrollOffsets.set(paneId, line - height + 1);
+      delta = (line - height + 1) - scrollY;
+    }
+    if (delta !== 0) {
+      this.compositor.scrollPane(paneId, delta);
     }
   }
 

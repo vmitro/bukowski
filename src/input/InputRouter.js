@@ -970,8 +970,10 @@ class InputRouter {
       // Page navigation while selecting
       case '\x04': return { action: 'extend_half_page', dir: 'down', line: isLine };
       case '\x15': return { action: 'extend_half_page', dir: 'up', line: isLine };
-      case '\x1b[6~': return { action: 'extend_half_page', dir: 'down', line: isLine };
-      case '\x1b[5~': return { action: 'extend_half_page', dir: 'up', line: isLine };
+      case '\x06': return { action: 'extend_page', dir: 'down', line: isLine };
+      case '\x02': return { action: 'extend_page', dir: 'up', line: isLine };
+      case '\x1b[6~': return { action: 'extend_page', dir: 'down', line: isLine };
+      case '\x1b[5~': return { action: 'extend_page', dir: 'up', line: isLine };
 
       // Viewport position (H/M/L)
       case 'H': return { action: 'extend_viewport_top', count, line: isLine };

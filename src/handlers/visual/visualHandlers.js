@@ -67,6 +67,14 @@ const visualHandlers = {
     }
   },
 
+  extend_page(ctx, result) {
+    if (isVisualMode(ctx)) {
+      const focusedPane = ctx.getFocusedPane();
+      const page = Math.max(1, focusedPane?.bounds.height || 24);
+      ctx.onMoveVisualCursor(result.dir, page);
+    }
+  },
+
   extend_to_top(ctx, _result) {
     if (isVisualMode(ctx)) {
       ctx.vimState.visualCursor.line = 0;

@@ -856,19 +856,25 @@ terminal.registerSignalHandlers();
     ensureLineVisible(startLine);
   }
 
-  // Ensure a line is visible in the viewport
+  // Ensure a line is visible in the viewport. Routes through scrollPane so
+  // followTail/scrollLocks update and the draw loop won't snap the viewport
+  // back to bottom mid-motion.
   function ensureLineVisible(line) {
     const paneId = layoutManager.focusedPaneId;
     const pane = layoutManager.findPane(paneId);
     if (!pane) return;
 
-    let scrollY = compositor.scrollOffsets.get(paneId) || 0;
+    const scrollY = compositor.scrollOffsets.get(paneId) || 0;
     const { height } = pane.bounds;
 
+    let delta = 0;
     if (line < scrollY) {
-      compositor.scrollOffsets.set(paneId, line);
+      delta = line - scrollY;
     } else if (line >= scrollY + height) {
-      compositor.scrollOffsets.set(paneId, line - height + 1);
+      delta = (line - height + 1) - scrollY;
+    }
+    if (delta !== 0) {
+      compositor.scrollPane(paneId, delta);
     }
   }
 
