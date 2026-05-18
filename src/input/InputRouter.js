@@ -417,6 +417,16 @@ class InputRouter {
       return { action: 'chat_scroll_down' };
     }
 
+    // PageUp: scroll chat up by full page
+    if (data === '\x1b[5~') {
+      return { action: 'chat_scroll_page_up' };
+    }
+
+    // PageDown: scroll chat down by full page
+    if (data === '\x1b[6~') {
+      return { action: 'chat_scroll_page_down' };
+    }
+
     // Left arrow: cursor left
     if (data === '\x1b[D') {
       return { action: 'chat_cursor_left' };
@@ -768,8 +778,10 @@ class InputRouter {
       case '\x15': // Ctrl+U
         return { action: 'scroll_half_up' };
       case '\x06': // Ctrl+F
+      case '\x1b[6~': // PageDown
         return { action: 'scroll_page_down' };
       case '\x02': // Ctrl+B
+      case '\x1b[5~': // PageUp
         return { action: 'scroll_page_up' };
 
       // Jump to position
@@ -958,6 +970,8 @@ class InputRouter {
       // Page navigation while selecting
       case '\x04': return { action: 'extend_half_page', dir: 'down', line: isLine };
       case '\x15': return { action: 'extend_half_page', dir: 'up', line: isLine };
+      case '\x1b[6~': return { action: 'extend_half_page', dir: 'down', line: isLine };
+      case '\x1b[5~': return { action: 'extend_half_page', dir: 'up', line: isLine };
 
       // Viewport position (H/M/L)
       case 'H': return { action: 'extend_viewport_top', count, line: isLine };

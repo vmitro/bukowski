@@ -181,6 +181,20 @@ const chatHandlers = {
     ctx.compositor.scheduleDraw();
   },
 
+  chat_scroll_page_up(ctx, _result) {
+    const pane = ctx.getFocusedPane();
+    const page = Math.max(1, (pane?.bounds.height || 24) - 2);
+    ctx.chatPane?.scrollUp(page);
+    ctx.compositor.scheduleDraw();
+  },
+
+  chat_scroll_page_down(ctx, _result) {
+    const pane = ctx.getFocusedPane();
+    const page = Math.max(1, (pane?.bounds.height || 24) - 2);
+    ctx.chatPane?.scrollDown(page);
+    ctx.compositor.scheduleDraw();
+  },
+
   chat_prev_conversation(ctx, _result) {
     ctx.chatPane?.prevConversation();
     ctx.compositor.scheduleDraw();
