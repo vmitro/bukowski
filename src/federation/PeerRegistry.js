@@ -139,7 +139,19 @@ class PeerRegistry extends EventEmitter {
       fedSocket: this.fedSocket,
       startedAt: this._startedAt || (this._startedAt = Date.now())
     };
-    fs.writeFileSync(this.peerFile, JSON.stringify(info, null, 2), { mode: 0o600 });
+    // Atomic write: a plain writeFileSync truncates first and then writes,
+    // so a sibling reading the file mid-flight sees an empty / partial blob
+    // and skips us in _resolveHost — collision detection then misses and
+    // both ends up with the unsuffixed host. Write to a sibling temp file
+    // and rename in place so readers always see either the previous state
+    // or the new state, never a torn one.
+    const tmp = `${this.peerFile}.${this.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(info, null, 2), { mode: 0o600 });
+    try { fs.renameSync(tmp, this.peerFile); }
+    catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+      throw err;
+    }
   }
 
   _readPeerFile(file) {

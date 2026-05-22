@@ -769,8 +769,34 @@ terminal.registerSignalHandlers();
             console.error('federation: failed to parse incoming FIPA:', err.message);
             return;
           }
+          // Verify the forward was actually meant for an agent on THIS
+          // bukowski. The wire's `to` is a bare local id ("claude-1") that
+          // matches more than one bukowski; `_federatedTo` (set by the
+          // sender's FederationHub) carries the unique federated id. If it
+          // doesn't resolve to a local agent here, the sender mis-routed
+          // (e.g. two bukowskis raced on host resolution and the registry
+          // didn't see the collision in time). Drop instead of letting the
+          // wrong claude-1 claim a sibling's message.
+          let resolvedLocalId = null;
+          const federatedTo = ipcMsg._federatedTo;
+          if (federatedTo) {
+            const found = session.getAllAgents().find(
+              a => isFederatable(a) && federatedIdFor(a) === federatedTo
+            );
+            if (!found) {
+              broadcastSystemMessage(
+                `federation: dropped misrouted forward (to ${federatedTo}; no local match)`
+              );
+              return;
+            }
+            resolvedLocalId = found.id;
+          } else {
+            // Older sender without `_federatedTo` — fall back to the
+            // wire's `to` and hope for the best.
+            resolvedLocalId = ipcMsg.to;
+          }
           try { fipaHub.conversations.handleMessage(fipaMessage); } catch { /* ignore */ }
-          deliverFipaToLocal(fipaMessage, ipcMsg.to);
+          deliverFipaToLocal(fipaMessage, resolvedLocalId);
         } else {
           try { ipcHub.injectFederatedMessage(ipcMsg); }
           catch (err) { console.error('federation: inbound delivery failed:', err.message); }

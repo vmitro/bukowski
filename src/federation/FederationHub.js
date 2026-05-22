@@ -174,7 +174,11 @@ class FederationHub extends EventEmitter {
    * Forward an IPC-shape message to its federated recipient. The message
    * carries the agent-level `from`/`to` already in their federated forms
    * (caller's responsibility); FederationHub rewrites `to` down to the
-   * peer's local id before sending.
+   * peer's local id before sending, and stashes the original federated id
+   * in `_federatedTo` so the receiver can verify the forward was actually
+   * meant for an agent on its side (matters when two peers share local
+   * agent names like "claude-1" — without the hint a misrouted forward
+   * would be silently claimed by the wrong claude-1).
    *
    * Returns true if the peer is connected and the write was attempted.
    */
@@ -183,8 +187,11 @@ class FederationHub extends EventEmitter {
     const remote = this.remoteAgents.get(ipcMessage.to);
     if (!remote) return false;
 
-    // Rewrite `to` to its local-on-peer form. `from` already federated.
-    const rewritten = { ...ipcMessage, to: remote.localTargetId };
+    const rewritten = {
+      ...ipcMessage,
+      to: remote.localTargetId,
+      _federatedTo: ipcMessage.to
+    };
     return this.forwardTo(remote.peerHost, { ipcMessage: rewritten });
   }
 
