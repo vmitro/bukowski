@@ -1062,8 +1062,32 @@ class Compositor {
       hint = 'Tab:agent Ctrl+P:perf Enter:send Esc:exit';
     }
 
-    // Build padded status line (like index.js)
-    const totalLen = left.length + hint.length + right.length + 2;
+    // Build padded status line. Truncate instead of overflowing — the
+    // status sits on the last row, and a wrap past `cols` triggers a
+    // one-row scroll-up (DECAWM is default-on on most terminals) so the
+    // overflow chars have somewhere to land. That scroll fires every
+    // frame, showing up as per-row jitter on narrow displays (a phone in
+    // portrait with the on-screen keyboard hidden is the reliable repro;
+    // landscape doesn't trigger it because the row fits).
+    const overhead = 2; // leading + trailing space
+    if (left.length + hint.length + right.length + overhead > this.cols) {
+      // Contextual hint is the least critical — drop it first.
+      hint = '';
+    }
+    if (left.length + right.length + overhead > this.cols) {
+      // Still over budget — keep the tail of `right` (agent name / status
+      // icon) and chop the metrics off its front, since the agent identity
+      // is more useful than fps/cps when space is tight.
+      const room = Math.max(0, this.cols - left.length - overhead);
+      right = room <= 1 ? '' : '…' + right.slice(-(room - 1));
+    }
+    if (left.length + right.length + overhead > this.cols) {
+      // Pathological: `left` alone is wider than the row. Hard-truncate.
+      const room = Math.max(0, this.cols - right.length - overhead);
+      left = room <= 1 ? '' : left.slice(0, room - 1) + '…';
+    }
+
+    const totalLen = left.length + hint.length + right.length + overhead;
     const padding = Math.max(0, this.cols - totalLen);
     const leftPad = Math.floor(padding / 2);
     const rightPad = padding - leftPad;
