@@ -535,6 +535,12 @@ terminal.registerSignalHandlers();
       // the input box and corrupts the user's view.
       if (!quiet) {
         console.log(`[fipa-autoinject] skip ${agent.id}: PTY never quiet (${fipaQuietMaxWaitMs}ms); message stays in queue`);
+        try {
+          broadcastSystemMessage(
+            `[fipa] PTY inject skipped for ${agent.id} (TUI busy ${fipaQuietMaxWaitMs}ms); message is in queue, ` +
+            `agent will see it via hook at next tool/turn boundary`
+          );
+        } catch { /* ignore */ }
         return;
       }
 
@@ -580,6 +586,17 @@ terminal.registerSignalHandlers();
       mcpServer.queueMessage(to, message);
 
       const agent = session.getAgent(to);
+      // Visibility for the "queue grew under an id no one will ever pull"
+      // case — happens when the sender targets a federated id that lives on
+      // another bukowski (we get fipa:sent locally as a side effect; the real
+      // delivery is the wire forward) or when the id is just wrong. Without
+      // this log a misrouted send looked exactly like success.
+      if (!agent && !mcpServer.externalAgents.has(to)) {
+        const fed = federationHub?.resolveRemote?.(to);
+        if (!fed) {
+          console.log(`[fipa] queueMessage(${to}) has no local target and no federation route`);
+        }
+      }
       // PTY-backed coding agents need an in-pane nudge so they react to
       // the message (Claude has hooks; codex/gemini get the formatted
       // prompt typed into their input). ChatAgents are NOT poked here —
@@ -606,6 +623,30 @@ terminal.registerSignalHandlers();
     }
 
     fipaHub.on('fipa:sent', ({ message, to }) => deliverFipaToLocal(message, to));
+
+    // Surface silent drops. Until now `delivery:failed` and `error` events on
+    // ipcHub/fipaHub had no listeners — a routeMessage that couldn't find the
+    // recipient just emitted into the void and the sender's tool call still
+    // returned `{success:true}`, leaving the user with no signal that the
+    // message vanished. These listeners surface the failure in the chat pane.
+    const _failNotice = (() => {
+      let last = 0;
+      return (text) => {
+        const now = Date.now();
+        if (now - last < 500) return;  // light debounce
+        last = now;
+        broadcastSystemMessage(`[fipa] ${text}`);
+      };
+    })();
+    ipcHub.on('delivery:failed', ({ messageId, to, reason }) => {
+      _failNotice(`delivery failed: to=${to} reason=${reason} id=${messageId}`);
+    });
+    ipcHub.on('error', (err) => {
+      _failNotice(`ipcHub error: ${err?.message || err}`);
+    });
+    fipaHub.on('error', (err) => {
+      _failNotice(`fipaHub error: ${err?.message || err}`);
+    });
 
     // Format FIPA message for PTY injection (no trailing newline - sent separately)
     // Short messages: include content. Long messages: just notify to check inbox.

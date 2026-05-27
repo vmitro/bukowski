@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // PostToolUse hook for Claude Code agents launched by bukowski.
 //
-// Fires after every tool call during a turn. Used for *mid-turn interrupts*:
-// only `request` performatives qualify (deliberate, narrow scope — `inform`,
-// `query_*`, etc. wait for turn-boundary delivery via Stop/UserPromptSubmit).
-// Each request is announced at most once per arrival; the server marks it via
-// `bukowski/peek_unannounced_requests` so subsequent PostToolUse calls in the
-// same turn don't re-announce.
+// Fires after every tool call during a turn. Used for *mid-turn interrupts*
+// for every FIPA performative — restricting it to `request` made `query_if`,
+// `query_ref`, `inform`, `cfp` etc. invisible until the next Stop flush, which
+// looked like delivery loss that only cleared when senders swapped to
+// `request`. Each message is announced at most once per arrival; the server
+// marks it via `bukowski/peek_unannounced_messages` so subsequent PostToolUse
+// calls in the same turn don't re-announce.
 //
 // Output: when there's at least one unannounced request, write JSON
 // `{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "..."}}`
@@ -71,7 +72,7 @@ sock.on('data', (chunk) => {
 sock.once('connect', async () => {
   try {
     await rpc('initialize', { agentId });
-    const peek = await rpc('bukowski/peek_unannounced_requests', { agentId });
+    const peek = await rpc('bukowski/peek_unannounced_messages', { agentId });
     sock.end();
     clearTimeout(overall);
 
@@ -80,12 +81,13 @@ sock.once('connect', async () => {
 
     const previews = (peek.previews || []).map((p) => {
       const sender = p.sender || 'unknown';
+      const perf = p.performative || 'inform';
       const excerpt = (p.excerpt || '').replace(/\s+/g, ' ');
-      return `  - request from ${sender}: ${excerpt}`;
+      return `  - [${perf}] from ${sender}: ${excerpt}`;
     }).join('\n');
 
     const text = [
-      `[bukowski FIPA — mid-turn interrupt] ${count} pending request(s) require your attention.`,
+      `[bukowski FIPA — mid-turn interrupt] ${count} pending message(s) require your attention.`,
       'Call mcp__bukowski__get_pending_messages now to handle them before continuing your task.',
       previews
     ].filter(Boolean).join('\n');

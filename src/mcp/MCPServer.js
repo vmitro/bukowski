@@ -429,18 +429,22 @@ class MCPServer extends EventEmitter {
         break;
       }
 
+      case 'bukowski/peek_unannounced_messages':
       case 'bukowski/peek_unannounced_requests': {
         // Atomic read+mark used by the Claude Code PostToolUse hook to deliver
-        // mid-turn interrupts for `request` performatives only. Each request
-        // is announced at most once per arrival; subsequent PostToolUse hooks
-        // skip it. If the agent ignores the mid-turn announce, the regular
-        // peek (Stop / UserPromptSubmit) still surfaces it as a safety net.
+        // mid-turn interrupts. Every FIPA performative qualifies — earlier the
+        // filter was restricted to `request`, which silently held `query-if`,
+        // `query-ref`, `inform`, `cfp`, etc. in the queue until the next Stop
+        // hook flushed them all at once (looked like a delivery bug that
+        // mysteriously cleared when the sender swapped to `request`). The
+        // `_midTurnAnnounced` flag still dedupes per arrival, so subsequent
+        // PostToolUse calls in the same turn don't re-announce. The legacy
+        // method name is kept as an alias so an older hook binary doesn't break.
         const targetId = params?.agentId || clientState.agentId;
         const queue = (targetId && this.messageQueues.get(targetId)) || [];
         const limit = Math.max(1, Math.min(10, params?.limit || 5));
         const matches = [];
         for (const m of queue) {
-          if (m.performative !== 'request') continue;
           if (m._midTurnAnnounced) continue;
           m._midTurnAnnounced = true;
           let excerpt = '';
@@ -449,7 +453,11 @@ class MCPServer extends EventEmitter {
           } else if (m.content != null) {
             try { excerpt = JSON.stringify(m.content).slice(0, 200); } catch { excerpt = ''; }
           }
-          matches.push({ sender: m.sender?.name || null, excerpt });
+          matches.push({
+            sender: m.sender?.name || null,
+            performative: m.performative || 'inform',
+            excerpt
+          });
           if (matches.length >= limit) break;
         }
         this._sendResult(socket, id, { count: matches.length, previews: matches });

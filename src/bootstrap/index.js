@@ -98,9 +98,9 @@ const FIPA_REMINDER_INLINE = FIPA_REMINDER.replace(/\n+/g, '. ');
 //                     (additionalContext on the user turn).
 //   Stop:             any pending message at turn end — block the stop with
 //                     a continuation reason so Claude drains on the next turn.
-//   PostToolUse:      mid-turn interrupt for `request` performatives only;
+//   PostToolUse:      mid-turn interrupt for any pending performative,
 //                     announced at most once per arrival (server marks via
-//                     bukowski/peek_unannounced_requests).
+//                     bukowski/peek_unannounced_messages).
 //
 // Resolved once at module load; passed via --settings JSON so each spawned
 // Claude agent gets event-driven delivery without PTY-injected text.

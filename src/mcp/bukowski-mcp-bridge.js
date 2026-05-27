@@ -604,11 +604,34 @@ async function handleRequest(request) {
             params: augmentedParams
           });
 
-          sendToStdout({
-            jsonrpc: '2.0',
-            id,
-            result: response.result || response.error
-          });
+          // MCP tool responses must be `{content: [...], isError?}`. Stuffing
+          // the raw `error` object into `result` produced a shape Claude Code
+          // renders as "completed with no output" — server errors (e.g.
+          // "Unknown agent" when the federation roster is stale at the moment
+          // of an fipa_* call) were invisible to the sender, looking like
+          // silent success. Wrap errors in a proper isError content payload.
+          if (response.result) {
+            sendToStdout({ jsonrpc: '2.0', id, result: response.result });
+          } else if (response.error) {
+            const msg = response.error.message || JSON.stringify(response.error);
+            sendToStdout({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                content: [{ type: 'text', text: `bukowski error: ${msg}` }],
+                isError: true
+              }
+            });
+          } else {
+            sendToStdout({
+              jsonrpc: '2.0',
+              id,
+              result: {
+                content: [{ type: 'text', text: 'bukowski returned no result and no error' }],
+                isError: true
+              }
+            });
+          }
         } catch (err) {
           sendToStdout({
             jsonrpc: '2.0',
