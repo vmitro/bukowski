@@ -1,105 +1,32 @@
 #!/usr/bin/env node
-// PostToolUse hook for Claude Code agents launched by bukowski.
+// PostToolUse hook for Claude Code agents launched by bukowski — DISABLED.
 //
-// Fires after every tool call during a turn. Used for *mid-turn interrupts*
-// for every FIPA performative — restricting it to `request` made `query_if`,
-// `query_ref`, `inform`, `cfp` etc. invisible until the next Stop flush, which
-// looked like delivery loss that only cleared when senders swapped to
-// `request`. Each message is announced at most once per arrival; the server
-// marks it via `bukowski/peek_unannounced_messages` so subsequent PostToolUse
-// calls in the same turn don't re-announce.
+// This hook used to inject `additionalContext` *mid-turn* (after a tool call,
+// before the turn ended) to surface pending FIPA performatives between tool
+// steps. That collided with extended/interleaved thinking: a single assistant
+// turn carries multiple `thinking` blocks that must be re-sent verbatim, with
+// their signatures intact, on every continuation request *within* that turn.
+// Injecting context into the middle of such a turn made Claude Code re-emit the
+// open assistant message with an altered thinking block, and the API rejected
+// the next request with:
 //
-// Output: when there's at least one unannounced request, write JSON
-// `{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "..."}}`
-// — Claude Code feeds `additionalContext` into the next inference call so the
-// agent sees the request between tool steps.
+//   400 messages.N.content.M: `thinking` or `redacted_thinking` blocks in the
+//   latest assistant message cannot be modified.
 //
-// Quietly no-ops on missing env, broken socket, or any error.
+// (Note: this is NOT the empty-text-after-image-paste trigger from
+// anthropics/claude-code#50375 — that pattern never appears in our transcripts.
+// The mid-turn injection below was our own trigger for the same error class.)
+//
+// Delivery now happens only at safe turn boundaries: the Stop hook blocks the
+// stop and passes pending messages as the continuation reason (the turn is
+// closed there, so no thinking block needs preserving), and UserPromptSubmit
+// covers messages already pending when a prompt is submitted. Both already peek
+// every performative, so nothing is lost except sub-turn latency.
+//
+// The script is kept as a quiet no-op so that agents still running with the
+// older `--settings` (which references this path) degrade safely the next time
+// the hook fires — the file is re-read from disk on each invocation.
 
 'use strict';
 
-const net = require('net');
-const fs = require('fs');
-
-const HOOK_TIMEOUT_MS = parseInt(process.env.BUKOWSKI_HOOK_TIMEOUT_MS, 10) || 600;
-
-function quietExit() { process.exit(0); }
-
-const agentId = process.env.BUKOWSKI_AGENT_ID;
-const socketPath = process.env.BUKOWSKI_MCP_SOCKET;
-if (!agentId || !socketPath) quietExit();
-try { if (!fs.existsSync(socketPath)) quietExit(); } catch { quietExit(); }
-
-// Drain stdin (Claude Code passes the tool-event JSON; we don't need it).
-process.stdin.on('data', () => {});
-process.stdin.on('error', () => {});
-process.stdin.resume();
-
-const overall = setTimeout(quietExit, HOOK_TIMEOUT_MS);
-
-const sock = net.createConnection(socketPath);
-let buf = '';
-let nextId = 1;
-const pending = new Map();
-
-function rpc(method, params) {
-  return new Promise((resolve, reject) => {
-    const id = nextId++;
-    pending.set(id, { resolve, reject });
-    sock.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-  });
-}
-
-sock.on('error', quietExit);
-sock.on('data', (chunk) => {
-  buf += chunk.toString('utf8');
-  let nl;
-  while ((nl = buf.indexOf('\n')) >= 0) {
-    const line = buf.slice(0, nl);
-    buf = buf.slice(nl + 1);
-    if (!line.trim()) continue;
-    let msg;
-    try { msg = JSON.parse(line); } catch { continue; }
-    const p = msg.id != null ? pending.get(msg.id) : null;
-    if (p) {
-      pending.delete(msg.id);
-      if (msg.error) p.reject(new Error(msg.error.message || 'rpc error'));
-      else p.resolve(msg.result);
-    }
-  }
-});
-
-sock.once('connect', async () => {
-  try {
-    await rpc('initialize', { agentId });
-    const peek = await rpc('bukowski/peek_unannounced_messages', { agentId });
-    sock.end();
-    clearTimeout(overall);
-
-    const count = peek?.count || 0;
-    if (count <= 0) quietExit();
-
-    const previews = (peek.previews || []).map((p) => {
-      const sender = p.sender || 'unknown';
-      const perf = p.performative || 'inform';
-      const excerpt = (p.excerpt || '').replace(/\s+/g, ' ');
-      return `  - [${perf}] from ${sender}: ${excerpt}`;
-    }).join('\n');
-
-    const text = [
-      `[bukowski FIPA — mid-turn interrupt] ${count} pending message(s) require your attention.`,
-      'Call mcp__bukowski__get_pending_messages now to handle them before continuing your task.',
-      previews
-    ].filter(Boolean).join('\n');
-
-    process.stdout.write(JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'PostToolUse',
-        additionalContext: text
-      }
-    }));
-    quietExit();
-  } catch {
-    quietExit();
-  }
-});
+process.exit(0);

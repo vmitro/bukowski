@@ -431,15 +431,15 @@ class MCPServer extends EventEmitter {
 
       case 'bukowski/peek_unannounced_messages':
       case 'bukowski/peek_unannounced_requests': {
-        // Atomic read+mark used by the Claude Code PostToolUse hook to deliver
-        // mid-turn interrupts. Every FIPA performative qualifies — earlier the
-        // filter was restricted to `request`, which silently held `query-if`,
-        // `query-ref`, `inform`, `cfp`, etc. in the queue until the next Stop
-        // hook flushed them all at once (looked like a delivery bug that
-        // mysteriously cleared when the sender swapped to `request`). The
-        // `_midTurnAnnounced` flag still dedupes per arrival, so subsequent
-        // PostToolUse calls in the same turn don't re-announce. The legacy
-        // method name is kept as an alias so an older hook binary doesn't break.
+        // Atomic read+mark formerly used by the Claude Code PostToolUse hook to
+        // deliver mid-turn interrupts. That hook is no longer registered — it
+        // modified the open assistant turn's thinking blocks and tripped API 400
+        // "`thinking` blocks ... cannot be modified" under interleaved thinking
+        // (see mcp/hooks/posttool-use.js). Delivery is now Stop/UserPromptSubmit
+        // only, both via peek_messages at turn boundaries. This method (and its
+        // legacy `_requests` alias) is retained as a harmless no-op endpoint so a
+        // stale hook binary still running with the old --settings doesn't error;
+        // the `_midTurnAnnounced` dedupe flag is no longer consulted elsewhere.
         const targetId = params?.agentId || clientState.agentId;
         const queue = (targetId && this.messageQueues.get(targetId)) || [];
         const limit = Math.max(1, Math.min(10, params?.limit || 5));

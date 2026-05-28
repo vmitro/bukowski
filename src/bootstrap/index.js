@@ -98,15 +98,18 @@ const FIPA_REMINDER_INLINE = FIPA_REMINDER.replace(/\n+/g, '. ');
 //                     (additionalContext on the user turn).
 //   Stop:             any pending message at turn end — block the stop with
 //                     a continuation reason so Claude drains on the next turn.
-//   PostToolUse:      mid-turn interrupt for any pending performative,
-//                     announced at most once per arrival (server marks via
-//                     bukowski/peek_unannounced_messages).
+//
+// A PostToolUse hook used to inject pending performatives *mid-turn*, but that
+// modified the open assistant turn's thinking blocks and triggered API 400
+// "`thinking` blocks ... cannot be modified" errors under interleaved thinking.
+// It is no longer registered (see mcp/hooks/posttool-use.js); the Stop hook
+// already peeks every performative at the safe turn boundary, so delivery is
+// intact — only sub-turn latency is given up.
 //
 // Resolved once at module load; passed via --settings JSON so each spawned
 // Claude agent gets event-driven delivery without PTY-injected text.
 const FIPA_CLAUDE_USERPROMPT_HOOK = path.resolve(__dirname, '..', 'mcp', 'hooks', 'userprompt-submit.js');
 const FIPA_CLAUDE_STOP_HOOK = path.resolve(__dirname, '..', 'mcp', 'hooks', 'stop.js');
-const FIPA_CLAUDE_POSTTOOL_HOOK = path.resolve(__dirname, '..', 'mcp', 'hooks', 'posttool-use.js');
 const FIPA_CLAUDE_SETTINGS_JSON = JSON.stringify({
   hooks: {
     UserPromptSubmit: [
@@ -122,13 +125,6 @@ const FIPA_CLAUDE_SETTINGS_JSON = JSON.stringify({
           { type: 'command', command: `node ${FIPA_CLAUDE_STOP_HOOK}` }
         ]
       }
-    ],
-    PostToolUse: [
-      {
-        hooks: [
-          { type: 'command', command: `node ${FIPA_CLAUDE_POSTTOOL_HOOK}` }
-        ]
-      }
     ]
   }
 });
@@ -140,8 +136,7 @@ function createAgentTypes(claudePath, codexPath) {
   const claudeArgs = claudeEntrypointExists ? [claudePath] : [];
   const claudeHookArgs = (
     fs.existsSync(FIPA_CLAUDE_USERPROMPT_HOOK) &&
-    fs.existsSync(FIPA_CLAUDE_STOP_HOOK) &&
-    fs.existsSync(FIPA_CLAUDE_POSTTOOL_HOOK)
+    fs.existsSync(FIPA_CLAUDE_STOP_HOOK)
   ) ? ['--settings', FIPA_CLAUDE_SETTINGS_JSON] : [];
 
   return {
