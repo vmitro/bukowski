@@ -633,6 +633,14 @@ class InputRouter {
    * Handle insert mode input - pass directly to agent
    */
   handleInsertMode(data) {
+    // PageUp/PageDown scroll the focused buffer instead of reaching the agent,
+    // so you can review scrollback without leaving insert mode.
+    if (data === '\x1b[5~') {
+      return { action: 'scroll_page_up' };
+    }
+    if (data === '\x1b[6~') {
+      return { action: 'scroll_page_down' };
+    }
     return this.passToAgent(data);
   }
 
