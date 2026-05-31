@@ -30,6 +30,12 @@ class MCPServer extends EventEmitter {
     this.socketPath = null;
     this.clients = new Map();  // socket -> { agentId, buffer }
 
+    // agentId -> socket for connections that declared role:'channel' at
+    // initialize (the channel-only plugin server). notifyNewMessage prefers
+    // these so the channel push reaches the connection Claude Code actually
+    // loaded as a channel, not the bare tools connection of the same agent.
+    this.channelSockets = new Map();
+
     // Define available tools
     this.tools = this._defineTools();
 
@@ -375,9 +381,30 @@ class MCPServer extends EventEmitter {
         }
 
         clientState.agentId = assignedId;
+
+        // A role:'channel' connection (the channel-only plugin server) is where
+        // channel pushes for this agent must go. Track it separately and clean
+        // up on close so a reconnect re-registers fresh.
+        if (params?.role === 'channel' && assignedId) {
+          this.channelSockets.set(assignedId, socket);
+          socket.once('close', () => {
+            if (this.channelSockets.get(assignedId) === socket) {
+              this.channelSockets.delete(assignedId);
+            }
+          });
+        }
+
         this._sendResult(socket, id, {
           protocolVersion: '2024-11-05',
-          capabilities: { tools: { listChanged: true } },
+          // experimental['claude/channel'] advertises Claude Code "channels":
+          // it lets us push notifications/claude/channel events that the client
+          // injects out-of-turn (a <channel> block), waking the agent without a
+          // PTY keystroke. A direct socket client sees this; the bridge declares
+          // it again on its own initialize since that is what Claude Code reads.
+          capabilities: {
+            tools: { listChanged: true },
+            experimental: { 'claude/channel': {} }
+          },
           serverInfo: { name: 'bukowski-mcp', version: '1.0.0' },
           assignedAgentId: assignedId
         });
@@ -411,8 +438,15 @@ class MCPServer extends EventEmitter {
         // fall back to the client's own identity. Not exposed as an MCP tool.
         const targetId = params?.agentId || clientState.agentId;
         const queue = (targetId && this.messageQueues.get(targetId)) || [];
+        // Skip entries already injected via the channel push (the agent saw them
+        // inline as a <channel> block) so the hooks don't re-surface and
+        // double-deliver. This relies on the channel being reliable — it is on
+        // the dangerous-flag path (one connection that actually injects). If a
+        // push didn't land (dead connection) the entry stays unmarked and the
+        // hook still delivers it; get_pending_messages always returns everything.
+        const visible = queue.filter((m) => !m._channelDelivered);
         const limit = Math.max(1, Math.min(20, params?.limit || 5));
-        const previews = queue.slice(0, limit).map((m) => {
+        const previews = visible.slice(0, limit).map((m) => {
           let excerpt = '';
           if (typeof m.content === 'string') {
             excerpt = m.content.length > 160 ? m.content.slice(0, 160) + '…' : m.content;
@@ -425,7 +459,7 @@ class MCPServer extends EventEmitter {
             excerpt
           };
         });
-        this._sendResult(socket, id, { count: queue.length, previews });
+        this._sendResult(socket, id, { count: visible.length, previews });
         break;
       }
 
@@ -788,7 +822,7 @@ class MCPServer extends EventEmitter {
    * @private
    */
   _sendNotification(socket, method, params) {
-    if (!socket || socket.destroyed) return;
+    if (!socket || socket.destroyed) return false;
     const notification = JSON.stringify({
       jsonrpc: '2.0',
       method,
@@ -796,23 +830,123 @@ class MCPServer extends EventEmitter {
     }) + '\n';
     try {
       socket.write(notification);
+      return true;
     } catch (err) {
       // Socket might be closed, ignore
+      return false;
     }
   }
 
   /**
-   * Notify an agent that they have a new message
-   * Uses tools/list_changed notification - clients will re-fetch tools
+   * Notify an agent that they have a new message.
+   *
+   * Pushes a Claude Code "channel" event (notifications/claude/channel). When
+   * the client negotiated the capability and was launched with the channel
+   * enabled, it injects the content as an out-of-turn <channel> block, waking
+   * the agent immediately without a PTY keystroke. If the client doesn't
+   * understand the notification (older build, unsupported backend, or channels
+   * not enabled), it's silently dropped — the message is still queued for
+   * get_pending_messages and the Stop hook still peeks it at turn end, so
+   * delivery degrades gracefully rather than failing.
+   *
+   * The previous tools/list_changed notification is gone: it never reached the
+   * client (the stdio bridge dropped server-initiated notifications) and
+   * re-fetching the tool list on every message was the wrong signal anyway.
+   *
    * @param {string} agentId
    * @param {Object} message - The FIPA message
    */
   notifyNewMessage(agentId, message) {
-    const socket = this._findSocketForAgent(agentId);
-    if (socket) {
-      // Send standard MCP notification that clients know how to handle
-      this._sendNotification(socket, 'notifications/tools/list_changed', {});
+    // Channels are a Claude Code feature; codex/gemini clients don't implement
+    // notifications/claude/channel and just ignore it. Only push to claude.
+    if (!this._isClaudeAgent(agentId)) return;
+    // Broadcast the channel event to EVERY connection this agent holds: the
+    // channel connection (plugin server, role=channel) injects it as a <channel>
+    // block; a tools-only connection ignores the unknown notification. We don't
+    // try to pick "the" right socket because the dual-connection plugin setup
+    // makes that brittle — a wrong guess silently drops the push. Broadcasting
+    // is harmless and robust.
+    //
+    // This push is PURELY ADDITIVE. Delivery is guaranteed by the queue + the
+    // Stop/UserPromptSubmit hooks; a channel push is fire-and-forget with no ack,
+    // so we never mark anything "delivered" here. If the channel injects too, the
+    // consumer can dedup against the inbox via the channel's inbox_id meta.
+    const sockets = new Set();
+    const chan = this.channelSockets.get(agentId);
+    if (chan) sockets.add(chan);
+    for (const [sock, st] of this.clients) {
+      if (st.agentId === agentId) sockets.add(sock);
     }
+    if (sockets.size === 0) return;
+    const { content, meta } = this._buildChannelEvent(agentId, message);
+    let sent = false;
+    for (const sock of sockets) {
+      if (this._sendNotification(sock, 'notifications/claude/channel', { content, meta })) sent = true;
+    }
+    // Mark delivered so the Stop/UserPromptSubmit hooks don't re-surface (and
+    // double-deliver) what the channel already injected as a <channel> block.
+    // Only when a write actually landed: a dead connection means the channel
+    // didn't carry it, so the hook safety net must still fire. The bare
+    // (dangerous-flag) channel is a single reliable connection, so this holds;
+    // get_pending_messages still returns everything on an explicit pull.
+    if (sent) message._channelDelivered = true;
+  }
+
+  /**
+   * Whether an agent id refers to a claude agent (session or external bridge).
+   * Used to limit channel pushes to clients that actually support them.
+   * @private
+   */
+  _isClaudeAgent(agentId) {
+    const sessionAgent = this.session.getAgent?.(agentId);
+    if (sessionAgent) return sessionAgent.type === 'claude';
+    const external = this.externalAgents.get(agentId);
+    if (external) return external.type === 'claude';
+    return false;
+  }
+
+  /**
+   * Build the {content, meta} for a channel event from a FIPA message.
+   * meta keys must be identifiers (letters/digits/underscore) and values must
+   * be strings — the client turns them into <channel> tag attributes and
+   * silently drops anything else. The `source` attribute is added by the
+   * client from our server name ("bukowski"), so we don't set it here.
+   * @private
+   */
+  _buildChannelEvent(agentId, message) {
+    const sender = message?.sender?.name || 'unknown';
+    const perf = message?.performative || 'inform';
+    const convId = message?.conversationId;
+
+    let body;
+    if (typeof message?.content === 'string') {
+      body = message.content;
+    } else if (message?.content == null) {
+      body = '';
+    } else {
+      body = JSON.stringify(message.content, null, 2);
+    }
+
+    // Keep short messages inline; for long ones, point at get_pending_messages
+    // rather than dumping a wall of text into the agent's context.
+    const MAX_INLINE = 1000;
+    const truncated = body.length > MAX_INLINE;
+    const shown = truncated ? `${body.slice(0, MAX_INLINE)}…` : body;
+
+    const lines = [`FIPA ${perf} from ${sender}:`];
+    if (shown) lines.push('', shown);
+    if (truncated) lines.push('', '(truncated — call get_pending_messages for the full text)');
+    lines.push('', 'Reply with the fipa_* tools.');
+
+    const meta = { sender, performative: perf };
+    // The inbox id keys this push to its queue entry, so a consumer can dedup
+    // the channel block against a later get_pending_messages pull (same _id).
+    if (message?._id) meta.inbox_id = String(message._id);
+    if (convId) meta.conversation_id = String(convId);
+    const queue = this.messageQueues.get(agentId);
+    if (queue) meta.queue_size = String(queue.length);
+
+    return { content: lines.join('\n'), meta };
   }
 
   /**

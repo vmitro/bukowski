@@ -135,6 +135,23 @@ function getDiagnostics() {
   return lines.join('\n');
 }
 
+// When this bridge is the channel-only server bundled in the bukowski channel
+// plugin (loaded via `claude --channels plugin:...`), it carries the channel
+// push but exposes NO tools — the tools come from the separate bare
+// mcpServers.bukowski entry. Keeping the two servers split means the channel
+// is purely additive: if the plugin path is misconfigured, tools are
+// unaffected. bukowski routes channel notifications to the role=channel socket.
+//
+// The role is signalled BOTH as a CLI arg (--role=channel) and the env var.
+// The arg is authoritative because Claude Code's channel loader
+// (`--channels plugin:...`) drops a plugin .mcp.json's declared `env` when it
+// spawns the server, but always forwards `args`. With env-only signalling the
+// channel server silently ran in tools mode: it registered as a duplicate
+// tools connection (no channel socket) AND advertised the full tool set, so
+// Claude cycled it (~20s restarts) as a malformed channel.
+const CHANNEL_ROLE = process.env.BUKOWSKI_BRIDGE_ROLE === 'channel'
+  || process.argv.includes('--role=channel');
+
 // Agent ID assigned by bukowski
 let agentId = null;
 let agentType = null;
@@ -289,7 +306,8 @@ function tryConnectToBukowski() {
         agentType,
         agentId: sessionAgentId,      // null if external, set if session agent
         ancestorPids: getAncestorPids(), // For session agent matching
-        cwd: process.cwd()            // For external-agent host naming
+        cwd: process.cwd(),           // For external-agent host naming
+        role: CHANNEL_ROLE ? 'channel' : undefined // routes channel pushes here
       }
     }) + '\n';
     socket.write(initMsg);
@@ -335,6 +353,7 @@ function processSocketBuffer() {
       // Check for agentId in init response
       if (response.id === '__init__' && response.result?.assignedAgentId) {
         agentId = response.result.assignedAgentId;
+        continue;
       }
 
       // Route to pending request
@@ -342,6 +361,16 @@ function processSocketBuffer() {
         const { resolve } = pendingRequests.get(response.id);
         pendingRequests.delete(response.id);
         resolve(response);
+        continue;
+      }
+
+      // Server-initiated notification (has a method, no matching request):
+      // forward it verbatim to the agent over stdio. This is the path that
+      // carries notifications/claude/channel pushes. Without this the bridge
+      // dropped every server->client message, which is why channel events
+      // (and the old tools/list_changed) never reached Claude Code.
+      if (response.method && (response.id === undefined || response.id === null)) {
+        sendToStdout(response);
       }
     } catch {
       // Ignore parse errors
@@ -561,7 +590,16 @@ async function handleRequest(request) {
         id,
         result: {
           protocolVersion: '2024-11-05',
-          capabilities: { tools: {} },
+          // experimental['claude/channel'] advertises Claude Code "channels".
+          // This response is what Claude Code's MCP client actually reads (it
+          // talks to the bridge, not the bukowski socket directly), so the
+          // capability MUST be declared here for channel pushes to be accepted.
+          // Unknown capability keys are ignored by older clients, so this is
+          // safe to always send.
+          capabilities: {
+            tools: {},
+            experimental: { 'claude/channel': {} }
+          },
           serverInfo: { name: 'bukowski-mcp-bridge', version: '1.0.0' }
         }
       });
@@ -575,11 +613,13 @@ async function handleRequest(request) {
       return;
 
     case 'tools/list':
-      // Return static tools immediately (don't wait for bukowski)
+      // Return static tools immediately (don't wait for bukowski). The
+      // channel-only role exposes no tools so it doesn't duplicate the bare
+      // server's fipa_* tools under a second namespace.
       sendToStdout({
         jsonrpc: '2.0',
         id,
-        result: { tools: TOOLS }
+        result: { tools: CHANNEL_ROLE ? [] : TOOLS }
       });
       // Try connecting in background
       tryConnectToBukowski();

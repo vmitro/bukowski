@@ -9,6 +9,7 @@ scripts=(
   "$here/01-require.sh"
   "$here/02-boot.js"
   "$here/03-federation.js"
+  "$here/05-channels.js"
 )
 
 failed=0

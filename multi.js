@@ -15,6 +15,7 @@ const {
   createAgentTypes,
   getFIPAPromptArgs,
   resolveAgentType,
+  channelsEnabled,
   loadQuotes,
   showSplash,
   parseArgs
@@ -604,7 +605,14 @@ terminal.registerSignalHandlers();
       // the sender's name + content directly. Calling agent.write() on a
       // ChatAgent would shove "[FIPA inform from X]" into the user's
       // input buffer, which is what the previous version did wrong.
-      if (agent?.pty && message.sender?.name !== to) {
+      // claude is woken out-of-turn by the notifications/claude/channel push
+      // (queueMessage above), which injects the message as a <channel> block —
+      // so the primitive PTY keystroke nudge is suppressed for it (that injection
+      // is the whole point of channels). codex/gemini have no channel path, so
+      // they always get the PTY nudge. (If channels are disabled via
+      // BUKOWSKI_NO_CHANNELS, claude falls back to the PTY nudge too.)
+      const claudeViaChannel = agent?.type === 'claude' && channelsEnabled();
+      if (agent?.pty && message.sender?.name !== to && !claudeViaChannel) {
         let prompt;
         if (agent.type === 'claude') {
           const sender = message.sender?.name || 'unknown';

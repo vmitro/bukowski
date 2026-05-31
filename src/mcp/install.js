@@ -21,6 +21,38 @@ const CONFIG_PATHS = {
 // even though every later boot would otherwise reinstall.
 const AUTO_INSTALL_MARKER = path.join(os.homedir(), '.bukowski', '.no-auto-install');
 
+// --- Claude Code channel plugin --------------------------------------------
+// To load the bukowski channel via the QUIET `--channels plugin:...@...` flag
+// (instead of `--dangerously-load-development-channels`, which prints a notice
+// every launch) the channel must come from a plugin in a known marketplace.
+// We generate a tiny local marketplace + plugin whose ONLY job is to provide a
+// channel-only MCP server (the same bridge, role=channel). The plugin is purely
+// additive: the FIPA tools still come from the bare mcpServers.bukowski entry,
+// so a misconfigured plugin can never remove tools — worst case the channel
+// just doesn't load and we fall back to the dangerous flag.
+const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
+const CHANNEL_ROOT = path.join(os.homedir(), '.bukowski', 'channel-plugin');
+const CHANNEL_MARKETPLACE = 'bukowski';
+const CHANNEL_PLUGIN = 'bukowski-channel';
+const CHANNEL_PLUGIN_KEY = `${CHANNEL_PLUGIN}@${CHANNEL_MARKETPLACE}`;
+const CHANNEL_PLUGIN_REF = `plugin:${CHANNEL_PLUGIN_KEY}`;
+const CHANNEL_PLUGIN_DIR = path.join(CHANNEL_ROOT, 'plugins', CHANNEL_PLUGIN);
+const CHANNEL_PLUGIN_VERSION = '1.0.0';
+
+// Claude Code does NOT load an enabled plugin from our source marketplace dir;
+// it loads a CACHE COPY recorded in installed_plugins.json. If that record
+// survives but the cache dir is gone, Claude treats the plugin as installed,
+// finds nothing at installPath, and silently loads no channel server (no error,
+// /mcp just omits it). We therefore populate the cache + records ourselves so
+// the channel is deterministic and self-healing rather than relying on Claude's
+// fragile lazy directory-source install. All under the (real) user's home.
+const CLAUDE_PLUGINS_DIR = path.join(os.homedir(), '.claude', 'plugins');
+const CLAUDE_PLUGIN_CACHE_DIR = path.join(
+  CLAUDE_PLUGINS_DIR, 'cache', CHANNEL_MARKETPLACE, CHANNEL_PLUGIN, CHANNEL_PLUGIN_VERSION
+);
+const CLAUDE_KNOWN_MARKETPLACES = path.join(CLAUDE_PLUGINS_DIR, 'known_marketplaces.json');
+const CLAUDE_INSTALLED_PLUGINS = path.join(CLAUDE_PLUGINS_DIR, 'installed_plugins.json');
+
 /**
  * Read JSON config file
  */
@@ -234,6 +266,189 @@ function uninstallGemini() {
 }
 
 /**
+ * Write the local marketplace + channel-only plugin files to disk (idempotent).
+ * The plugin's MCP server runs the SAME bridge with role=channel, by ABSOLUTE
+ * path (not ${CLAUDE_PLUGIN_ROOT}) so it works regardless of where/whether the
+ * plugin dir is copied on install.
+ * @private
+ */
+function _writeChannelPluginFiles() {
+  const marketplaceManifest = {
+    name: CHANNEL_MARKETPLACE,
+    owner: { name: 'bukowski' },
+    plugins: [
+      {
+        name: CHANNEL_PLUGIN,
+        source: `./plugins/${CHANNEL_PLUGIN}`,
+        description: 'bukowski FIPA channel — pushes inbound agent messages into Claude Code out-of-turn'
+      }
+    ]
+  };
+  const pluginManifest = {
+    name: CHANNEL_PLUGIN,
+    description: 'bukowski FIPA channel (push-only MCP server)',
+    version: CHANNEL_PLUGIN_VERSION
+  };
+  const mcpManifest = {
+    mcpServers: {
+      [CHANNEL_PLUGIN]: {
+        command: 'node',
+        // --role=channel is the AUTHORITATIVE signal: Claude Code's channel
+        // loader forwards args but drops a plugin's declared `env`, so an
+        // env-only role left the server running in tools mode (duplicate
+        // connection, full tool surface) and Claude cycled it. `env` is kept as
+        // a harmless fallback for any path that does honor it.
+        args: [BRIDGE_SCRIPT, '--role=channel'],
+        env: { BUKOWSKI_AGENT_TYPE: 'claude', BUKOWSKI_BRIDGE_ROLE: 'channel' }
+      }
+    }
+  };
+
+  fs.mkdirSync(path.join(CHANNEL_ROOT, '.claude-plugin'), { recursive: true });
+  fs.mkdirSync(path.join(CHANNEL_PLUGIN_DIR, '.claude-plugin'), { recursive: true });
+  writeJSON(path.join(CHANNEL_ROOT, '.claude-plugin', 'marketplace.json'), marketplaceManifest);
+  writeJSON(path.join(CHANNEL_PLUGIN_DIR, '.claude-plugin', 'plugin.json'), pluginManifest);
+  // .mcp.json lives at the PLUGIN ROOT (not inside .claude-plugin/).
+  writeJSON(path.join(CHANNEL_PLUGIN_DIR, '.mcp.json'), mcpManifest);
+}
+
+/**
+ * Register + enable the channel plugin in ~/.claude/settings.json (additive).
+ * We deliberately do NOT write managed-settings/allowedChannelPlugins: on a
+ * personal account channels load with no allowlist, and allowedChannelPlugins
+ * would REPLACE Anthropic's default channel allowlist globally. Returns true if
+ * the file was changed.
+ * @private
+ */
+function _enableChannelPluginInSettings() {
+  const cfg = readJSON(CLAUDE_SETTINGS_PATH) || {};
+  const before = JSON.stringify(cfg);
+
+  if (!cfg.extraKnownMarketplaces) cfg.extraKnownMarketplaces = {};
+  cfg.extraKnownMarketplaces[CHANNEL_MARKETPLACE] = {
+    // 'directory' is the valid source type for a local on-disk marketplace
+    // (the 'local' value an earlier version wrote fails Claude Code's settings
+    // validation / `/doctor`).
+    source: { source: 'directory', path: CHANNEL_ROOT }
+  };
+  if (!cfg.enabledPlugins) cfg.enabledPlugins = {};
+  cfg.enabledPlugins[CHANNEL_PLUGIN_KEY] = true;
+
+  if (JSON.stringify(cfg) === before) return false;
+  writeJSON(CLAUDE_SETTINGS_PATH, cfg);
+  return true;
+}
+
+/**
+ * Recursively copy a directory (dependency-free; the plugin is two small files).
+ * @private
+ */
+function _copyDirSync(src, dst) {
+  fs.mkdirSync(dst, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dst, entry.name);
+    if (entry.isDirectory()) _copyDirSync(s, d);
+    else fs.copyFileSync(s, d);
+  }
+}
+
+/**
+ * Populate Claude Code's plugin cache + install records for the channel plugin
+ * so it actually loads. Enabling it in settings.json only declares intent;
+ * Claude loads the plugin's MCP server from the cache copy named in
+ * installed_plugins.json, NOT from our source marketplace. We do that install
+ * ourselves (idempotent, merge-preserving other plugins) so a wiped or never-
+ * created cache self-heals on the next `bukowski-mcp install` / launch instead
+ * of leaving a dangling record that makes the channel silently vanish.
+ * @private
+ */
+function _installChannelPluginCache() {
+  // 1. Mirror the generated plugin into Claude's cache installPath.
+  _copyDirSync(CHANNEL_PLUGIN_DIR, CLAUDE_PLUGIN_CACHE_DIR);
+
+  // 2. Make the directory marketplace known to Claude (preserve other entries).
+  const known = readJSON(CLAUDE_KNOWN_MARKETPLACES) || {};
+  known[CHANNEL_MARKETPLACE] = {
+    source: { source: 'directory', path: CHANNEL_ROOT },
+    installLocation: CHANNEL_ROOT
+  };
+  writeJSON(CLAUDE_KNOWN_MARKETPLACES, known);
+
+  // 3. Record the install pointing at the cache copy (preserve other plugins;
+  //    keep a stable installedAt across re-runs so this stays idempotent).
+  const installed = readJSON(CLAUDE_INSTALLED_PLUGINS) || { version: 2, plugins: {} };
+  if (!installed.plugins || typeof installed.plugins !== 'object') installed.plugins = {};
+  const prev = Array.isArray(installed.plugins[CHANNEL_PLUGIN_KEY])
+    ? installed.plugins[CHANNEL_PLUGIN_KEY][0] : null;
+  installed.plugins[CHANNEL_PLUGIN_KEY] = [{
+    scope: 'user',
+    installPath: CLAUDE_PLUGIN_CACHE_DIR,
+    version: CHANNEL_PLUGIN_VERSION,
+    installedAt: prev?.installedAt || new Date().toISOString()
+  }];
+  writeJSON(CLAUDE_INSTALLED_PLUGINS, installed);
+}
+
+/**
+ * Ensure the quiet channel plugin is set up, returning the `--channels` ref to
+ * launch with (e.g. "plugin:bukowski-channel@bukowski"), or null if it should
+ * not be used (opted out, uninstall marker, or — unless forced — claude isn't
+ * in use). Idempotent and safe to call on every launch.
+ * @param {boolean} [force] - explicit install: ignore opt-outs and the marker.
+ */
+function ensureChannelPlugin(force = false) {
+  if (!force) {
+    if (process.env.BUKOWSKI_NO_CHANNEL_PLUGIN === '1' || process.env.BUKOWSKI_NO_CHANNEL_PLUGIN === 'true') return null;
+    if (process.env.BUKOWSKI_NO_AUTO_INSTALL) return null;
+    try { if (fs.existsSync(AUTO_INSTALL_MARKER)) return null; } catch { /* ignore */ }
+    if (!_hasAgent('claude')) return null;
+  }
+  try {
+    _writeChannelPluginFiles();
+    _enableChannelPluginInSettings();
+    _installChannelPluginCache();
+    return CHANNEL_PLUGIN_REF;
+  } catch {
+    return null; // any failure falls back to the dangerous-flag path
+  }
+}
+
+/**
+ * Read-only: return the `--channels` ref if the channel plugin is enabled in
+ * claude settings, else null. Used to compute launch args WITHOUT side effects
+ * (so importing/spawning never writes config — only the explicit auto-install
+ * step does). Setup happens in ensureChannelPlugin via autoInstallIfNeeded.
+ */
+function channelPluginRef() {
+  const cfg = readJSON(CLAUDE_SETTINGS_PATH);
+  return cfg?.enabledPlugins?.[CHANNEL_PLUGIN_KEY] === true ? CHANNEL_PLUGIN_REF : null;
+}
+
+/**
+ * Remove the channel plugin: drop the settings keys and delete generated files.
+ */
+function uninstallChannelPlugin() {
+  let changed = false;
+  const cfg = readJSON(CLAUDE_SETTINGS_PATH);
+  if (cfg) {
+    if (cfg.extraKnownMarketplaces?.[CHANNEL_MARKETPLACE]) {
+      delete cfg.extraKnownMarketplaces[CHANNEL_MARKETPLACE];
+      if (Object.keys(cfg.extraKnownMarketplaces).length === 0) delete cfg.extraKnownMarketplaces;
+      changed = true;
+    }
+    if (cfg.enabledPlugins?.[CHANNEL_PLUGIN_KEY] !== undefined) {
+      delete cfg.enabledPlugins[CHANNEL_PLUGIN_KEY];
+      if (Object.keys(cfg.enabledPlugins).length === 0) delete cfg.enabledPlugins;
+      changed = true;
+    }
+    if (changed) writeJSON(CLAUDE_SETTINGS_PATH, cfg);
+  }
+  try { fs.rmSync(CHANNEL_ROOT, { recursive: true, force: true }); } catch { /* ignore */ }
+  return changed;
+}
+
+/**
  * Install bukowski MCP server for all agents
  */
 function installAll() {
@@ -244,7 +459,8 @@ function installAll() {
   const results = {
     claude: { installed: false, error: null },
     codex: { installed: false, error: null },
-    gemini: { installed: false, error: null }
+    gemini: { installed: false, error: null },
+    channelPlugin: { installed: false, error: null }
   };
 
   try {
@@ -263,6 +479,15 @@ function installAll() {
     results.gemini.installed = installGemini();
   } catch (err) {
     results.gemini.error = err.message;
+  }
+
+  // Quiet `--channels plugin:...` path: generate the plugin, enable it in user
+  // settings, AND populate Claude's plugin cache + install records so it loads.
+  // force: this is an explicit install, so ignore the markers/agent check.
+  try {
+    results.channelPlugin.installed = !!ensureChannelPlugin(true);
+  } catch (err) {
+    results.channelPlugin.error = err.message;
   }
 
   return results;
@@ -301,6 +526,12 @@ function uninstallAll() {
     results.gemini.uninstalled = uninstallGemini();
   } catch (err) {
     results.gemini.error = err.message;
+  }
+
+  try {
+    results.channelPlugin = { uninstalled: uninstallChannelPlugin() };
+  } catch (err) {
+    results.channelPlugin = { uninstalled: false, error: err.message };
   }
 
   return results;
@@ -377,6 +608,16 @@ function autoInstallIfNeeded() {
     catch (err) { summary.errors.gemini = err.message; }
   }
 
+  // Maintain the quiet channel plugin (generate files + enable in user
+  // settings, idempotent). The plugin only actually registers as a channel once
+  // it's on the effective allowlist via allowedChannelPlugins in
+  // /etc/claude-code/managed-settings.json — that managed-tier file needs root,
+  // so it's a one-time manual step (see `bukowski-mcp install` output / docs);
+  // we can't write it from here. Until then the bootstrap falls back to the
+  // dangerous flag.
+  try { summary.installed.channelPlugin = !!ensureChannelPlugin(); }
+  catch (err) { summary.errors.channelPlugin = err.message; }
+
   return summary;
 }
 
@@ -423,6 +664,18 @@ function checkStatus() {
   const geminiConfig = readJSON(CONFIG_PATHS.gemini);
   status.gemini.installed = !!geminiConfig?.mcpServers?.bukowski;
 
+  // Channel plugin (the quiet `--channels` path): enabled in claude settings
+  // AND actually present in Claude's plugin cache. Enabled-but-uncached is the
+  // silent-failure state (Claude loads no channel server), so report it as not
+  // installed rather than trusting the settings flag alone.
+  const claudeSettings = readJSON(CLAUDE_SETTINGS_PATH);
+  const channelEnabled = claudeSettings?.enabledPlugins?.[CHANNEL_PLUGIN_KEY] === true;
+  const channelCached = fs.existsSync(path.join(CLAUDE_PLUGIN_CACHE_DIR, '.mcp.json'));
+  status.channelPlugin = {
+    installed: channelEnabled && channelCached,
+    configPath: CLAUDE_SETTINGS_PATH
+  };
+
   return status;
 }
 
@@ -437,7 +690,11 @@ module.exports = {
   uninstallClaude,
   uninstallCodex,
   uninstallGemini,
+  ensureChannelPlugin,
+  channelPluginRef,
+  uninstallChannelPlugin,
   CONFIG_PATHS,
   BRIDGE_SCRIPT,
-  AUTO_INSTALL_MARKER
+  AUTO_INSTALL_MARKER,
+  CHANNEL_PLUGIN_REF
 };

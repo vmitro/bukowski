@@ -129,6 +129,16 @@ const FIPA_CLAUDE_SETTINGS_JSON = JSON.stringify({
   }
 });
 
+// Whether Claude Code channels are enabled for spawned claude agents.
+// On by default; BUKOWSKI_NO_CHANNELS=1 (or "true") falls back to the
+// PTY/Stop-hook delivery path only. Shared by the launch args and the
+// FIPA delivery code so the PTY nudge isn't sent redundantly when the
+// channel push already wakes the agent.
+function channelsEnabled() {
+  const v = process.env.BUKOWSKI_NO_CHANNELS;
+  return v !== '1' && v !== 'true';
+}
+
 // Create agent type configurations
 function createAgentTypes(claudePath, codexPath) {
   const claudeEntrypointExists = claudePath && claudePath !== 'claude' && fs.existsSync(claudePath);
@@ -139,10 +149,31 @@ function createAgentTypes(claudePath, codexPath) {
     fs.existsSync(FIPA_CLAUDE_STOP_HOOK)
   ) ? ['--settings', FIPA_CLAUDE_SETTINGS_JSON] : [];
 
+  // Claude Code "channels": opt the spawned agent into the bukowski channel so
+  // the MCP server can push notifications/claude/channel events that inject the
+  // message out-of-turn as a <channel> block — no PTY keystroke. Preferred is
+  // the QUIET plugin form `--channels plugin:bukowski-channel@bukowski` (no
+  // per-launch notice). That only registers if the plugin is on the effective
+  // channel allowlist — which for a custom plugin means `allowedChannelPlugins`
+  // in /etc/claude-code/managed-settings.json (a managed-tier key; not honored
+  // in ~/.claude/settings.json). channelPluginRef() returns the ref when the
+  // plugin is enabled; if it isn't set up we fall back to the research-preview
+  // `--dangerously-load-development-channels server:bukowski` (loads the bare
+  // connection as the channel — works, but prints a notice each launch).
+  // BUKOWSKI_NO_CHANNELS=1 disables channels entirely (PTY/Stop-hook delivery).
+  let channelArgs = [];
+  if (channelsEnabled()) {
+    let pluginRef = null;
+    try { pluginRef = require('../mcp/install').channelPluginRef(); } catch { /* fall back */ }
+    channelArgs = pluginRef
+      ? ['--channels', pluginRef]
+      : ['--dangerously-load-development-channels', 'server:bukowski'];
+  }
+
   return {
     claude: {
       command: claudeCommand,
-      args: [...claudeArgs, ...claudeHookArgs],
+      args: [...claudeArgs, ...claudeHookArgs, ...channelArgs],
       name: 'Claude',
       promptFlag: '--append-system-prompt',
       getResumeArgs: (sessionId) => sessionId
@@ -294,6 +325,7 @@ module.exports = {
   createAgentTypes,
   getFIPAPromptArgs,
   resolveAgentType,
+  channelsEnabled,
 
   // Splash
   loadQuotes,

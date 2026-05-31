@@ -5,10 +5,13 @@
   "main": "multi.js",
   "bin": {
     "bukowski": "./multi.js",
-    "bukowski-single": "./single.js"
+    "bukowski-single": "./single.js",
+    "bukowski-mcp": "./bin/bukowski-mcp"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "install-mcp": "node bin/install-mcp.js",
+    "smoke": "bash scripts/smoke/run-all.sh"
   },
   "keywords": ["terminal", "viewport", "scrollback", "ink", "cli"],
   "author": "vmitro",
