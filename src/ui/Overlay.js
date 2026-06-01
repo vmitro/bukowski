@@ -526,6 +526,10 @@ function createOverlay(config) {
       const { ConversationPicker } = require('./ConversationPicker');
       return new ConversationPicker(config);
     }
+    case 'dashboard': {
+      const { DashboardOverlay } = require('./DashboardOverlay');
+      return new DashboardOverlay(config);
+    }
     default:
       return new Overlay(config);
   }

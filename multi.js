@@ -1607,6 +1607,29 @@ terminal.registerSignalHandlers();
     compositor.draw();
   }
 
+  // Open the interactive project-dashboard overlay (Ctrl+Space d)
+  function showDashboardOverlay() {
+    if (!dashboardStore) {
+      compositor.showStatusMessage?.('dashboard not available on this instance');
+      return;
+    }
+    const cols = process.stdout.columns || 80;
+    const rows = process.stdout.rows || 24;
+    const width = Math.min(80, Math.max(40, cols - 4));
+    const height = Math.min(24, Math.max(8, rows - 4));
+    overlayManager.show({
+      id: 'dashboard',
+      type: 'dashboard',
+      x: Math.floor((cols - width) / 2),
+      y: Math.floor((rows - height) / 2),
+      width,
+      height,
+      title: 'Project Dashboard',
+      store: dashboardStore,
+    });
+    compositor.draw();
+  }
+
   // Focus or create chat pane (for Ctrl+Space c)
   function focusOrCreateChatPane() {
     // Ensure we're not in legacy chat mode (pane-based now)
@@ -1631,6 +1654,10 @@ terminal.registerSignalHandlers();
   // NOTE: All handlers have been extracted to src/handlers/*
   // This function is kept as a fallback for any unextracted actions
   function handleAction(result) {
+    if (result && result.action === 'dashboard_overlay') {
+      showDashboardOverlay();
+      return;
+    }
     // All handlers extracted to:
     // - layout: focus_direction, focus_next, focus_prev, focus_chat, split_*, close_*, new_tab, etc.
     // - vim: cursor_*, scroll_*, word_*, find_char, goto_*, jump_*
@@ -1839,7 +1866,13 @@ terminal.registerSignalHandlers();
           return;
         }
 
-        // Other overlay actions just redraw
+        if (result.action === 'dashboard_close') {
+          overlayManager.hide(overlay.id);
+          compositor.draw();
+          return;
+        }
+
+        // Other overlay actions just redraw (e.g. dashboard navigation)
         compositor.draw();
         return;
       }

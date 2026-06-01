@@ -181,6 +181,10 @@ class InputRouter {
       case 'c':
         return { action: 'focus_chat' };
 
+      // Open the interactive project-dashboard overlay
+      case 'd':
+        return { action: 'dashboard_overlay' };
+
       // ACL send mode - uses visual selection if present
       case 's':
         return { action: 'acl_send_start', performative: 'inform' };
