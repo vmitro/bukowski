@@ -70,6 +70,10 @@ sock.once('connect', async () => {
   try {
     await rpc('initialize', { agentId });
     const peek = await rpc('bukowski/peek_messages', { agentId });
+    // A turn just opened — mark busy so out-of-turn <channel> pushes are
+    // suppressed (they'd corrupt this turn's open `thinking` blocks). The Stop
+    // hook reports idle when the turn ends.
+    try { await rpc('bukowski/turn_state', { agentId, state: 'busy' }); } catch { /* best effort */ }
     sock.end();
     clearTimeout(overall);
 

@@ -48,13 +48,13 @@ function start() {
     if (raw.trim()) event = JSON.parse(raw);
   } catch { /* ignore parse errors */ }
 
-  // Already in a continuation triggered by a prior block — don't block again.
-  if (event && event.stop_hook_active) quietExit();
-
-  doPeek();
+  // `stop_hook_active` => this stop is itself a continuation from a prior
+  // block; never block twice. Either way we still connect to report 'idle'
+  // (the turn is closing) so channel pushes can resume safely.
+  doPeek(!!(event && event.stop_hook_active));
 }
 
-function doPeek() {
+function doPeek(stopActive) {
   const overall = setTimeout(quietExit, HOOK_TIMEOUT_MS);
   const sock = net.createConnection(socketPath);
   let buf = '';
@@ -68,6 +68,9 @@ function doPeek() {
       sock.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     });
   }
+  // The turn is ending here — clear busy so out-of-turn <channel> pushes can
+  // resume for this (now idle) agent. Best-effort; never throws.
+  const markIdle = () => rpc('bukowski/turn_state', { agentId, state: 'idle' }).catch(() => {});
 
   sock.on('error', quietExit);
   sock.on('data', (chunk) => {
@@ -91,12 +94,31 @@ function doPeek() {
   sock.once('connect', async () => {
     try {
       await rpc('initialize', { agentId });
+
+      // Continuation stop: allow it (no double-block) but still go idle.
+      if (stopActive) {
+        await markIdle();
+        sock.end();
+        clearTimeout(overall);
+        quietExit();
+      }
+
       const peek = await rpc('bukowski/peek_messages', { agentId });
+      const count = peek?.count || 0;
+
+      if (count <= 0) {
+        // Turn ending with an empty inbox: go idle and allow the stop.
+        await markIdle();
+        sock.end();
+        clearTimeout(overall);
+        quietExit();
+      }
+
+      // Pending messages: block the stop so the agent drains them next turn.
+      // The turn continues, so we stay BUSY (no markIdle) — channel pushes
+      // remain suppressed; this Stop reason is the safe delivery surface.
       sock.end();
       clearTimeout(overall);
-
-      const count = peek?.count || 0;
-      if (count <= 0) quietExit();
 
       const previews = (peek.previews || []).map((p) => {
         const sender = p.sender || 'unknown';
