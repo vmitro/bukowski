@@ -594,6 +594,24 @@ class DashboardStore {
     return { ok: true, op: 'link', projectId: p.id, entryId: entry.id, rel, rev: p.rev };
   }
 
+  transferCurator(caller, args, ctx = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    // Authorized by the current project lead, the always-on framework curator,
+    // or the user. The framework-curator/user path is the offline-recovery
+    // route: if the project curator is unreachable, bukowski-1 or Vladimir hands
+    // the lead to an online agent — no liveness-guessing, no split-brain.
+    if (caller !== p.curator && caller !== this.curator && caller !== 'user') {
+      throw derr('NOT_CURATOR', `only the project curator (${p.curator}), the framework curator, or the user may transfer the lead`, { caller });
+    }
+    const to = this._federate(String(args.to || '').trim());
+    if (!to) throw derr('BAD_PROJECT', 'transfer target (to) required');
+    const before = p.curator;
+    p.curator = to;
+    this._mutate(p, { ts: ctx.ts || Date.now(), actor: caller, op: 'transfer-curator', before, after: to }, ctx);
+    return { ok: true, op: 'transfer-curator', projectId: p.id, curator: to, rev: p.rev };
+  }
+
   // ── reads (no auth, no mutation) ──────────────────────────────────────────
 
   listProjects() {
@@ -651,34 +669,65 @@ class DashboardStore {
    */
   walkChain(fromRef) {
     this.reloadAll();
-    // index: any ref an entry "produces" (its refs[] or its own entry URI) ->
-    // { oneliner, causal_parent }
+    // index: any ref an entry "produces" (its refs[] or its entry URI) ->
+    // { oneliner, parents: [{rel, target}] }. Causal structure is a DAG: an
+    // entry can have multiple TYPED parent edges (causal_parent, caused-by,
+    // supersedes). blocked-on is a dependency, NOT lineage, so it's excluded.
     const index = new Map();
     for (const p of this.projects.values()) {
       for (const cat of CATEGORIES) {
         for (const e of p.categories[cat] || []) {
-          // Parent edge is the explicit causal_parent, else a 'supersedes' /
-          // 'caused-by' typed link (so #331 supersedes #330 renders as a chain).
-          const linkParent = (e.links || []).find((l) => l.rel === 'supersedes' || l.rel === 'caused-by');
-          const rec = { oneliner: e.oneliner, causal_parent: e.causal_parent || (linkParent ? linkParent.target : null) };
+          const parents = [];
+          if (e.causal_parent) parents.push({ rel: 'causal', target: e.causal_parent });
+          for (const l of e.links || []) {
+            if (l.rel === 'caused-by' || l.rel === 'supersedes') parents.push({ rel: l.rel, target: l.target });
+          }
+          const rec = { oneliner: e.oneliner, parents };
           for (const r of e.refs || []) index.set(r, rec);
           index.set(`${e.repo || (p.repos[0] || {}).repo || p.id}://entry/${e.id}`, rec);
         }
       }
     }
-    const chain = [];
+    const nodeOf = (ref) => {
+      const rec = index.get(ref);
+      return { ref, oneliner: rec ? rec.oneliner : null, repo: repoOf(ref), known: !!rec };
+    };
+    // Full typed-edge DAG traversal: every parent edge is surfaced, so neither
+    // caused-by nor supersedes is ever silently dropped.
+    const nodes = new Map();
+    const edges = [];
     const seen = new Set();
-    let cur = fromRef;
-    while (cur && !seen.has(cur)) {
+    const queue = [fromRef];
+    while (queue.length) {
+      const cur = queue.shift();
+      if (seen.has(cur)) continue;
       seen.add(cur);
+      nodes.set(cur, nodeOf(cur));
       const rec = index.get(cur);
-      chain.push({ ref: cur, oneliner: rec ? rec.oneliner : null, repo: repoOf(cur), known: !!rec });
-      cur = rec ? rec.causal_parent : null;
+      if (rec) for (const par of rec.parents) {
+        edges.push({ from: cur, to: par.target, rel: par.rel });
+        if (!seen.has(par.target)) queue.push(par.target);
+      }
+    }
+    // `chain`: convenience linear spine, root-first, following the PRIMARY
+    // causal parent with deterministic precedence causal > caused-by >
+    // supersedes. Use `edges` for the full DAG including sibling lineages.
+    const chain = [];
+    const cseen = new Set();
+    let cur = fromRef;
+    while (cur && !cseen.has(cur)) {
+      cseen.add(cur);
+      chain.push(nodeOf(cur));
+      const rec = index.get(cur);
+      const spine = rec && (
+        rec.parents.find((pp) => pp.rel === 'causal')
+        || rec.parents.find((pp) => pp.rel === 'caused-by')
+        || rec.parents.find((pp) => pp.rel === 'supersedes')
+      );
+      cur = spine ? spine.target : null;
     }
     chain.reverse();
-    // `found` distinguishes "ref is a grounded root with no parent" (found:true,
-    // 1 node) from "ref is unknown / nothing grounds it" (found:false, echo).
-    return { ok: true, fromRef, found: index.has(fromRef), chain };
+    return { ok: true, fromRef, found: index.has(fromRef), nodes: [...nodes.values()], edges, chain };
   }
 }
 

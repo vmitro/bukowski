@@ -113,6 +113,23 @@ assert.deepStrictEqual(supChain, ['azra-sdk-kotlin://pr/330', 'azra-sdk-kotlin:/
   'supersedes link should extend dashboard_chain (#331 supersedes #330)');
 console.log('OK: supersedes link renders as a causal chain');
 
+// ── 4d. DAG: an entry with BOTH caused-by and supersedes surfaces both ────────
+const dual = store.setEntry(SDK, { projectId: PID, repo: 'azra-sdk-kotlin', category: 'bugs', oneliner: 'fix with two lineages', refs: ['azra-sdk-kotlin://pr/441'] }, { ts: ts++ });
+store.linkBlockedOn(SDK, { projectId: PID, entryId: dual.entryId, rel: 'caused-by', targets: ['azra-sdk-kotlin://pr/439'] }, { ts: ts++ });
+store.linkBlockedOn(SDK, { projectId: PID, entryId: dual.entryId, rel: 'supersedes', targets: ['azra-sdk-kotlin://pr/440'] }, { ts: ts++ });
+const dag = store.walkChain('azra-sdk-kotlin://pr/441');
+const dualRels = dag.edges.filter((e) => e.from === 'azra-sdk-kotlin://pr/441').map((e) => e.rel).sort();
+assert.deepStrictEqual(dualRels, ['caused-by', 'supersedes'], 'both parent lineages must appear in edges (DAG, no silent drop)');
+assert.deepStrictEqual(dag.chain.map((n) => n.ref), ['azra-sdk-kotlin://pr/439', 'azra-sdk-kotlin://pr/441'], 'chain spine follows caused-by by precedence');
+console.log('OK: walkChain surfaces full DAG — caused-by + supersedes both visible (new anomaly fix)');
+
+// ── 4e. curator transfer + framework-curator offline-recovery ─────────────────
+assert.strictEqual(store.transferCurator('claude-bukowski-1', { projectId: PID, to: 'claude-meddaemon-1' }, { ts: ts++ }).curator, 'claude-meddaemon-1', 'curator transfers to new lead');
+// framework curator can reassign even when it is NOT the current project lead (offline recovery)
+assert.strictEqual(store.transferCurator('claude-bukowski-1', { projectId: PID, to: 'claude-azra-1' }, { ts: ts++ }).curator, 'claude-azra-1', 'framework curator recovers an offline lead');
+expectErr('NOT_CURATOR', () => store.transferCurator('claude-azra-agent-1', { projectId: PID, to: 'claude-azra-agent-1' }, { ts: ts++ }));
+console.log('OK: curator transfer + framework-curator offline-recovery');
+
 // ── 5. round-trip: reload from disk, deep-equal ──────────────────────────────
 const store2 = new DashboardStore({ root: ROOT });
 const p1 = store.projects.get(PID);

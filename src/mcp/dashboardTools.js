@@ -45,6 +45,11 @@ const DASHBOARD_TOOLS = [
     inputSchema: { type: 'object', required: ['projectId', 'repos'], properties: { projectId: { type: 'string' }, repos: { type: 'array', items: repoItem } } },
   },
   {
+    name: 'dashboard_transfer_curator',
+    description: 'Reassign a project\'s curator (lead). Allowed by the current project curator, the framework curator (claude-bukowski-1), or the user. The framework-curator/user path is the offline-recovery route: if the current curator is unreachable, hand the lead to an online agent.',
+    inputSchema: { type: 'object', required: ['projectId', 'to'], properties: { projectId: { type: 'string' }, to: { type: 'string', description: 'new curator (lead) agent id' } } },
+  },
+  {
     name: 'dashboard_set_roadmap',
     description: 'Curator-only. Set the project roadmap as a multi-level outline (A. 1. (i)). Accepts a roadmap tree or a Markdown outline string.',
     inputSchema: { type: 'object', required: ['projectId', 'roadmap'], properties: { projectId: { type: 'string' }, roadmap: { description: 'array of {text, repo?, refs?, cause?, children?} or an outline string' } } },
