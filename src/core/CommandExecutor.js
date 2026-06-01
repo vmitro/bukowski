@@ -280,7 +280,7 @@ class CommandExecutor {
     if (!this.dashboardStore) { out('dashboard not available on this instance'); return; }
     const sub = (args[0] || 'list').toLowerCase();
     try {
-      if (sub === 'list' || sub === 'ls') {
+      if (sub === 'list' || sub === 'ls' || sub === 'status' || sub === 'st') {
         const { projects } = this.dashboardStore.listProjects();
         if (!projects.length) { out('dashboard: no projects'); return; }
         out('--- dashboard projects ---\n' + projects.map((p) => `  ${p.id}  curator=${p.curator || '?'}${p.election ? '  [election open]' : ''}  repos=[${p.repos.join(',')}]`).join('\n'));
