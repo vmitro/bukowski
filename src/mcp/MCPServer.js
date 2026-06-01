@@ -790,8 +790,22 @@ class MCPServer extends EventEmitter {
       if (!p) return;
       const recipients = (p.participants || []).filter((a) => a && a !== info.by);
       if (!recipients.length) return;
-      const payload = { kind: 'dashboard.changed', projectId, hint: 'call dashboard_digest to refresh', ...info };
-      this.fipaHub.inform(info.by || p.curator, recipients, payload, { ontology: 'bukowski-dashboard' });
+      // A human-readable change-feed line, delivered over the SAME bus as FIPA
+      // messages: an inform → out-of-turn <channel> block for each participant
+      // (Stop-hook safety net underneath). e.g. "[dashboard:meddaemon-azra]
+      // claude-meddaemon-1 closed bug-1 (rev 7)".
+      const VERBS = {
+        create: 'added', update: 'updated', close: 'closed', comment: 'commented on',
+        promote: 'promoted', link: 'linked', 'create-project': 'created project',
+        'set-goal': 'set the goal of', 'map-repos': 'remapped',
+        'set-roadmap': 'updated the roadmap of', 'transfer-curator': 'transferred the lead of',
+      };
+      const verb = VERBS[info.op] || info.op;
+      const target = info.entryId || projectId;
+      const since = Math.max(0, (info.rev || 1) - 1);
+      const summary = `[dashboard:${projectId}] ${info.by} ${verb} ${target} (rev ${info.rev}) — `
+        + `dashboard_digest{projectId:"${projectId}",sinceRev:${since}} for details`;
+      this.fipaHub.inform(info.by || p.curator, recipients, summary, { ontology: 'bukowski-dashboard' });
     } catch { /* signal is advisory; delivery is guaranteed by the next pull */ }
   }
 

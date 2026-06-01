@@ -167,12 +167,13 @@ buko.on('data', (d) => { bukoBuf += d.toString(); });
   const ping = await waitFor(
     bob,
     (m) => m.slice(beforeBob).find((x) => x.method === 'notifications/claude/channel'
-      && (x.params?.content || '').includes('dashboard.changed')),
+      && (x.params?.content || '').includes('[dashboard:judge-bench]')
+      && (x.params?.content || '').includes('created project')),
     4000,
-    'dashboard.changed channel signal on bob',
+    'dashboard change-feed channel signal on bob',
   );
   if ((ping.params?.meta?.sender) !== 'claude-alice-1') fail('signal sender wrong', JSON.stringify(ping.params?.meta));
-  console.log('bob received the dashboard.changed channel signal from claude-alice-1');
+  console.log('bob received the dashboard change-feed line:', JSON.stringify((ping.params.content || '').split('\n').find((l) => l.includes('[dashboard:'))));
 
   // 6. bob (owner of repo "bob") sets a tasks entry; refs required (actionable).
   const setRes = await call(bob, 'dashboard_set_entry', {

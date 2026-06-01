@@ -444,7 +444,17 @@ class DashboardStore {
     caller = this._federate(caller);
     const p = this._project(args.projectId);
     this._requireCurator(caller, p);
-    p.roadmap = Array.isArray(args.roadmap) ? args.roadmap : parseRoadmap(String(args.roadmap || ''));
+    // Accept three forms: a roadmap tree (array of nodes), a JSON string of
+    // that array (MCP transports often stringify array args when the schema
+    // doesn't pin type:array — without this branch the JSON leaked into the
+    // first node's text), or a multi-line outline string (A. / 1. / (i)).
+    let rm = args.roadmap;
+    if (typeof rm === 'string') {
+      const s = rm.trim();
+      if (s.startsWith('[')) { try { rm = JSON.parse(s); } catch { /* fall through */ } }
+      if (typeof rm === 'string') rm = parseRoadmap(rm);
+    }
+    p.roadmap = Array.isArray(rm) ? rm : [];
     this._mutate(p, { ts: ctx.ts || Date.now(), actor: caller, op: 'set-roadmap' }, ctx);
     return { ok: true, op: 'set-roadmap', projectId: p.id, rev: p.rev };
   }

@@ -130,6 +130,13 @@ assert.strictEqual(store.transferCurator('claude-bukowski-1', { projectId: PID, 
 expectErr('NOT_CURATOR', () => store.transferCurator('claude-azra-agent-1', { projectId: PID, to: 'claude-azra-agent-1' }, { ts: ts++ }));
 console.log('OK: curator transfer + framework-curator offline-recovery');
 
+// ── 4f. roadmap array arriving JSON-stringified renders clean (Anomaly 4) ─────
+store.setRoadmap('user', { projectId: PID, roadmap: JSON.stringify([{ text: 'Phase A', children: [{ text: 'step one', refs: ['x://sha/1'] }] }]) }, { ts: ts++ });
+const rmDigest = store.digest('user', { projectId: PID }).digest;
+assert(!rmDigest.includes('"children"'), 'JSON-stringified roadmap array must NOT leak raw JSON into the digest');
+assert(rmDigest.includes('A. Phase A') && rmDigest.includes('1. step one'), 'roadmap renders as a clean A./1. outline');
+console.log('OK: JSON-stringified roadmap array renders as clean outline (Anomaly 4 fix)');
+
 // ── 5. round-trip: reload from disk, deep-equal ──────────────────────────────
 const store2 = new DashboardStore({ root: ROOT });
 const p1 = store.projects.get(PID);
