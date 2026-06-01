@@ -15,6 +15,7 @@ class CommandExecutor {
     this.ipcHub = options.ipcHub;
     this.fipaHub = options.fipaHub;
     this.dispatcher = options.dispatcher;
+    this.dashboardStore = options.dashboardStore;
     this.AGENT_TYPES = options.AGENT_TYPES;
     this.resolveAgentType = options.resolveAgentType;
 
@@ -105,6 +106,11 @@ class CommandExecutor {
         if (args[0]) {
           this.session.name = args[0];
         }
+        break;
+
+      case 'dashboard':
+      case 'dash':
+        this._dashboard(args);
         break;
 
       default:
@@ -255,6 +261,51 @@ class CommandExecutor {
         focusedAgent.terminal.write(output);
       }
     });
+  }
+
+  /**
+   * `:dashboard` colon command — operate the project dashboard AS THE USER
+   * (Vladimir). Because it runs in the trusted host process, it passes the
+   * 'user' principal, so it can transfer a curator from ANY session (including
+   * the offline-curator case) without being a project participant.
+   *   :dashboard [list] | show <id> | transfer <id> <agent> | close-election <id>
+   */
+  _dashboard(args) {
+    const out = (text) => {
+      const fp = this.layoutManager.getFocusedPane();
+      const fa = fp ? this.session.getAgent(fp.agentId) : null;
+      if (fa?.terminal) fa.terminal.write(`\r\n${text.replace(/\n/g, '\r\n')}\r\n`);
+      else this.onShowStatusMessage(String(text).split('\n')[0]);
+    };
+    if (!this.dashboardStore) { out('dashboard not available on this instance'); return; }
+    const sub = (args[0] || 'list').toLowerCase();
+    try {
+      if (sub === 'list' || sub === 'ls') {
+        const { projects } = this.dashboardStore.listProjects();
+        if (!projects.length) { out('dashboard: no projects'); return; }
+        out('--- dashboard projects ---\n' + projects.map((p) => `  ${p.id}  curator=${p.curator || '?'}${p.election ? '  [election open]' : ''}  repos=[${p.repos.join(',')}]`).join('\n'));
+      } else if (sub === 'transfer' || sub === 'curator') {
+        const projectId = args[1];
+        const to = args[2];
+        if (!projectId || !to) { out('usage: :dashboard transfer <projectId> <agentId>'); return; }
+        const r = this.dashboardStore.transferCurator('user', { projectId, to });
+        out(`dashboard: ${projectId} curator -> ${r.curator} (rev ${r.rev})`);
+      } else if (sub === 'show' || sub === 'digest') {
+        const projectId = args[1];
+        if (!projectId) { out('usage: :dashboard show <projectId>'); return; }
+        out(this.dashboardStore.digest('user', { projectId }).digest);
+      } else if (sub === 'close-election' || sub === 'close_election' || sub === 'elect') {
+        const projectId = args[1];
+        if (!projectId) { out('usage: :dashboard close-election <projectId>'); return; }
+        const r = this.dashboardStore.closeElection('user', { projectId });
+        out(`dashboard: ${projectId} election closed -> curator ${r.curator} (rev ${r.rev})`);
+      } else {
+        out('usage: :dashboard [list | show <id> | transfer <id> <agent> | close-election <id>]');
+      }
+    } catch (err) {
+      const m = /DASHBOARD_ERROR (\{.*\})/.exec(err.message || '');
+      out('dashboard error: ' + (m ? JSON.parse(m[1]).message : err.message));
+    }
   }
 
   _showRestoreHint(args) {

@@ -717,8 +717,8 @@ class DashboardStore {
     return {
       ok: true,
       projects: Array.from(this.projects.values()).map((p) => ({
-        id: p.id, goal: p.goal, repos: p.repos.map((r) => r.repo),
-        participants: p.participants, rev: p.rev,
+        id: p.id, goal: p.goal, curator: p.curator, repos: p.repos.map((r) => r.repo),
+        participants: p.participants, rev: p.rev, election: p.election ? p.election.id : null,
       })),
     };
   }

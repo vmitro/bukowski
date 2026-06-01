@@ -1690,6 +1690,7 @@ terminal.registerSignalHandlers();
     ipcHub,
     fipaHub,
     dispatcher,
+    dashboardStore,
     AGENT_TYPES,
     resolveAgentType,
     onCaptureAgentSessions: captureAgentSessions,
