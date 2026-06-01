@@ -182,6 +182,30 @@ store.deleteProject('user', { projectId: GPID });
 assert.strictEqual(store.listProjects().projects.find((p) => p.id === GPID), undefined, 'deleted project is gone from disk + memory');
 console.log('OK: open_election double-open guard + delete-project governance');
 
+// ── 4j. relevance-scoped change-feed recipients (signal/noise) ────────────────
+const np = store.createProject('claude-bukowski-1', { name: 'Noise Test', goal: 'g', curator: 'claude-bukowski-1', repos: [
+  { repo: 'meddaemon', root: '/home/sheemeh/projects/meddaemon' },
+  { repo: 'azra', root: '/home/sheemeh/projects/azra/azra' },
+] }, { ts: ts++ });
+const NPID = np.projectId;
+const mbug = store.setEntry('claude-meddaemon-1', { projectId: NPID, repo: 'meddaemon', category: 'bugs', oneliner: 'framework bug', refs: ['meddaemon://sha/a'] }, { ts: ts++ });
+const atask = store.setEntry('claude-azra-1', { projectId: NPID, repo: 'azra', category: 'tasks', oneliner: 'consumer task', refs: ['azra://sha/b'] }, { ts: ts++ });
+store.linkBlockedOn('claude-azra-1', { projectId: NPID, entryId: atask.entryId, rel: 'blocked-on', targets: [`meddaemon://entry/${mbug.entryId}`] }, { ts: ts++ });
+
+// self-edit to azra's own UNLINKED-to-others task, by azra → nobody else notified
+const selfEdit = store.recipientsFor(NPID, { op: 'update', entryId: atask.entryId, by: 'claude-azra-1' });
+assert.deepStrictEqual(selfEdit, [], 'self-edit of own dependent entry must not fan out to others');
+// the LINK op itself notifies the target owner (meddaemon): "someone links to yours"
+const onLink = store.recipientsFor(NPID, { op: 'link', entryId: atask.entryId, by: 'claude-azra-1' });
+assert(onLink.includes('claude-meddaemon-1'), 'link op notifies the target owner');
+// editing the depended-on bug notifies the dependent owner (azra)
+const onBugEdit = store.recipientsFor(NPID, { op: 'update', entryId: mbug.entryId, by: 'claude-meddaemon-1' });
+assert(onBugEdit.includes('claude-azra-1'), 'editing a dependency notifies its dependents');
+// project-level op still reaches all participants (minus mutator)
+const onRoadmap = store.recipientsFor(NPID, { op: 'set-roadmap', by: 'claude-bukowski-1' });
+assert(onRoadmap.includes('claude-meddaemon-1') && onRoadmap.includes('claude-azra-1'), 'project-level events reach all participants');
+console.log('OK: change-feed recipients relevance-scoped (self-edit silent, links/deps targeted, project-level broadcast)');
+
 // ── 5. round-trip: reload from disk, deep-equal ──────────────────────────────
 const store2 = new DashboardStore({ root: ROOT });
 const p1 = store.projects.get(PID);

@@ -834,7 +834,10 @@ class MCPServer extends EventEmitter {
       if (!this.dashboardStore || !this.fipaHub) return;
       const p = this.dashboardStore.projects.get(projectId);
       if (!p) return;
-      const recipients = (p.participants || []).filter((a) => a && a !== info.by);
+      // Relevance-scoped: entry edits reach only stakeholders (owner + cross-
+      // linked), project-level events reach all participants. Kills the noise
+      // of an agent iterating its own unlinked entry.
+      const recipients = this.dashboardStore.recipientsFor(projectId, info);
       if (!recipients.length) return;
       // A human-readable change-feed line, delivered over the SAME bus as FIPA
       // messages: an inform → out-of-turn <channel> block for each participant

@@ -730,6 +730,51 @@ class DashboardStore {
 
   // ── reads (no auth, no mutation) ──────────────────────────────────────────
 
+  /**
+   * Who should be notified of a change, scoped for signal/noise.
+   *   - project-level ops (goal/roadmap/repos/curator/election/delete) → all participants
+   *   - entry-level ops → STAKEHOLDERS only: the entry's owner + owners of entries
+   *     cross-linked in either direction (entries this one links to, and entries
+   *     that link to it). A self-edit to an unlinked entry reaches nobody else.
+   * The mutator (info.by) and 'user' are always excluded. Federated ids.
+   */
+  recipientsFor(projectId, info = {}) {
+    const p = this.projects.get(projectId);
+    if (!p) return [];
+    const PROJECT_OPS = new Set(['create-project', 'set-goal', 'map-repos', 'set-roadmap',
+      'transfer-curator', 'open-election', 'vote', 'elect-curator', 'delete-project']);
+    const recip = new Set();
+    const allEntries = [];
+    for (const cat of CATEGORIES) for (const e of p.categories[cat] || []) allEntries.push(e);
+    const tokensOf = (e) => [e.id, `${e.repo || (p.repos[0] || {}).repo || p.id}://entry/${e.id}`];
+
+    if (!info.entryId || PROJECT_OPS.has(info.op)) {
+      for (const a of p.participants) recip.add(a);
+    } else {
+      const X = allEntries.find((e) => e.id === info.entryId);
+      if (!X) {
+        for (const a of p.participants) recip.add(a); // entry gone → fall back
+      } else {
+        const xTokens = new Set([...tokensOf(X), ...(X.refs || [])]);
+        const ownerByToken = new Map();
+        for (const e of allEntries) for (const tok of tokensOf(e)) ownerByToken.set(tok, e.owner);
+        if (X.owner) recip.add(X.owner);
+        // forward: only on the link op itself — tell the target owner "someone
+        // now links to yours" (not on every later edit, which would re-noise).
+        if (info.op === 'link') {
+          for (const l of X.links || []) { const o = ownerByToken.get(l.target); if (o) recip.add(o); }
+        }
+        // reverse: owners of entries that depend on X care whenever X changes.
+        for (const e of allEntries) {
+          if ((e.links || []).some((l) => xTokens.has(l.target)) && e.owner) recip.add(e.owner);
+        }
+      }
+    }
+    recip.delete(this._federate(info.by));
+    recip.delete('user');
+    return [...recip].filter(Boolean);
+  }
+
   listProjects() {
     this.reloadAll();
     return {
