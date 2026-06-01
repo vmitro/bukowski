@@ -19,12 +19,17 @@ const { hostFromCwd } = require('../utils/host');
  * Communication is via Unix socket in /tmp/bukowski-mcp-<pid>.sock
  */
 class MCPServer extends EventEmitter {
-  constructor(session, fipaHub, ipcHub) {
+  constructor(session, fipaHub, ipcHub, dashboardStore = null) {
     super();
 
     this.session = session;
     this.fipaHub = fipaHub;
     this.ipcHub = ipcHub;
+    // Canonical project-dashboard store (shared ~/.bukowski/dashboard on the
+    // box). Present on every instance; reads/writes go straight to the shared
+    // files, which the store re-reads per op so federated instances on one box
+    // stay consistent. null only if the host opted out.
+    this.dashboardStore = dashboardStore;
 
     this.server = null;
     this.socketPath = null;
@@ -35,6 +40,17 @@ class MCPServer extends EventEmitter {
     // these so the channel push reaches the connection Claude Code actually
     // loaded as a channel, not the bare tools connection of the same agent.
     this.channelSockets = new Map();
+
+    // Agents currently mid-turn (between a UserPromptSubmit and the Stop that
+    // ends the turn), reported by the lifecycle hooks via bukowski/turn_state.
+    // While an agent is busy its assistant message is open and carries
+    // `thinking` blocks that must be re-sent verbatim on every continuation;
+    // an out-of-turn <channel> injection there makes Claude Code re-emit that
+    // message with an altered thinking block and the API rejects the next
+    // request (400 "thinking ... blocks in the latest assistant message cannot
+    // be modified"). So notifyNewMessage suppresses the channel PUSH for busy
+    // agents and lets the boundary hooks (Stop) deliver instead.
+    this.busyAgents = new Set();
 
     // Define available tools
     this.tools = this._defineTools();
@@ -208,7 +224,8 @@ class MCPServer extends EventEmitter {
             type: { type: 'string', description: 'Agent type (claude, codex, gemini, unknown)' }
           }
         }
-      }
+      },
+      ...require('./dashboardTools').DASHBOARD_TOOLS
     ];
   }
 
@@ -432,6 +449,20 @@ class MCPServer extends EventEmitter {
         }
         break;
 
+      case 'bukowski/turn_state': {
+        // Lifecycle signal from the hooks: UserPromptSubmit reports 'busy' (a
+        // turn just opened), Stop reports 'idle' (the turn closed). We use this
+        // ONLY to decide whether it is safe to push an out-of-turn <channel>
+        // block (see notifyNewMessage / busyAgents). Not an MCP tool.
+        const tId = params?.agentId || clientState.agentId;
+        if (tId) {
+          if (params?.state === 'busy') this.busyAgents.add(tId);
+          else this.busyAgents.delete(tId);
+        }
+        this._sendResult(socket, id, { ok: true, busy: tId ? this.busyAgents.has(tId) : false });
+        break;
+      }
+
       case 'bukowski/peek_messages': {
         // Non-consuming peek used by sideband channels (e.g. the Claude Code
         // UserPromptSubmit hook). Caller may pass an explicit agentId; we
@@ -648,9 +679,114 @@ class MCPServer extends EventEmitter {
         return { agentId, registered: true };
       }
 
+      // ── project dashboard ────────────────────────────────────────────────
+      // The store enforces all governance (curator-only, owner-scoped, ref
+      // requirements) keyed on callerAgentId; it throws DASHBOARD_ERROR-tagged
+      // errors which the tools/call catch surfaces as an isError text block.
+      // Mutations fire a best-effort live signal to project participants.
+      case 'dashboard_list_projects':
+        return this._dash().listProjects();
+
+      case 'dashboard_query':
+        requireString('projectId');
+        return this._dash().queryEntries(callerAgentId, args);
+
+      case 'dashboard_digest':
+        requireString('projectId');
+        return this._dash().digest(callerAgentId, args);
+
+      case 'dashboard_chain':
+        requireString('fromRef');
+        return this._dash().walkChain(args.fromRef);
+
+      case 'dashboard_create_project': {
+        requireString('name'); requireString('goal');
+        const r = this._dash().createProject(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'create-project', rev: r.rev, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_set_goal': {
+        requireString('projectId'); requireString('goal');
+        const r = this._dash().setGoal(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'set-goal', rev: r.rev, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_map_repos': {
+        requireString('projectId');
+        const r = this._dash().mapRepos(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'map-repos', rev: r.rev, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_set_roadmap': {
+        requireString('projectId');
+        const r = this._dash().setRoadmap(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'set-roadmap', rev: r.rev, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_set_entry': {
+        requireString('projectId'); requireString('repo'); requireString('oneliner');
+        const r = this._dash().setEntry(callerAgentId, args, { ts: Date.now(), conv: args.conversationId || null });
+        this._signalDashboardChange(r.projectId, { op: r.op, entryId: r.entryId, rev: r.rev, ref: { refs: args.refs || [] }, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_close_entry': {
+        requireString('projectId'); requireString('entryId');
+        const r = this._dash().closeEntry(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'close', entryId: r.entryId, rev: r.rev, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_comment_entry': {
+        requireString('projectId'); requireString('entryId'); requireString('text');
+        const r = this._dash().commentEntry(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'comment', entryId: r.entryId, rev: r.rev, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_promote': {
+        requireString('projectId'); requireString('entryId'); requireString('toCategory');
+        const r = this._dash().promoteEntry(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'promote', entryId: r.entryId, rev: r.rev, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_link': {
+        requireString('projectId'); requireString('entryId');
+        const r = this._dash().linkBlockedOn(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'link', entryId: r.entryId, rev: r.rev, by: callerAgentId });
+        return r;
+      }
+
       default:
         throw new Error(`Unknown tool: ${toolName}`);
     }
+  }
+
+  /**
+   * Return the dashboard store or throw a tagged error if this instance has none.
+   * @private
+   */
+  _dash() {
+    if (!this.dashboardStore) {
+      throw new Error('DASHBOARD_ERROR ' + JSON.stringify({ code: 'NO_STORE', message: 'dashboard not available on this bukowski instance' }));
+    }
+    return this.dashboardStore;
+  }
+
+  /**
+   * Best-effort live signal: tell a project's participants the dashboard changed
+   * so they re-pull (out-of-turn <channel> block via the normal inform path).
+   * Carries a pointer + nudge, never content. Never throws — a signal failure
+   * must not fail the mutation that already persisted.
+   * @private
+   */
+  _signalDashboardChange(projectId, info) {
+    try {
+      if (!this.dashboardStore || !this.fipaHub) return;
+      const p = this.dashboardStore.projects.get(projectId);
+      if (!p) return;
+      const recipients = (p.participants || []).filter((a) => a && a !== info.by);
+      if (!recipients.length) return;
+      const payload = { kind: 'dashboard.changed', projectId, hint: 'call dashboard_digest to refresh', ...info };
+      this.fipaHub.inform(info.by || p.curator, recipients, payload, { ontology: 'bukowski-dashboard' });
+    } catch { /* signal is advisory; delivery is guaranteed by the next pull */ }
   }
 
   /**
@@ -860,6 +996,13 @@ class MCPServer extends EventEmitter {
     // Channels are a Claude Code feature; codex/gemini clients don't implement
     // notifications/claude/channel and just ignore it. Only push to claude.
     if (!this._isClaudeAgent(agentId)) return;
+    // SAFETY: never inject an out-of-turn <channel> block while the agent is
+    // mid-turn. Its open assistant message carries `thinking` blocks that must
+    // be re-sent verbatim; a channel injection there corrupts them and the API
+    // rejects the next request (400 thinking-blocks-cannot-be-modified). The
+    // message stays queued (NOT marked _channelDelivered), so the Stop hook
+    // delivers it at the safe turn boundary. Idle agents get the immediate push.
+    if (this.busyAgents.has(agentId)) return;
     // Broadcast the channel event to EVERY connection this agent holds: the
     // channel connection (plugin server, role=channel) injects it as a <channel>
     // block; a tools-only connection ignores the unknown notification. We don't

@@ -547,7 +547,8 @@ const TOOLS = [
         type: { type: 'string', description: 'Agent type (claude, codex, gemini, unknown)' }
       }
     }
-  }
+  },
+  ...require('./dashboardTools').DASHBOARD_TOOLS
 ];
 
 /**

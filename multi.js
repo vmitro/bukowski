@@ -451,8 +451,19 @@ terminal.registerSignalHandlers();
     return stderrWrite(chunk, encoding, callback);
   };
 
-  // Start MCP Server for agent tool communication
-  const mcpServer = new MCPServer(session, fipaHub, ipcHub);
+  // Start MCP Server for agent tool communication. The project-dashboard store
+  // is shared across instances on this box via ~/.bukowski/dashboard (re-read
+  // per op), so every instance gets one unless explicitly disabled.
+  let dashboardStore = null;
+  if (process.env.BUKOWSKI_NO_DASHBOARD !== '1') {
+    try {
+      const { DashboardStore } = require('./src/dashboard/DashboardStore');
+      dashboardStore = new DashboardStore();
+    } catch (err) {
+      console.error('[dashboard] disabled:', err.message);
+    }
+  }
+  const mcpServer = new MCPServer(session, fipaHub, ipcHub, dashboardStore);
   try {
     const socketPath = await mcpServer.start();
 
