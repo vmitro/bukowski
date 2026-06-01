@@ -687,6 +687,12 @@ class MCPServer extends EventEmitter {
       case 'dashboard_list_projects':
         return this._dash().listProjects();
 
+      case 'dashboard_delete_project': {
+        requireString('projectId');
+        const r = this._dash().deleteProject(callerAgentId, args, { ts: Date.now() });
+        return r;
+      }
+
       case 'dashboard_query':
         requireString('projectId');
         return this._dash().queryEntries(callerAgentId, args);
@@ -845,7 +851,11 @@ class MCPServer extends EventEmitter {
       const verb = VERBS[info.op] || info.op;
       const target = info.entryId || projectId;
       const since = Math.max(0, (info.rev || 1) - 1);
-      const summary = `[dashboard:${projectId}] ${info.by} ${verb} ${target} (rev ${info.rev}) — `
+      // Attribute to the FEDERATED id (claude-<host>-N), not the local session
+      // id (claude-1) — every agent is "claude-1" locally, so the raw caller is
+      // ambiguous in a cross-agent feed.
+      const by = (this.dashboardStore.federate ? this.dashboardStore.federate(info.by) : info.by) || info.by;
+      const summary = `[dashboard:${projectId}] ${by} ${verb} ${target} (rev ${info.rev}) — `
         + `dashboard_digest{projectId:"${projectId}",sinceRev:${since}} for details`;
       this.fipaHub.inform(info.by || p.curator, recipients, summary, { ontology: 'bukowski-dashboard' });
     } catch { /* signal is advisory; delivery is guaranteed by the next pull */ }

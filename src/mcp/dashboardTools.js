@@ -16,6 +16,11 @@ const repoItem = {
 
 const DASHBOARD_TOOLS = [
   {
+    name: 'dashboard_delete_project',
+    description: 'Delete a project and its files. Allowed by the project curator, the framework curator (claude-bukowski-1), or the user. Destructive — drops entries, roadmap, and audit.',
+    inputSchema: { type: 'object', required: ['projectId'], properties: { projectId: { type: 'string' } } },
+  },
+  {
     name: 'dashboard_list_projects',
     description: 'List dashboard projects (id, goal, repos, participants, rev).',
     inputSchema: { type: 'object', properties: {} },

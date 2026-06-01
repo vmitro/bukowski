@@ -299,8 +299,13 @@ class CommandExecutor {
         if (!projectId) { out('usage: :dashboard close-election <projectId>'); return; }
         const r = this.dashboardStore.closeElection('user', { projectId });
         out(`dashboard: ${projectId} election closed -> curator ${r.curator} (rev ${r.rev})`);
+      } else if (sub === 'delete' || sub === 'rm') {
+        const projectId = args[1];
+        if (!projectId) { out('usage: :dashboard delete <projectId>'); return; }
+        const r = this.dashboardStore.deleteProject('user', { projectId });
+        out(`dashboard: deleted project ${r.projectId}`);
       } else {
-        out('usage: :dashboard [list | show <id> | transfer <id> <agent> | close-election <id>]');
+        out('usage: :dashboard [list | show <id> | transfer <id> <agent> | close-election <id> | delete <id>]');
       }
     } catch (err) {
       const m = /DASHBOARD_ERROR (\{.*\})/.exec(err.message || '');

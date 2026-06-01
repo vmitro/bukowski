@@ -341,6 +341,21 @@ class DashboardStore {
     return `${m[1]}-${host}-${m[2]}`;
   }
 
+  /** Public: map a local caller id to its federated form (for change-feed attribution). */
+  federate(caller) { return this._federate(caller); }
+
+  deleteProject(caller, args, ctx = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    if (caller !== p.curator && caller !== this.curator && caller !== 'user') {
+      throw derr('NOT_CURATOR', `only the curator (${p.curator}), the framework curator, or the user may delete a project`, { caller });
+    }
+    this.projects.delete(p.id);
+    try { fs.rmSync(this._projDir(p.id), { recursive: true, force: true }); } catch { /* ignore */ }
+    this._persistIndex();
+    return { ok: true, op: 'delete-project', projectId: p.id };
+  }
+
   _ownerForRepo(p, repo) {
     const r = p.repos.find((x) => x.repo === repo);
     if (!r) throw derr('BAD_CATEGORY', `repo not in project: ${repo}`, { kind: 'repo' });
@@ -666,6 +681,9 @@ class DashboardStore {
     const p = this._project(args.projectId);
     if (!p.participants.includes(caller) && caller !== 'user') {
       throw derr('NOT_RESPONSIBLE', 'only a project participant may open an election', { caller });
+    }
+    if (p.election) {
+      throw derr('ELECTION_OPEN', `an election (${p.election.id}) is already open — vote or close it first`);
     }
     if (opts.curatorOnline) {
       throw derr('CURATOR_ONLINE', `curator ${p.curator} is reachable — transfer the lead instead of electing`);

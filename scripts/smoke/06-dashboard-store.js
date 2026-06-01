@@ -169,6 +169,19 @@ assert(online.includes(tieWinner), 'tie resolves to one of the tied candidates')
 assert.strictEqual(new DashboardStore({ root: ROOT }).projects.get(TPID).curator, tieWinner, 'tiebreak is deterministic across a fresh reload');
 console.log('OK: election tie resolves deterministically (convergent)');
 
+// ── 4i. double-open guard + delete-project governance ─────────────────────────
+const gp = store.createProject('claude-bukowski-1', { name: 'Guard Test', goal: 'g', curator: 'claude-ghost-1', repos: [
+  { repo: 'meddaemon', root: '/home/sheemeh/projects/meddaemon' },
+  { repo: 'azra', root: '/home/sheemeh/projects/azra/azra' },
+] }, { ts: ts++ });
+const GPID = gp.projectId;
+store.openElection('claude-azra-1', { projectId: GPID }, { ts: ts++ }, { curatorOnline: false, onlineParticipants: online });
+expectErr('ELECTION_OPEN', () => store.openElection('claude-azra-1', { projectId: GPID }, { ts: ts++ }, { curatorOnline: false, onlineParticipants: online }));
+expectErr('NOT_CURATOR', () => store.deleteProject('claude-meddaemon-1', { projectId: GPID })); // not curator/framework/user
+store.deleteProject('user', { projectId: GPID });
+assert.strictEqual(store.listProjects().projects.find((p) => p.id === GPID), undefined, 'deleted project is gone from disk + memory');
+console.log('OK: open_election double-open guard + delete-project governance');
+
 // ── 5. round-trip: reload from disk, deep-equal ──────────────────────────────
 const store2 = new DashboardStore({ root: ROOT });
 const p1 = store.projects.get(PID);
