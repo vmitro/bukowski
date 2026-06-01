@@ -22,7 +22,7 @@ const DASHBOARD_TOOLS = [
   },
   {
     name: 'dashboard_create_project',
-    description: 'Framework-curator-only. Create a project spanning multiple repos. Participants are derived from each repo\'s owner agent. Set curator to the project lead who will own its goal/roadmap (defaults to the framework curator).',
+    description: 'Create a project spanning multiple repos. The CREATOR becomes the project curator (lead who owns its goal/roadmap) by default; pass curator to set someone else. Participants are derived from each repo\'s owner agent.',
     inputSchema: {
       type: 'object',
       required: ['name', 'goal'],
@@ -46,8 +46,23 @@ const DASHBOARD_TOOLS = [
   },
   {
     name: 'dashboard_transfer_curator',
-    description: 'Reassign a project\'s curator (lead). Allowed by the current project curator, the framework curator (claude-bukowski-1), or the user. The framework-curator/user path is the offline-recovery route: if the current curator is unreachable, hand the lead to an online agent.',
+    description: 'Reassign a project\'s curator (lead). Allowed by the current project curator, the framework curator (claude-bukowski-1), or the user.',
     inputSchema: { type: 'object', required: ['projectId', 'to'], properties: { projectId: { type: 'string' }, to: { type: 'string', description: 'new curator (lead) agent id' } } },
+  },
+  {
+    name: 'dashboard_open_election',
+    description: 'Open a curator election when the current curator is OFFLINE (unreachable in the federation roster) and no authority is around to transfer the lead. Candidates = currently-online participants. Rejected if the curator is reachable (transfer instead).',
+    inputSchema: { type: 'object', required: ['projectId'], properties: { projectId: { type: 'string' } } },
+  },
+  {
+    name: 'dashboard_vote',
+    description: 'Cast your vote in an open curator election. Auto-tallies once every candidate has voted; winner becomes curator (ties broken deterministically by a hash of the election id, so all instances agree).',
+    inputSchema: { type: 'object', required: ['projectId', 'candidate'], properties: { projectId: { type: 'string' }, candidate: { type: 'string', description: 'the participant agent id you vote for as curator' } } },
+  },
+  {
+    name: 'dashboard_close_election',
+    description: 'Force-tally an open election with the votes cast so far (use when a candidate went offline and will not vote). Any participant may call it.',
+    inputSchema: { type: 'object', required: ['projectId'], properties: { projectId: { type: 'string' } } },
   },
   {
     name: 'dashboard_set_roadmap',

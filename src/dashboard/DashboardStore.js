@@ -221,7 +221,12 @@ class DashboardStore {
       categories: {},
       roadmap: [],
       rev: meta.rev || 0,
+      election: null,
     };
+    const ef = path.join(dir, '_election.json');
+    if (fs.existsSync(ef)) {
+      try { project.election = JSON.parse(fs.readFileSync(ef, 'utf-8')); } catch { /* ignore */ }
+    }
     for (const cat of CATEGORIES) {
       const f = path.join(dir, `${cat}.md`);
       project.categories[cat] = fs.existsSync(f) ? parseCategory(fs.readFileSync(f, 'utf-8')) : [];
@@ -277,6 +282,9 @@ class DashboardStore {
       atomicWrite(path.join(dir, `${cat}.md`), serializeCategory(cat, p.name, p.categories[cat] || []));
     }
     atomicWrite(path.join(dir, 'roadmap.md'), serializeRoadmap(p.name, p.roadmap));
+    const ef = path.join(dir, '_election.json');
+    if (p.election) atomicWrite(ef, JSON.stringify(p.election, null, 2));
+    else if (fs.existsSync(ef)) { try { fs.unlinkSync(ef); } catch { /* ignore */ } }
     this._persistIndex();
   }
 
@@ -382,9 +390,9 @@ class DashboardStore {
 
   createProject(caller, args, ctx = {}) {
     caller = this._federate(caller);
-    if (caller !== this.curator && caller !== 'user') {
-      throw derr('NOT_CURATOR', `only the curator (${this.curator}) may create projects`, { caller });
-    }
+    // Any agent may create a project; the CREATOR becomes its curator by
+    // default (override via args.curator). "If I tell an agent to create a
+    // project, they're the curator." They can transfer the lead later.
     const name = String(args.name || '').trim();
     if (!name) throw derr('BAD_PROJECT', 'name required');
     const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
@@ -404,10 +412,10 @@ class DashboardStore {
     // owns the category set + bootstraps creation). Defaults to the lead named
     // in args.curator, else the framework curator. Repo owners still own their
     // own entries regardless of who leads the project.
-    const projectCurator = args.curator ? this._federate(args.curator) : this.curator;
+    const projectCurator = args.curator ? this._federate(args.curator) : caller;
     const p = {
       id, name, goal: String(args.goal || ''), participants,
-      repos, curator: projectCurator, categories: {}, roadmap: [], rev: 0,
+      repos, curator: projectCurator, categories: {}, roadmap: [], rev: 0, election: null,
     };
     for (const cat of CATEGORIES) p.categories[cat] = [];
     this.projects.set(id, p);
@@ -620,6 +628,86 @@ class DashboardStore {
     p.curator = to;
     this._mutate(p, { ts: ctx.ts || Date.now(), actor: caller, op: 'transfer-curator', before, after: to }, ctx);
     return { ok: true, op: 'transfer-curator', projectId: p.id, curator: to, rev: p.rev };
+  }
+
+  // ── curator election (self-heal when the curator is offline) ──────────────
+  // The election state lives on the shared project (disk), so once opened every
+  // instance sees the same votes; the tiebreak is seeded by the stable election
+  // id (NOT Math.random) so all instances converge on the same winner.
+
+  _hashInt(s) {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return h;
+  }
+
+  _tallyElection(p) {
+    const counts = {};
+    for (const v of Object.values(p.election.votes)) counts[v] = (counts[v] || 0) + 1;
+    const max = Math.max(0, ...Object.values(counts));
+    const top = Object.keys(counts).filter((k) => counts[k] === max).sort();
+    let winner;
+    if (top.length === 0) winner = p.election.candidates.slice().sort()[0];
+    else if (top.length === 1) winner = top[0];
+    else winner = top[this._hashInt(p.election.id) % top.length]; // deterministic random tiebreak
+    p.curator = winner;
+    p.election = null;
+    return winner;
+  }
+
+  /** Read-only meta the MCP layer uses to compute liveness before an election. */
+  meta(id) {
+    const p = this._project(id);
+    return { id: p.id, curator: p.curator, participants: p.participants.slice(), election: p.election ? { ...p.election } : null };
+  }
+
+  openElection(caller, args, ctx = {}, opts = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    if (!p.participants.includes(caller) && caller !== 'user') {
+      throw derr('NOT_RESPONSIBLE', 'only a project participant may open an election', { caller });
+    }
+    if (opts.curatorOnline) {
+      throw derr('CURATOR_ONLINE', `curator ${p.curator} is reachable — transfer the lead instead of electing`);
+    }
+    const pool = (opts.onlineParticipants && opts.onlineParticipants.length) ? opts.onlineParticipants : p.participants;
+    const candidates = pool.filter((a) => a !== p.curator);
+    if (!candidates.length) throw derr('BAD_PROJECT', 'no eligible online candidates for election');
+    const ts = ctx.ts || Date.now();
+    p.election = { id: `${p.id}-${p.rev + 1}`, openedBy: caller, openedAt: ts, candidates, votes: {} };
+    this._mutate(p, { ts, actor: caller, op: 'open-election', after: candidates.join(',') }, ctx);
+    return { ok: true, op: 'open-election', projectId: p.id, electionId: p.election.id, candidates, rev: p.rev };
+  }
+
+  vote(caller, args, ctx = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    if (!p.election) throw derr('NO_ELECTION', 'no open election for this project');
+    if (!p.election.candidates.includes(caller) && caller !== 'user') {
+      throw derr('NOT_RESPONSIBLE', 'only an online candidate may vote', { caller, candidates: p.election.candidates });
+    }
+    const candidate = this._federate(String(args.candidate || '').trim());
+    if (!p.election.candidates.includes(candidate)) throw derr('BAD_LINK', `candidate not on the slate: ${candidate}`);
+    p.election.votes[caller] = candidate;
+    const ts = ctx.ts || Date.now();
+    // Auto-tally once every candidate has voted (no timer needed for the bench).
+    let elected = null;
+    if (p.election.candidates.every((c) => p.election.votes[c] !== undefined)) elected = this._tallyElection(p);
+    this._mutate(p, { ts, actor: caller, op: elected ? 'elect-curator' : 'vote', after: elected ? elected : `${caller}->${candidate}` }, ctx);
+    return { ok: true, op: 'vote', projectId: p.id, voted: candidate, tallied: !!elected, curator: elected || undefined, rev: p.rev };
+  }
+
+  closeElection(caller, args, ctx = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    if (!p.election) throw derr('NO_ELECTION', 'no open election for this project');
+    if (!p.participants.includes(caller) && caller !== 'user') {
+      throw derr('NOT_RESPONSIBLE', 'only a project participant may close an election', { caller });
+    }
+    const ts = ctx.ts || Date.now();
+    const winner = this._tallyElection(p); // tally whatever votes are in (offline candidates skipped)
+    this._mutate(p, { ts, actor: caller, op: 'elect-curator', after: winner }, ctx);
+    return { ok: true, op: 'elect-curator', projectId: p.id, curator: winner, rev: p.rev };
   }
 
   // ── reads (no auth, no mutation) ──────────────────────────────────────────

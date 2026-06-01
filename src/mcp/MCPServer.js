@@ -729,6 +729,27 @@ class MCPServer extends EventEmitter {
         this._signalDashboardChange(r.projectId, { op: 'transfer-curator', rev: r.rev, by: callerAgentId });
         return r;
       }
+      case 'dashboard_open_election': {
+        requireString('projectId');
+        const m = this._dash().meta(args.projectId);
+        const curatorOnline = this._isAgentReachable(m.curator);
+        const onlineParticipants = m.participants.filter((a) => this._isAgentReachable(a));
+        const r = this._dash().openElection(callerAgentId, args, { ts: Date.now() }, { curatorOnline, onlineParticipants });
+        this._signalDashboardChange(r.projectId, { op: 'open-election', rev: r.rev, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_vote': {
+        requireString('projectId'); requireString('candidate');
+        const r = this._dash().vote(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: r.tallied ? 'elect-curator' : 'vote', entryId: r.curator, rev: r.rev, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_close_election': {
+        requireString('projectId');
+        const r = this._dash().closeElection(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'elect-curator', entryId: r.curator, rev: r.rev, by: callerAgentId });
+        return r;
+      }
       case 'dashboard_set_entry': {
         requireString('projectId'); requireString('repo'); requireString('oneliner');
         const r = this._dash().setEntry(callerAgentId, args, { ts: Date.now(), conv: args.conversationId || null });
@@ -766,6 +787,25 @@ class MCPServer extends EventEmitter {
   }
 
   /**
+   * Best-effort liveness: is an agent currently reachable from this instance
+   * (local session, external bridge, or federated peer)? Used to decide whether
+   * a project curator is offline before allowing an election. A federated id
+   * for THIS instance's own session agent (claude-<thisHost>-N) maps back to the
+   * local session agent.
+   * @private
+   */
+  _isAgentReachable(agentId) {
+    if (!agentId || agentId === 'user') return false;
+    if (this.session.getAgent?.(agentId)) return true;
+    if (this.externalAgents.has(agentId)) return true;
+    if (this.federationHub?.remoteAgents?.has(agentId)) return true;
+    const host = process.env.BUKOWSKI_HOST;
+    const m = host && new RegExp(`^(claude|codex|gemini)-${host}-(\\d+)$`).exec(agentId);
+    if (m && this.session.getAgent?.(`${m[1]}-${m[2]}`)) return true;
+    return false;
+  }
+
+  /**
    * Return the dashboard store or throw a tagged error if this instance has none.
    * @private
    */
@@ -799,6 +839,8 @@ class MCPServer extends EventEmitter {
         promote: 'promoted', link: 'linked', 'create-project': 'created project',
         'set-goal': 'set the goal of', 'map-repos': 'remapped',
         'set-roadmap': 'updated the roadmap of', 'transfer-curator': 'transferred the lead of',
+        'open-election': 'opened a curator election for', vote: 'voted in the election for',
+        'elect-curator': 'elected the new curator of',
       };
       const verb = VERBS[info.op] || info.op;
       const target = info.entryId || projectId;

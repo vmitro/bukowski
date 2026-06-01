@@ -39,8 +39,9 @@ const SDK = 'claude-azra-sdk-kotlin-1';
 
 const store = new DashboardStore({ root: ROOT });
 
-// ── 1. project creation (curator-only) ──────────────────────────────────────
-expectErr('NOT_CURATOR', () => store.createProject('claude-azra-1', { name: 'X', goal: 'g', repos: [] }));
+// ── 1. project creation: the CREATOR becomes the curator by default ──────────
+const solo = store.createProject('claude-azra-1', { name: 'Azra Solo', goal: 'g', repos: [{ repo: 'azra', root: '/home/sheemeh/projects/azra/azra' }] }, { ts: 1 });
+assert.strictEqual(store.projects.get(solo.projectId).curator, 'claude-azra-1', 'creator becomes curator by default');
 
 const repos = [
   { repo: 'meddaemon', root: '/home/sheemeh/projects/meddaemon' },
@@ -136,6 +137,37 @@ const rmDigest = store.digest('user', { projectId: PID }).digest;
 assert(!rmDigest.includes('"children"'), 'JSON-stringified roadmap array must NOT leak raw JSON into the digest');
 assert(rmDigest.includes('A. Phase A') && rmDigest.includes('1. step one'), 'roadmap renders as a clean A./1. outline');
 console.log('OK: JSON-stringified roadmap array renders as clean outline (Anomaly 4 fix)');
+
+// ── 4g. curator election: vote + auto-tally + curator-online guard ────────────
+// curator = bukowski-1 (excluded from participants), so both repo owners are candidates.
+const ep = store.createProject('claude-bukowski-1', { name: 'Elect Test', goal: 'g', curator: 'claude-bukowski-1', repos: [
+  { repo: 'meddaemon', root: '/home/sheemeh/projects/meddaemon' },
+  { repo: 'azra', root: '/home/sheemeh/projects/azra/azra' },
+] }, { ts: ts++ });
+const EPID = ep.projectId;
+const online = ['claude-meddaemon-1', 'claude-azra-1'];
+// can't elect while the curator is reachable
+expectErr('CURATOR_ONLINE', () => store.openElection('claude-meddaemon-1', { projectId: EPID }, { ts: ts++ }, { curatorOnline: true, onlineParticipants: online }));
+store.openElection('claude-meddaemon-1', { projectId: EPID }, { ts: ts++ }, { curatorOnline: false, onlineParticipants: online });
+store.vote('claude-meddaemon-1', { projectId: EPID, candidate: 'claude-azra-1' }, { ts: ts++ });
+const v2 = store.vote('claude-azra-1', { projectId: EPID, candidate: 'claude-azra-1' }, { ts: ts++ });
+assert.strictEqual(v2.tallied, true, 'election auto-tallies once all candidates voted');
+assert.strictEqual(store.projects.get(EPID).curator, 'claude-azra-1', 'election winner (2 votes) becomes curator');
+console.log('OK: curator election — vote, auto-tally, curator-online guard');
+
+// ── 4h. tie resolves deterministically (convergent across reload) ─────────────
+const tp = store.createProject('claude-bukowski-1', { name: 'Tie Test', goal: 'g', curator: 'claude-bukowski-1', repos: [
+  { repo: 'meddaemon', root: '/home/sheemeh/projects/meddaemon' },
+  { repo: 'azra', root: '/home/sheemeh/projects/azra/azra' },
+] }, { ts: ts++ });
+const TPID = tp.projectId;
+store.openElection('claude-azra-1', { projectId: TPID }, { ts: ts++ }, { curatorOnline: false, onlineParticipants: online });
+store.vote('claude-meddaemon-1', { projectId: TPID, candidate: 'claude-meddaemon-1' }, { ts: ts++ });
+store.vote('claude-azra-1', { projectId: TPID, candidate: 'claude-azra-1' }, { ts: ts++ }); // 1-1 tie → deterministic tiebreak
+const tieWinner = store.projects.get(TPID).curator;
+assert(online.includes(tieWinner), 'tie resolves to one of the tied candidates');
+assert.strictEqual(new DashboardStore({ root: ROOT }).projects.get(TPID).curator, tieWinner, 'tiebreak is deterministic across a fresh reload');
+console.log('OK: election tie resolves deterministically (convergent)');
 
 // ── 5. round-trip: reload from disk, deep-equal ──────────────────────────────
 const store2 = new DashboardStore({ root: ROOT });
