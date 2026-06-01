@@ -548,7 +548,28 @@ class DashboardStore {
         .map((x) => ({ id: x.id, owner: x.owner, oneliner: x.oneliner }));
       if (others.length) res.inProgressElsewhere = others;
     }
+    const refWarnings = this._refRepoWarnings(p, refs);
+    if (refWarnings.length) res.warnings = refWarnings;
     return res;
+  }
+
+  /** Soft prefix-check: a "<repo>://..." ref whose <repo> isn't in the project map. Pure. */
+  _refRepoWarnings(p, refs) {
+    const repoNames = new Set(p.repos.map((r) => r.repo));
+    const warns = [];
+    for (const ref of refs || []) {
+      const m = /^([A-Za-z][\w-]*):\/\//.exec(String(ref));
+      if (m && !repoNames.has(m[1])) {
+        warns.push(`ref "${ref}": "${m[1]}" is not a repo in this project (known: ${[...repoNames].join(', ') || 'none'})`);
+      }
+    }
+    return warns;
+  }
+
+  /** Repo→checkout-root map for a project (used by the MCP layer's sha existence check). */
+  repoRoots(id) {
+    const p = this._project(id);
+    return p.repos.map((r) => ({ repo: r.repo, root: r.root }));
   }
 
   closeEntry(caller, args, ctx = {}) {

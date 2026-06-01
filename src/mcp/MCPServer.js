@@ -759,6 +759,8 @@ class MCPServer extends EventEmitter {
       case 'dashboard_set_entry': {
         requireString('projectId'); requireString('repo'); requireString('oneliner');
         const r = this._dash().setEntry(callerAgentId, args, { ts: Date.now(), conv: args.conversationId || null });
+        const gitWarn = this._validateShaRefs(r.projectId, args.refs); // soft, best-effort
+        if (gitWarn.length) r.warnings = [...(r.warnings || []), ...gitWarn];
         this._signalDashboardChange(r.projectId, { op: r.op, entryId: r.entryId, rev: r.rev, ref: { refs: args.refs || [] }, by: callerAgentId });
         return r;
       }
@@ -809,6 +811,36 @@ class MCPServer extends EventEmitter {
     const m = host && new RegExp(`^(claude|codex|gemini)-${host}-(\\d+)$`).exec(agentId);
     if (m && this.session.getAgent?.(`${m[1]}-${m[2]}`)) return true;
     return false;
+  }
+
+  /**
+   * Best-effort, SOFT validation that each "<repo>://sha/<sha>" ref resolves to a
+   * real object in that repo's checkout — catches wrong-repo/dangling shas before
+   * they rot chain-walks. Never blocks: if the checkout is absent or git fails,
+   * the ref is left unverified. Returns a list of warning strings.
+   * @private
+   */
+  _validateShaRefs(projectId, refs) {
+    const warns = [];
+    if (!Array.isArray(refs) || !refs.length || !this.dashboardStore) return warns;
+    let roots;
+    try { roots = new Map(this.dashboardStore.repoRoots(projectId).map((r) => [r.repo, r.root])); }
+    catch { return warns; }
+    const { execFileSync } = require('child_process');
+    for (const ref of refs) {
+      const m = /^([A-Za-z][\w-]*):\/\/sha\/([0-9a-fA-F]{4,40})$/.exec(String(ref));
+      if (!m) continue;
+      const root = roots.get(m[1]);
+      if (!root || !fs.existsSync(root)) continue; // can't verify → leave it (soft)
+      try { execFileSync('git', ['-C', root, 'rev-parse', '--git-dir'], { stdio: 'ignore', timeout: 3000 }); }
+      catch { continue; } // not a git checkout → can't verify (soft-skip, no false warning)
+      try {
+        execFileSync('git', ['-C', root, 'cat-file', '-e', m[2]], { stdio: 'ignore', timeout: 3000 });
+      } catch {
+        warns.push(`ref "${ref}": sha not found in ${m[1]} checkout (${root}) — possible wrong-repo sha`);
+      }
+    }
+    return warns;
   }
 
   /**

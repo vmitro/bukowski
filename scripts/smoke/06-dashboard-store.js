@@ -206,6 +206,13 @@ const onRoadmap = store.recipientsFor(NPID, { op: 'set-roadmap', by: 'claude-buk
 assert(onRoadmap.includes('claude-meddaemon-1') && onRoadmap.includes('claude-azra-1'), 'project-level events reach all participants');
 console.log('OK: change-feed recipients relevance-scoped (self-edit silent, links/deps targeted, project-level broadcast)');
 
+// ── 4k. soft prefix-validation of grounding refs ──────────────────────────────
+const wBad = store.setEntry('claude-azra-1', { projectId: NPID, repo: 'azra', category: 'tasks', oneliner: 'unknown ref prefix', refs: ['azra-agent://sha/deadbeef'] }, { ts: ts++ });
+assert(wBad.warnings && wBad.warnings.some((s) => /azra-agent/.test(s)), 'a ref with an unknown repo prefix warns (azra-agent not in this project)');
+const wOk = store.setEntry('claude-azra-1', { projectId: NPID, repo: 'azra', category: 'tasks', oneliner: 'known ref prefix', refs: ['azra://sha/deadbeef'] }, { ts: ts++ });
+assert(!wOk.warnings, 'a ref with a known repo prefix produces no prefix warning');
+console.log('OK: soft prefix-validation warns on unknown repo prefixes, silent on known');
+
 // ── 5. round-trip: reload from disk, deep-equal ──────────────────────────────
 const store2 = new DashboardStore({ root: ROOT });
 const p1 = store.projects.get(PID);
