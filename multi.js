@@ -25,6 +25,7 @@ const os = require('os');
 const { Session } = require('./src/core/Session');
 const { Agent } = require('./src/core/Agent');
 const { ChatAgent } = require('./src/core/ChatAgent');
+const { DashboardAgent } = require('./src/core/DashboardAgent');
 const { LayoutManager } = require('./src/layout/LayoutManager');
 const { Compositor } = require('./src/core/Compositor');
 const { InputRouter } = require('./src/input/InputRouter');
@@ -427,9 +428,13 @@ terminal.registerSignalHandlers();
         layoutManager.closePane();
         compositor.cleanupPane(paneId);  // Clear reflow timers and state
 
-        // Announce agent departure in chat (skip chat agents)
-        if (agent.type !== 'chat') {
+        // Announce agent departure in chat (skip virtual panes)
+        if (agent.type !== 'chat' && agent.type !== 'dashboard') {
           broadcastSystemMessage(`${agent.name} (${agent.id}) left the session`);
+        }
+        // Stop the dashboard's auto-refresh timer when its pane closes.
+        if (agent.type === 'dashboard' && typeof agent.destroy === 'function') {
+          agent.destroy();
         }
 
         session.removeAgent(agent.id);
@@ -461,6 +466,18 @@ terminal.registerSignalHandlers();
       dashboardStore = new DashboardStore();
     } catch (err) {
       console.error('[dashboard] disabled:', err.message);
+    }
+  }
+
+  // Restore dashboard panes saved in the session (virtual, PTY-less; skipped
+  // during the initial agent load because the store didn't exist yet). The
+  // layout already holds the pane referencing `dashboard-N`; we just need the
+  // agent in the session so getAgent() resolves it.
+  if (pendingSessionData?.agents) {
+    for (const agentData of pendingSessionData.agents) {
+      if (agentData.type === 'dashboard' && !session.getAgent(agentData.id)) {
+        session.addAgent(DashboardAgent.fromJSON(agentData, dashboardStore));
+      }
     }
   }
   const mcpServer = new MCPServer(session, fipaHub, ipcHub, dashboardStore);
@@ -945,6 +962,14 @@ terminal.registerSignalHandlers();
   compositor = new Compositor(session, layoutManager, tabBar, chatPane, conversationList, overlayManager);
   compositor.startCursorBlink();
 
+  // Restored dashboard panes are created before the compositor exists, so wire
+  // their redraw signal now (freshly-split ones get it in createDashboardPane).
+  for (const agent of session.getAllAgents()) {
+    if (agent.type === 'dashboard' && typeof agent.on === 'function') {
+      agent.on('data', () => compositor.scheduleDraw());
+    }
+  }
+
   // Optional compositor health logging for debugging pane slowdowns
   const metricsIntervalMs = parseInt(process.env.BUKOWSKI_COMPOSITOR_METRICS_MS, 10) || 0;
 
@@ -1329,8 +1354,9 @@ terminal.registerSignalHandlers();
         const agent = session.getAgent(pane.agentId);
         if (agent && agent.pty) {
           agent.resize(pane.bounds.width, pane.bounds.height);
-        } else if (agent && agent.type === 'chat') {
-          // ChatAgent has no PTY but needs resize for text reflow
+        } else if (agent && !agent.pty && typeof agent.resize === 'function') {
+          // Virtual panes (ChatAgent, DashboardAgent) have no PTY but need a
+          // resize so they re-render to the new bounds.
           agent.resize(pane.bounds.width, pane.bounds.height);
         }
       }
@@ -1408,8 +1434,8 @@ terminal.registerSignalHandlers();
   for (let i = 0; i < allPanes.length; i++) {
     const pane = allPanes[i];
     const agent = session.getAgent(pane.agentId);
-    // Skip chat agents (virtual, no PTY/spawn) and already-spawned agents
-    if (agent && !agent.pty && agent.type !== 'chat') {
+    // Skip virtual panes (chat/dashboard — no PTY/spawn) and already-spawned agents
+    if (agent && !agent.pty && agent.type !== 'chat' && agent.type !== 'dashboard') {
       // On fresh sessions, drop any stale saved agentSessionId to avoid reusing old resumes
       if (!restoredSession) {
         agent.agentSessionId = null;
@@ -1579,6 +1605,38 @@ terminal.registerSignalHandlers();
     return chatAgent;
   }
 
+  // Create a DashboardAgent (project board) and add it to a pane. Mirrors
+  // createChatPane: a virtual, PTY-less pane that tiles like any other.
+  function createDashboardPane(splitDir = 'horizontal') {
+    // One board is plenty — focus an existing one instead of stacking.
+    const existing = layoutManager.getAllPanes().find(p => p.agentId.startsWith('dashboard-'));
+    if (existing) {
+      layoutManager.focusPane(existing.id);
+      compositor.draw();
+      return session.getAgent(existing.agentId);
+    }
+
+    // Find next free dashboard-N id.
+    const taken = new Set(session.getAllAgents().filter(a => a.type === 'dashboard').map(a => a.id));
+    let num = 1;
+    while (taken.has(`dashboard-${num}`)) num++;
+
+    const dashAgent = new DashboardAgent(dashboardStore, { id: `dashboard-${num}` });
+    session.addAgent(dashAgent);
+
+    const newPane = splitDir === 'vertical'
+      ? layoutManager.splitVertical(dashAgent.id)
+      : layoutManager.splitHorizontal(dashAgent.id);
+
+    if (newPane) {
+      dashAgent.resize(newPane.bounds.width, newPane.bounds.height);
+      dashAgent.on('data', () => compositor.scheduleDraw());
+    }
+
+    handleResize();
+    return dashAgent;
+  }
+
   // Show conversation picker overlay
   function showConversationPicker(splitDir = 'horizontal') {
     pendingChatSplit = splitDir;
@@ -1696,6 +1754,7 @@ terminal.registerSignalHandlers();
     onCreateNewAgent: createNewAgent,
     onSetupAgentHandlers: setupAgentHandlers,
     onCreateChatPane: createChatPane,
+    onCreateDashboardPane: createDashboardPane,
     onShowConversationPicker: showConversationPicker,
     onFocusOrCreateChatPane: focusOrCreateChatPane,
     onYankSelection: yankSelection,
@@ -1735,7 +1794,7 @@ terminal.registerSignalHandlers();
     // In chat mode, buffer lone ESC to allow split escape sequences (e.g. Ctrl+Arrow).
     const focusedPane = layoutManager.getFocusedPane();
     const focusedAgent = focusedPane ? session.getAgent(focusedPane.agentId) : null;
-    const chatFocused = focusedAgent?.type === 'chat';
+    const chatFocused = focusedAgent?.type === 'chat' || focusedAgent?.type === 'dashboard';
     if (chatFocused) {
       if (chatEscBuffer) {
         str = chatEscBuffer + str;

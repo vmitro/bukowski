@@ -304,8 +304,12 @@ class CommandExecutor {
         if (!projectId) { out('usage: :dashboard delete <projectId>'); return; }
         const r = this.dashboardStore.deleteProject('user', { projectId });
         out(`dashboard: deleted project ${r.projectId}`);
+      } else if (sub === 'pane' || sub === 'board' || sub === 'open' || sub === 'split') {
+        // Open the always-on dashboard board as a tiled pane.
+        const dir = (args[1] || '').toLowerCase().startsWith('v') ? 'split_vertical' : 'split_horizontal';
+        this.dispatcher.dispatch({ action: dir, agentType: 'dashboard' });
       } else {
-        out('usage: :dashboard [list | show <id> | transfer <id> <agent> | close-election <id> | delete <id>]');
+        out('usage: :dashboard [list | show <id> | pane [v] | transfer <id> <agent> | close-election <id> | delete <id>]');
       }
     } catch (err) {
       const m = /DASHBOARD_ERROR (\{.*\})/.exec(err.message || '');

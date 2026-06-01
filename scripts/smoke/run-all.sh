@@ -12,6 +12,7 @@ scripts=(
   "$here/05-channels.js"
   "$here/06-dashboard-store.js"
   "$here/07-dashboard.js"
+  "$here/08-dashboard-pane.js"
 )
 
 failed=0

@@ -234,6 +234,9 @@ function getFIPAPromptArgs(agentTypes, agentType, existingArgs) {
 function resolveAgentType(agentTypes, arg) {
   if (!arg) return 'claude'; // default
   const type = arg.toLowerCase();
+  // Virtual pane types — not PTY-backed agents in AGENT_TYPES, but valid
+  // `:split` targets (the split handler routes them to their pane factory).
+  if (type === 'chat' || type === 'dashboard') return type;
   if (agentTypes[type] && agentTypes[type].command) {
     return type;
   }

@@ -9,6 +9,8 @@ const splitHandlers = {
 
     if (agentType === 'chat') {
       ctx.onShowConversationPicker('horizontal');
+    } else if (agentType === 'dashboard') {
+      ctx.onCreateDashboardPane('horizontal');
     } else {
       const newAgent = ctx.onCreateNewAgent(agentType, extraArgs);
       const newPane = ctx.layoutManager.splitHorizontal(newAgent.id);
@@ -26,6 +28,8 @@ const splitHandlers = {
 
     if (agentType === 'chat') {
       ctx.onShowConversationPicker('vertical');
+    } else if (agentType === 'dashboard') {
+      ctx.onCreateDashboardPane('vertical');
     } else {
       const newAgent = ctx.onCreateNewAgent(agentType, extraArgs);
       const newPane = ctx.layoutManager.splitVertical(newAgent.id);
@@ -45,6 +49,7 @@ const splitHandlers = {
       if (ctx.layoutManager.closePane()) {
         ctx.compositor.cleanupPane(paneId);
         if (agentToKill) {
+          if (typeof agentToKill.destroy === 'function') agentToKill.destroy();
           ctx.session.removeAgent(agentToKill.id);
         }
         ctx.onHandleResize();

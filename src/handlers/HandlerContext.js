@@ -31,6 +31,7 @@ class HandlerContext {
     this.onCreateNewAgent = options.onCreateNewAgent || (() => null);
     this.onSetupAgentHandlers = options.onSetupAgentHandlers || (() => {});
     this.onCreateChatPane = options.onCreateChatPane || (() => null);
+    this.onCreateDashboardPane = options.onCreateDashboardPane || (() => null);
     this.onShowConversationPicker = options.onShowConversationPicker || (() => {});
     this.onFocusOrCreateChatPane = options.onFocusOrCreateChatPane || (() => {});
     this.onYankSelection = options.onYankSelection || (() => {});
