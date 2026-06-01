@@ -399,9 +399,15 @@ class DashboardStore {
     const participants = repos
       .map((r) => r.owner)
       .filter((o) => !ROADMAP_EXCLUDED.has(o));
+    // Per-project curator (the lead who owns this project's goal/roadmap/repo
+    // map) is distinct from the dashboard-framework curator (this.curator, who
+    // owns the category set + bootstraps creation). Defaults to the lead named
+    // in args.curator, else the framework curator. Repo owners still own their
+    // own entries regardless of who leads the project.
+    const projectCurator = args.curator ? this._federate(args.curator) : this.curator;
     const p = {
       id, name, goal: String(args.goal || ''), participants,
-      repos, curator: this.curator, categories: {}, roadmap: [], rev: 0,
+      repos, curator: projectCurator, categories: {}, roadmap: [], rev: 0,
     };
     for (const cat of CATEGORIES) p.categories[cat] = [];
     this.projects.set(id, p);

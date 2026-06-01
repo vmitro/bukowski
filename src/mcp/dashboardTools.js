@@ -22,7 +22,7 @@ const DASHBOARD_TOOLS = [
   },
   {
     name: 'dashboard_create_project',
-    description: 'Curator-only. Create a project spanning multiple repos. Participants are derived from each repo\'s owner agent.',
+    description: 'Framework-curator-only. Create a project spanning multiple repos. Participants are derived from each repo\'s owner agent. Set curator to the project lead who will own its goal/roadmap (defaults to the framework curator).',
     inputSchema: {
       type: 'object',
       required: ['name', 'goal'],
@@ -30,6 +30,7 @@ const DASHBOARD_TOOLS = [
         name: { type: 'string', description: 'human name; slugified into the project id' },
         goal: { type: 'string', description: 'one-line general goal' },
         repos: { type: 'array', items: repoItem, description: 'repos this project spans' },
+        curator: { type: 'string', description: 'project lead agent id (owns goal/roadmap/repo-map); defaults to the framework curator' },
       },
     },
   },
