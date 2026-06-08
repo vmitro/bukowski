@@ -372,7 +372,8 @@ function _installChannelPluginCache() {
   const known = readJSON(CLAUDE_KNOWN_MARKETPLACES) || {};
   known[CHANNEL_MARKETPLACE] = {
     source: { source: 'directory', path: CHANNEL_ROOT },
-    installLocation: CHANNEL_ROOT
+    installLocation: CHANNEL_ROOT,
+    lastUpdated: new Date().toISOString()
   };
   writeJSON(CLAUDE_KNOWN_MARKETPLACES, known);
 
