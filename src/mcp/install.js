@@ -275,6 +275,7 @@ function uninstallGemini() {
 function _writeChannelPluginFiles() {
   const marketplaceManifest = {
     name: CHANNEL_MARKETPLACE,
+    description: 'bukowski FIPA channel marketplace — push-only MCP plugin for inter-agent messaging',
     owner: { name: 'bukowski' },
     plugins: [
       {
