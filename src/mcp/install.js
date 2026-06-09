@@ -136,30 +136,11 @@ function uninstallClaude() {
  * Uses `codex mcp add` CLI when available
  */
 function installCodex() {
-  // First try to remove existing entry (in case of update)
-  try {
-    if (commandExists('codex')) {
-      execSync('codex mcp remove bukowski 2>/dev/null || true', { stdio: 'pipe' });
-    }
-  } catch {
-    // Ignore - might not exist
-  }
-
-  // Try using codex CLI
-  // No --env: let bridge inherit BUKOWSKI_AGENT_ID and BUKOWSKI_AGENT_TYPE from parent process
-  if (commandExists('codex')) {
-    try {
-      execSync(
-        `codex mcp add bukowski -- node "${BRIDGE_SCRIPT}"`,
-        { stdio: 'pipe' }
-      );
-      return true;
-    } catch {
-      // CLI failed, fall back to manual config
-    }
-  }
-
-  // Fallback: manual TOML editing
+  // Manual TOML editing only. We do NOT use `codex mcp add`: some codex
+  // versions serialize the args path as a bare table header
+  // (["/abs/path/bukowski-mcp-bridge.js"]) and append one on every run, so
+  // repeated installs accumulate duplicate keys and corrupt config.toml.
+  // Writing the server block ourselves is deterministic and idempotent.
   const configPath = CONFIG_PATHS.codex;
   const dir = path.dirname(configPath);
 
@@ -174,37 +155,42 @@ function installCodex() {
     // File doesn't exist yet
   }
 
-  // Remove existing bukowski section if present
-  content = content.replace(/\[mcp_servers\.bukowski\][\s\S]*?(?=\[|$)/g, '');
-  content = content.replace(/\n{3,}/g, '\n\n').trim();
+  content = sanitizeCodexBukowski(content);
 
-  // Append new config (no env section - inherit from parent process)
-  const newSection = `
-[mcp_servers.bukowski]
+  // Append the canonical server block exactly once (no env section - the
+  // bridge inherits BUKOWSKI_AGENT_ID / BUKOWSKI_AGENT_TYPE from the parent).
+  const newSection = `[mcp_servers.bukowski]
 command = "node"
-args = ["${BRIDGE_SCRIPT}"]
-`;
+args = ["${BRIDGE_SCRIPT}"]`;
 
-  content = content + '\n' + newSection;
+  content = (content ? content + '\n\n' : '') + newSection;
   fs.writeFileSync(configPath, content.trim() + '\n', 'utf-8');
   return true;
+}
+
+/**
+ * Strip every bukowski-owned artifact from codex config.toml content so the
+ * server block can be re-appended exactly once. Removes:
+ *   - the canonical [mcp_servers.bukowski] block (command/args)
+ *   - bare ["<...>/bukowski-mcp-bridge.js"] table headers written by buggy
+ *     `codex mcp add` versions
+ * Leaves user-owned tables ([mcp_servers.bukowski.tools.*], etc.) untouched.
+ */
+function sanitizeCodexBukowski(content) {
+  if (!content) return '';
+  // Remove the exact server block (non-greedy up to the next table header).
+  content = content.replace(/\[mcp_servers\.bukowski\][\s\S]*?(?=\n\[|$)/g, '');
+  // Remove bare table headers that are just the quoted bridge path.
+  content = content.replace(/^\[".*bukowski-mcp-bridge\.js"\]\s*$/gm, '');
+  // Collapse the blank lines left behind.
+  return content.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /**
  * Uninstall bukowski MCP server from Codex
  */
 function uninstallCodex() {
-  // Try using codex CLI
-  if (commandExists('codex')) {
-    try {
-      execSync('codex mcp remove bukowski', { stdio: 'pipe' });
-      return true;
-    } catch {
-      // CLI failed, fall back to manual removal
-    }
-  }
-
-  // Fallback: manual TOML editing
+  // Manual TOML editing only (mirrors installCodex; avoids the buggy CLI).
   const configPath = CONFIG_PATHS.codex;
 
   if (!fs.existsSync(configPath)) {
@@ -212,14 +198,12 @@ function uninstallCodex() {
   }
 
   let content = fs.readFileSync(configPath, 'utf-8');
-  const hadBukowski = content.includes('[mcp_servers.bukowski]');
+  const hadBukowski = content.includes('[mcp_servers.bukowski]')
+    || /^\[".*bukowski-mcp-bridge\.js"\]\s*$/m.test(content);
 
-  // Remove the bukowski sections
-  content = content.replace(/\[mcp_servers\.bukowski\][\s\S]*?(?=\[|$)/g, '');
-  content = content.replace(/\[mcp_servers\.bukowski\.env\][\s\S]*?(?=\[|$)/g, '');
-  content = content.replace(/\n{3,}/g, '\n\n').trim();
+  content = sanitizeCodexBukowski(content);
 
-  fs.writeFileSync(configPath, content + '\n', 'utf-8');
+  fs.writeFileSync(configPath, content ? content + '\n' : '', 'utf-8');
   return hadBukowski;
 }
 
