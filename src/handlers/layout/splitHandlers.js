@@ -7,6 +7,12 @@ const splitHandlers = {
     const agentType = result.agentType || 'claude';
     const extraArgs = result.extraArgs || [];
 
+    // Splitting while zoomed would operate on the detached single-pane zoom
+    // view (the real tree lives in savedLayout), orphaning the new pane —
+    // it renders grayed and unreachable. Unzoom first, then split the real
+    // layout.
+    if (ctx.layoutManager.isZoomed()) ctx.layoutManager.toggleZoom();
+
     if (agentType === 'chat') {
       ctx.onShowConversationPicker('horizontal');
     } else if (agentType === 'dashboard') {
@@ -25,6 +31,10 @@ const splitHandlers = {
   split_vertical(ctx, result) {
     const agentType = result.agentType || 'claude';
     const extraArgs = result.extraArgs || [];
+
+    // See split_horizontal: unzoom before splitting so the new pane lands in
+    // the real layout instead of the throwaway zoom view.
+    if (ctx.layoutManager.isZoomed()) ctx.layoutManager.toggleZoom();
 
     if (agentType === 'chat') {
       ctx.onShowConversationPicker('vertical');
