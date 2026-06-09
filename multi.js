@@ -804,9 +804,19 @@ terminal.registerSignalHandlers();
         return n;
       }
       function snapshotLocalRoster() {
-        return session.getAllAgents()
+        const ptyAgents = session.getAllAgents()
           .filter(isFederatable)
           .map(a => ({ localId: a.id, type: a.type, federatedId: federatedIdFor(a) }));
+        // External bridge clients (codex/gemini connecting purely through the
+        // MCP bridge — no pty, no session pane) must federate too, else peers
+        // can route TO them (their host learns our roster) but never learn of
+        // THEM: list_agents omits them and replies fail "Unknown agent". Their
+        // assigned id already embeds the host (e.g. codex-azra-agent-1) and is
+        // both the externalAgents key and the messageQueue key, so localId and
+        // federatedId are the same.
+        const bridgeAgents = (mcpServer.getExternalAgents?.() || [])
+          .map(a => ({ localId: a.id, type: a.type, federatedId: a.id }));
+        return [...ptyAgents, ...bridgeAgents];
       }
 
       federationHub = new FederationHub({
@@ -860,13 +870,19 @@ terminal.registerSignalHandlers();
             const found = session.getAllAgents().find(
               a => isFederatable(a) && federatedIdFor(a) === federatedTo
             );
-            if (!found) {
+            if (found) {
+              resolvedLocalId = found.id;
+            } else if (mcpServer.externalAgents.has(federatedTo)) {
+              // External bridge agent: its federated id IS its local id and
+              // its messageQueue key, so deliver straight to that queue (the
+              // bridge polls get_pending_messages).
+              resolvedLocalId = federatedTo;
+            } else {
               broadcastSystemMessage(
                 `federation: dropped misrouted forward (to ${federatedTo}; no local match)`
               );
               return;
             }
-            resolvedLocalId = found.id;
           } else {
             // Older sender without `_federatedTo` — fall back to the
             // wire's `to` and hope for the best.
@@ -948,11 +964,27 @@ terminal.registerSignalHandlers();
   });
 
   // Wire MCPServer agent connect/disconnect notifications to chat
-  mcpServer.on('external_agent:connected', ({ agentId }) => {
+  mcpServer.on('external_agent:connected', ({ agentId, agentType }) => {
     broadcastSystemMessage(`${agentId} joined the session`);
+    // Federate the bridge client so peers can resolve + reply to it. Its
+    // assigned id already embeds the host, so localId === federatedId.
+    if (federationHub) {
+      try {
+        federationHub.announceLocalAgent({
+          localId: agentId, type: agentType || agentId.split('-')[0], federatedId: agentId
+        });
+      } catch { /* federation optional */ }
+    }
   });
   mcpServer.on('external_agent:disconnected', (agentId) => {
     broadcastSystemMessage(`${agentId} left the session`);
+    if (federationHub) {
+      try {
+        federationHub.announceLocalRemoval({
+          localId: agentId, type: agentId.split('-')[0], federatedId: agentId
+        });
+      } catch { /* federation optional */ }
+    }
   });
 
   // Create overlay manager for modal UIs (ACL input, agent picker, etc.)
