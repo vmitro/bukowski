@@ -171,6 +171,21 @@ class FederationHub extends EventEmitter {
   }
 
   /**
+   * Look up a federated id that belongs to one of OUR OWN agents; returns
+   * the agent's local id or null. Local agents are advertised to peers
+   * under these aliases (claude-<host>-N), so agents learn them from
+   * list_agents output / peer chatter and use them as FIPA targets even
+   * when the target lives on the very same instance — without this lookup
+   * such a send fails "Unknown agent" although the id is the one the
+   * federation itself advertises.
+   */
+  resolveLocalAlias(federatedId) {
+    if (!federatedId) return null;
+    const hit = this._localRosterSnapshot().find(a => a.federatedId === federatedId);
+    return hit ? hit.localId : null;
+  }
+
+  /**
    * Forward an IPC-shape message to its federated recipient. The message
    * carries the agent-level `from`/`to` already in their federated forms
    * (caller's responsibility); FederationHub rewrites `to` down to the

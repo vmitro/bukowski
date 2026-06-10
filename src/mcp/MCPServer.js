@@ -5,6 +5,7 @@ const EventEmitter = require('events');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { hostFromCwd } = require('../utils/host');
 
 /**
@@ -905,6 +906,15 @@ class MCPServer extends EventEmitter {
       throw new Error('FIPA Hub not available');
     }
 
+    // The target may be addressed by the host-named federated alias of an
+    // agent living on THIS instance (claude-<host>-N) — that's the id the
+    // federation advertises, so agents copy it even for same-instance
+    // peers. Canonicalize to the local id so delivery goes straight to the
+    // local queue instead of failing "Unknown agent". Checked before
+    // resolveRemote so an alias of our own agent can never be routed out.
+    const localAlias = this.federationHub?.resolveLocalAlias?.(to) || null;
+    if (localAlias) to = localAlias;
+
     // Validate target agent exists (session, external, federated, or
     // the special "user" identity).
     const sessionAgent = this.session.getAgent(to);
@@ -915,8 +925,13 @@ class MCPServer extends EventEmitter {
       throw new Error(`Unknown agent: ${to}`);
     }
 
-    // Send via FIPAHub - pass conversationId in options if provided
-    const opts = conversationId ? { conversationId } : {};
+    // Send via FIPAHub. The hub methods are async (request/query even wait
+    // for the reply); we deliberately don't await — MCP callers poll for
+    // responses via get_pending_messages. But that means the returned
+    // promise can't supply the conversationId, so mint one up front and
+    // thread it through: the caller needs it to correlate the reply.
+    if (!conversationId) conversationId = crypto.randomUUID();
+    const opts = { conversationId };
     let result;
     switch (performative) {
       case 'request':
@@ -942,10 +957,11 @@ class MCPServer extends EventEmitter {
         break;
       default:
         // Fall back to inform for unknown performatives
-        result = this.fipaHub.inform(from, to, { [performative]: content });
+        result = this.fipaHub.inform(from, to, { [performative]: content }, opts);
     }
+    void result; // fire-and-forget; replies arrive via the message queue
 
-    return { success: true, conversationId: result?.conversationId || null };
+    return { success: true, conversationId };
   }
 
   /**
