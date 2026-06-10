@@ -576,10 +576,55 @@ class Compositor {
     frame += `\x1b[${this.rows};1H\x1b[2K`;
     frame += this.renderStatusBar();
 
-    frame += '\x1b[?25h';           // Show cursor
+    // Park the host cursor on the focused pane's cursor cell (or keep it
+    // hidden) — never a bare show: that left the cursor wherever the status
+    // bar write ended, a stray cursor in whatever pane that overlapped.
+    frame += this.hardwareCursorSeq();
     frame += '\x1b[?2026l';         // End sync update
 
     process.stdout.write(frame);
+  }
+
+  /**
+   * Hardware-cursor parking for the focused pane, tmux-style: the real
+   * terminal cursor appears only in the active pane, and only while the
+   * app in that pane actually shows it.
+   *
+   * Claude Code >= 2.1.170 native-cursor mode (and any PTY app that relies
+   * on the host terminal to paint the cursor) keeps DECTCEM on and parks
+   * the hardware cursor on its input cell. The compositor consumes those
+   * moves into the headless xterm, so at frame end we re-derive the cell
+   * from the agent's buffer and park the host cursor there. Returns the
+   * escape sequence to append, or '' to leave the cursor hidden (frame
+   * starts with ?25l).
+   */
+  hardwareCursorSeq() {
+    const pane = this.layoutManager.getFocusedPane();
+    if (!pane) return '';
+    const agent = this.session.getAgent(pane.agentId);
+    // Marker-based agents (codex, chat) paint their own cursor cell.
+    if (!agent || agent.needsFakeCursor || !agent.pty) return '';
+    if (typeof agent.isCursorVisible !== 'function' || !agent.isCursorVisible()) return '';
+    // Visual/normal mode paints its own marker; overlays sit above panes.
+    if (this.visualState && this.visualState.mode !== 'insert') return '';
+    if (this.overlayManager?.hasActiveOverlay?.()) return '';
+    // During reflow or scroll lock the on-screen rows don't match the live
+    // buffer — same reason the fake-cursor marker skips these states.
+    if (this.paneReflowPhases.get(pane.id) === 'reflowing') return '';
+    if (this.scrollLocks.get(pane.id) === true) return '';
+
+    const pos = agent.getCursorPosition();
+    if (!pos) return '';
+
+    // Same scroll math as renderPaneContent: buffer line -> screen row.
+    const { x, y, width, height } = pane.bounds;
+    const maxScroll = Math.max(0, agent.getContentHeight() - height);
+    let scrollY = this.scrollOffsets.get(pane.id) || 0;
+    if (scrollY > maxScroll) scrollY = maxScroll;
+    const row = pos.line - scrollY;
+    if (row < 0 || row >= height || pos.col < 0 || pos.col >= width) return '';
+
+    return `\x1b[${y + row + 1};${x + pos.col + 1}H\x1b[?25h`;
   }
 
   /**
@@ -611,7 +656,7 @@ class Compositor {
     frame += `\x1b[${this.rows};1H\x1b[2K`;
     frame += this.renderStatusBar();
 
-    frame += '\x1b[?25h';           // Show cursor
+    // Cursor stays hidden: renderChatInput paints its own inline cursor.
     frame += '\x1b[?2026l';         // End sync update
 
     process.stdout.write(frame);
@@ -801,7 +846,10 @@ class Compositor {
             }
           }
 
-          // Insert mode: show agent's actual cursor (blinking) - only for agents that need it
+          // Insert mode: show agent's actual cursor (blinking) - only for agents that need it.
+          // Hardware-cursor apps (e.g. Claude Code >= 2.1.170 native-cursor mode) are handled
+          // by hardwareCursorSeq() at frame end instead — the real cursor is parked on the
+          // focused pane's cursor cell, so no marker is painted for them here.
           // Skip during reflow or scroll-lock: cursor line is from live buffer but scrollY may use lockedHeight
           if (agent.needsFakeCursor && (!this.visualState || this.visualState.mode === 'insert') && this.cursorBlinkVisible
               && !isReflowing && !isLocked) {

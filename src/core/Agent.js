@@ -39,7 +39,10 @@ class Agent {
     this._lineCache = new Map();  // lineIndex -> { str, gen }
     this._cacheGen = 0;           // Increments on each terminal write
 
-    // Codex needs fake cursor (its cursor doesn't survive PTY), others render their own
+    // Codex always needs the fake cursor (its cursor doesn't survive PTY).
+    // Other PTY agents get the real host cursor parked on their cursor cell
+    // when their app shows it (DECTCEM on) — see isCursorVisible() and
+    // Compositor.hardwareCursorSeq().
     this.needsFakeCursor = config.needsFakeCursor ?? (this.type === 'codex');
   }
 
@@ -82,15 +85,15 @@ class Agent {
       this.terminal.write(data);
       this._cacheGen++;  // Invalidate line cache
       this._scanForSessionId(data);
+    });
 
-      // Handle cursor position request (DSR) - respond with current cursor position
-      // Apps like Codex send \x1b[6n and expect \x1b[{row};{col}R back
-      if (data.includes('\x1b[6n')) {
-        const buffer = this.terminal.buffer.active;
-        const row = buffer.cursorY + 1;
-        const col = buffer.cursorX + 1;
-        this.pty.write(`\x1b[${row};${col}R`);
-      }
+    // Forward terminal-generated query replies (DSR/CPR for Codex's \x1b[6n,
+    // DA, DECRQM \x1b[?...$p probes like Claude Code's 2026 check) back to the
+    // child. xterm emits them via onData; without this they were dropped and
+    // apps waiting on a reply timed out. Replaces the old manual \x1b[6n
+    // handler — xterm answers that one itself with the same CPR.
+    this.terminal.onData(data => {
+      if (this.pty && this.status === 'running') this.pty.write(data);
     });
     this.pty.onExit(({ exitCode }) => {
       this.exitCode = exitCode;
@@ -160,6 +163,29 @@ class Agent {
       line: buffer.baseY + buffer.cursorY,
       col: buffer.cursorX
     };
+  }
+
+  /**
+   * DECTCEM (DEC private mode 25) state of the agent's virtual terminal.
+   *
+   * Claude Code >= 2.1.170 (statsig gate `tengu_native_cursor`) stopped
+   * painting its input cursor as an inverse-video cell and instead parks the
+   * *hardware* cursor on the input cell (CUP + ESC[?25h each frame). In a
+   * headless xterm there is no hardware cursor to see, so the compositor
+   * re-parks the host terminal's cursor on this cell at frame end
+   * (hardwareCursorSeq) — but only while the app actually shows it (older
+   * Claude Code keeps DECTCEM off for the whole session; showing it
+   * unconditionally would add a phantom cursor there).
+   *
+   * xterm.js has no public API for this mode; read it from the core service.
+   */
+  isCursorVisible() {
+    // Public wrapper holds the core at _core; CoreTerminal exposes the
+    // service as `coreService` (no underscore — `_coreService` is the
+    // InputHandler's injected copy, not reachable from here).
+    const core = this.terminal?._core ?? this.terminal;
+    const coreService = core?.coreService ?? core?._coreService;
+    return coreService ? !coreService.isCursorHidden : false;
   }
 
   getLine(index) {
