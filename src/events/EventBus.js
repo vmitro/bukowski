@@ -23,6 +23,16 @@
 // Federation forwarding hangs off the 'published' EventEmitter signal
 // (local-origin events only; remote injections don't re-emit, so a full-mesh
 // peer set cannot loop).
+//
+// RETAINED RINGS ARE PER-INSTANCE and may briefly differ across boxes.
+// Delivery is at-least-once over a full mesh: a peer that is down or bouncing
+// during a broadcast misses that event, and its retained copy then lives only
+// on the instances that received it. This is benign — a late joiner (or a
+// bounced peer coming back) heals via the subscribe-time backlog from
+// whichever instance it subscribes against — but a consumer must not assume
+// two boxes return identical retained history for the same topic. Treat
+// retained backlog as best-effort catch-up, not an authoritative log; the
+// authoritative durable record is the dashboard/refs, not the event ring.
 
 const EventEmitter = require('events');
 
