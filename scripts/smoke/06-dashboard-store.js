@@ -306,5 +306,20 @@ const storeT = new DashboardStore({ root: ROOT });
 assert.strictEqual(storeT.queryEntries('user', { projectId: NPID, entryId: tip.entryId }).entries[0].body, tipBody, 'tip body survives reload');
 console.log('OK: tips carry capped bodies + tags, queryable, digest titles-only, byte-stable');
 
+// ── 10. id watermark: no id reuse across delete/recreate eras or promotes ─────
+const era1 = store.createProject('claude-azra-1', { name: 'Era Test', goal: 'g', repos: [{ repo: 'azra', root: '/home/sheemeh/projects/azra/azra' }] }, { ts: ts++ });
+const e1a = store.setEntry('claude-azra-1', { projectId: era1.projectId, repo: 'azra', category: 'todos', oneliner: 'era one todo', refs: ['azra://sha/e1'] }, { ts: ts++ });
+assert.strictEqual(e1a.entryId, 'todo-1');
+store.deleteProject('claude-azra-1', { projectId: era1.projectId }, { ts: ts++ });
+const era2 = store.createProject('claude-azra-1', { name: 'Era Test', goal: 'g2', repos: [{ repo: 'azra', root: '/home/sheemeh/projects/azra/azra' }] }, { ts: ts++ });
+const e2a = store.setEntry('claude-azra-1', { projectId: era2.projectId, repo: 'azra', category: 'todos', oneliner: 'era two todo', refs: ['azra://sha/e2'] }, { ts: ts++ });
+assert.strictEqual(e2a.entryId, 'todo-2', `recreated project must not re-issue todo-1 (got ${e2a.entryId})`);
+// promote vacates task-N in its category; the next task must not reuse it
+const pr1 = store.setEntry('claude-azra-1', { projectId: era2.projectId, repo: 'azra', category: 'tasks', oneliner: 'will be promoted', refs: ['azra://sha/e3'] }, { ts: ts++ });
+store.promoteEntry('claude-azra-1', { projectId: era2.projectId, entryId: pr1.entryId, toCategory: 'bugs' }, { ts: ts++ });
+const pr2 = store.setEntry('claude-azra-1', { projectId: era2.projectId, repo: 'azra', category: 'tasks', oneliner: 'must get fresh id', refs: ['azra://sha/e4'] }, { ts: ts++ });
+assert.notStrictEqual(pr2.entryId, pr1.entryId, 'a promoted-away id must never be re-issued');
+console.log('OK: id watermark survives delete/recreate eras and promote vacancies');
+
 console.log('OK: dashboard-store smoke passed');
 process.exit(0);

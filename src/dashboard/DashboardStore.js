@@ -400,11 +400,28 @@ class DashboardStore {
     throw derr('NO_ENTRY', `no such entry: ${entryId}`);
   }
 
+  // Highest id suffix ever ISSUED per (projectId, prefix), kept in a global
+  // file OUTSIDE the project dirs so it survives delete-project (the whole
+  // point: a recreated project must not mint a second "todo-4" colliding with
+  // ids referenced in transcripts/memory from the deleted era). Also covers
+  // promote: an id vacated by re-filing is never re-issued in its old category.
+  _idseqPath() { return path.join(this.root, '_idseq.json'); }
+
+  _readIdseq() {
+    try { return JSON.parse(fs.readFileSync(this._idseqPath(), 'utf-8')); } catch { return {}; }
+  }
+
   _nextId(p, category) {
     const prefix = CATEGORY_PREFIX[category];
     let max = 0;
     for (const e of p.categories[category] || []) max = Math.max(max, idSuffix(e.id));
-    return `${prefix}-${max + 1}`;
+    const seq = this._readIdseq(); // fresh read: sibling instances share the file
+    max = Math.max(max, (seq[p.id] || {})[prefix] || 0);
+    const n = max + 1;
+    seq[p.id] = seq[p.id] || {};
+    seq[p.id][prefix] = n;
+    atomicWrite(this._idseqPath(), JSON.stringify(seq, null, 2));
+    return `${prefix}-${n}`;
   }
 
   _mutate(p, rec, ctx) {
