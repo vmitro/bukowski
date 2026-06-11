@@ -70,6 +70,12 @@ class MCPServer extends EventEmitter {
     // Used so `list_agents` can also surface remote agents reachable
     // through other bukowski instances.
     this.federationHub = null;
+
+    // Coordination-event bus (subscribeable facts, separate from FIPA — never
+    // touches the message queues or stop-hook). In-process; the host may wire
+    // federation forwarding onto its 'published' signal.
+    const { EventBus } = require('../events/EventBus');
+    this.eventBus = new EventBus();
   }
 
   /**
@@ -226,7 +232,8 @@ class MCPServer extends EventEmitter {
           }
         }
       },
-      ...require('./dashboardTools').DASHBOARD_TOOLS
+      ...require('./dashboardTools').DASHBOARD_TOOLS,
+      ...require('./eventTools').EVENT_TOOLS
     ];
   }
 
@@ -790,6 +797,27 @@ class MCPServer extends EventEmitter {
         return r;
       }
 
+      // ── coordination events (subscribeable facts; never touch the FIPA
+      //    inbox or stop-hook). See src/events/EventBus.js. ────────────────
+      case 'event_publish': {
+        requireString('topic');
+        return this.eventBus.publish(args.topic, args.payload, { actor: callerAgentId, ts: Date.now() });
+      }
+      case 'event_subscribe': {
+        requireString('pattern');
+        return this.eventBus.subscribe(callerAgentId, args.pattern);
+      }
+      case 'event_unsubscribe': {
+        requireString('pattern');
+        return this.eventBus.unsubscribe(callerAgentId, args.pattern);
+      }
+      case 'event_poll':
+        return this.eventBus.poll(callerAgentId, args.max);
+      case 'event_topics':
+        return args.topic
+          ? { ok: true, topic: args.topic, listeners: this.eventBus.whoListens(args.topic) }
+          : { ok: true, topics: this.eventBus.topicsInfo() };
+
       default:
         throw new Error(`Unknown tool: ${toolName}`);
     }
@@ -863,6 +891,17 @@ class MCPServer extends EventEmitter {
    * @private
    */
   _signalDashboardChange(projectId, info) {
+    // Auto-emit the mutation as a coordination EVENT on
+    // dashboard:<project>:entries FIRST — independent of the change-feed
+    // inform's relevance scoping (events are opt-in by subscription, so no
+    // noise concern) and of its early returns (empty recipients skip the
+    // inform, but the event still fires). Own try so a bus hiccup can't break
+    // the inform, and vice-versa.
+    try {
+      this.eventBus?.publish(`dashboard:${projectId}:entries`, {
+        op: info.op, entryId: info.entryId || null, rev: info.rev || null,
+      }, { actor: info.by, ts: Date.now() });
+    } catch { /* advisory */ }
     try {
       if (!this.dashboardStore || !this.fipaHub) return;
       const p = this.dashboardStore.projects.get(projectId);

@@ -548,7 +548,8 @@ const TOOLS = [
       }
     }
   },
-  ...require('./dashboardTools').DASHBOARD_TOOLS
+  ...require('./dashboardTools').DASHBOARD_TOOLS,
+  ...require('./eventTools').EVENT_TOOLS
 ];
 
 /**
