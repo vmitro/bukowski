@@ -90,5 +90,26 @@ const after = bus.publish('deploy:meddaemon:lifecycle', { state: 'up' }, { actor
 assert.strictEqual(after.subscribers, 1, 'only bukowski (wildcard) remains after azra unsubscribes');
 console.log('OK: unsubscribe stops delivery');
 
+// ── cross-box federation: local publish forwards, remote injects, no loop ──
+// Models multi.js wiring: 'published' (local only) → peer.broadcastEvent;
+// peer 'event' → injectRemote (no re-emit). Two buses, hand-wired both ways.
+const boxA = new EventBus({ host: 'azra' });
+const boxB = new EventBus({ host: 'meddaemon' });
+let aFwd = 0, bFwd = 0;
+boxA.on('published', (ev) => { aFwd++; boxB.injectRemote(ev); });   // A→B
+boxB.on('published', (ev) => { bFwd++; boxA.injectRemote(ev); });   // B→A
+// meddaemon's box subscribes to an azra-side topic (the cross-boundary case)
+boxB.subscribe('agent:azra-agent-1:status', 'agent:azra-agent-1:status');
+const fwd = boxA.publish('agent:azra-agent-1:status', { trainingDone: true }, { actor: 'claude-azra-agent-1' });
+assert.strictEqual(fwd.subscribers, 0, 'no LOCAL subscriber on box A');
+assert.strictEqual(aFwd, 1, 'local publish emitted "published" exactly once (forwarded to peer)');
+const bGot = boxB.poll('agent:azra-agent-1:status');
+assert.strictEqual(bGot.events.length, 1, 'remote subscriber on box B received the forwarded event');
+assert.strictEqual(bGot.events[0].host, 'azra', 'forwarded event keeps its origin host');
+assert.strictEqual(bGot.events[0].payload.trainingDone, true, 'payload intact across the boundary');
+// the inject on B must NOT re-emit 'published' → no bounce-back storm
+assert.strictEqual(bFwd, 0, 'injected remote event does not re-forward (no federation loop)');
+console.log('OK: cross-box event forwarding (origin preserved, no re-emit loop)');
+
 console.log('OK: events smoke passed');
 process.exit(0);

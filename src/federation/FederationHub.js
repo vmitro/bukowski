@@ -145,6 +145,20 @@ class FederationHub extends EventEmitter {
   }
 
   /**
+   * Fan a locally-published coordination event out to every connected peer.
+   * `ev` is the EventBus event record { topic, payload, actor, host, ts, seq }.
+   * `hops` carries the origin-host path for loop suppression in a multi-peer
+   * mesh — a peer that sees its own host already in hops drops the event
+   * instead of re-fanning it (same guard the FIPA 'forward' path uses).
+   * Delivery is best-effort at-least-once; consumer idempotence covers dupes,
+   * which beats exactly-once machinery at coordination-event volume.
+   */
+  broadcastEvent(ev, hops) {
+    const msg = { type: 'event', event: ev, hops: Array.isArray(hops) && hops.length ? hops : [this.host] };
+    for (const peer of this.peers.values()) this._send(peer, msg);
+  }
+
+  /**
    * Announce a newly-added local agent to all peers. Caller passes the
    * federated form so FederationHub doesn't need to know naming rules.
    */
@@ -537,6 +551,14 @@ class FederationHub extends EventEmitter {
             break;
           }
           this.emit('forward', { from: peer.host, payload: msg });
+          break;
+        }
+        case 'event': {
+          const hops = Array.isArray(msg.hops) ? msg.hops : [];
+          if (hops.includes(this.host)) break; // mesh loop: already saw this
+          // Surface for local injection; carry hops so a re-fan (if the host
+          // chooses to relay across a >2-node mesh) keeps loop suppression.
+          this.emit('event', { from: peer.host, event: msg.event, hops });
           break;
         }
         case 'hello':

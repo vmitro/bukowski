@@ -896,6 +896,27 @@ terminal.registerSignalHandlers();
         }
       });
 
+      // Coordination-event federation: fan locally-published events out to
+      // peers, and inject peer events into the local bus. Most useful
+      // subscriptions (a peer's deploy lifecycle, agent status, dashboard
+      // mutations) cross a federation boundary, so without this the bus only
+      // carries an instance's own echoes. 'published' fires for local-origin
+      // events only (injectRemote suppresses it), so this never bounces a
+      // received event back — belt-and-suspenders with the wire hop guard.
+      if (mcpServer.eventBus) {
+        mcpServer.eventBus.on('published', (ev) => {
+          try { federationHub.broadcastEvent(ev); } catch { /* advisory */ }
+        });
+        federationHub.on('event', ({ event }) => {
+          // Inject only — no re-fan. The peer set is a full mesh (every pair
+          // has one direct connection), so the origin's single broadcast
+          // already reached every instance; relaying would just deliver
+          // duplicates. The wire hop guard + injectRemote's no-re-emit remain
+          // as belt-and-suspenders if the topology ever stops being complete.
+          try { mcpServer.eventBus.injectRemote(event); } catch { /* advisory */ }
+        });
+      }
+
       // Attach the federation router to IPCHub so non-local targets
       // route through the wire instead of failing.
       ipcHub.attachFederation({

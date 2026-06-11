@@ -130,6 +130,21 @@ class EventBus extends EventEmitter {
   }
 
   /**
+   * Inject an event that originated on a federated peer. Stored + fanned out
+   * locally exactly like a native publish, but NOT re-emitted on 'published'
+   * (meta.remote), so the host's forwarder never bounces it back — that, plus
+   * the hop-path loop guard on the wire, keeps a full peer mesh from looping.
+   * Keeps the origin host/actor/ts; mints a fresh local seq for local
+   * poll-ordering. Topic already validated by the origin instance.
+   */
+  injectRemote(ev) {
+    if (!ev || !ev.topic) return { ok: false };
+    return this.publish(ev.topic, ev.payload, {
+      actor: ev.actor, host: ev.host, ts: ev.ts, remote: true,
+    });
+  }
+
+  /**
    * Acked subscribe: by the time this returns the subscription is in the
    * fan-out set, and the retained backlog for matching topics comes back
    * inline — the late joiner is caught up in the same call.
