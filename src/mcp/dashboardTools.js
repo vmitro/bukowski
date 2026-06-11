@@ -17,7 +17,7 @@ const repoItem = {
 const DASHBOARD_TOOLS = [
   {
     name: 'dashboard_delete_project',
-    description: 'Delete a project and its files. Allowed by the project curator, the framework curator (claude-bukowski-1), or the user. Destructive — drops entries, roadmap, and audit.',
+    description: 'Delete a project and its files. Allowed by the project curator, the framework curator (claude-bukowski-1), or the user. Destructive — drops entries, roadmap, and audit; no tombstone or backup. Last resort: entries that ever crossed an agent\'s context survive as dashboard tool-results in that agent\'s transcript (~/.claude/projects/*/<session>.jsonl) and can be recovered from there.',
     inputSchema: { type: 'object', required: ['projectId'], properties: { projectId: { type: 'string' } } },
   },
   {
