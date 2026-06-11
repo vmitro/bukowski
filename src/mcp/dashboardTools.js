@@ -3,7 +3,7 @@
 // bridge (static TOOLS, advertised even when bukowski is down) so the two lists
 // can never drift. Handlers live in MCPServer._handleToolCall.
 
-const CATEGORY_ENUM = ['description', 'challenges', 'tasks', 'todos', 'nicetohaves', 'bugs', 'adrs'];
+const CATEGORY_ENUM = ['description', 'challenges', 'tasks', 'todos', 'nicetohaves', 'bugs', 'adrs', 'tips'];
 
 const repoItem = {
   type: 'object',
@@ -76,7 +76,7 @@ const DASHBOARD_TOOLS = [
   },
   {
     name: 'dashboard_query',
-    description: 'Read entries for a project. Optional filters by repo, category, state, or blocked-only.',
+    description: 'Read entries for a project. Optional filters by repo, category, state, tag, keyword (q), or blocked-only. List results omit tip bodies (entries with one carry hasBody:true); pass entryId to fetch a single entry in full — that is how you read a tip\'s body.',
     inputSchema: {
       type: 'object', required: ['projectId'],
       properties: {
@@ -84,6 +84,9 @@ const DASHBOARD_TOOLS = [
         repo: { type: 'string' },
         category: { type: 'string', enum: CATEGORY_ENUM },
         state: { type: 'string' },
+        tag: { type: 'string', description: 'match entries carrying this tag (tips are the tagged category)' },
+        q: { type: 'string', description: 'case-insensitive keyword over one-liner, tags, and tip bodies' },
+        entryId: { type: 'string', description: 'fetch this single entry in full (includes tip body)' },
         blockedOnly: { type: 'boolean' },
       },
     },
@@ -108,7 +111,7 @@ const DASHBOARD_TOOLS = [
   },
   {
     name: 'dashboard_set_entry',
-    description: 'Create or update an entry you own (you must own the target repo). One-liner <=80 chars; actionable categories require >=1 grounding ref. Pointers only, never bodies.',
+    description: 'Create or update an entry you own (you must own the target repo). One-liner <=80 chars; actionable categories require >=1 grounding ref. Pointers only, never bodies — except category "tips" (wikihow-style how-to/gotcha): a tip carries a body (<=1500 chars summary) plus tags, and its refs MUST point at the canonical doc the body summarizes.',
     inputSchema: {
       type: 'object', required: ['projectId', 'repo', 'category', 'oneliner'],
       properties: {
@@ -117,6 +120,8 @@ const DASHBOARD_TOOLS = [
         category: { type: 'string', enum: CATEGORY_ENUM },
         oneliner: { type: 'string', description: '<=80 chars, no "::"; details live in the referenced artifact' },
         refs: { type: 'array', items: { type: 'string' }, description: 'grounding refs: meddaemon://sha/x, meddaemon://adr/27, conv:abc, file:line' },
+        body: { type: 'string', description: 'tips only: the how-to/gotcha summary, <=1500 chars (blank lines collapse to single newlines); the ref\'d doc stays canonical' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'tips only: lowercase keywords for dashboard_query {tag} lookup' },
         state: { type: 'string', enum: ['open', 'in_progress', 'claimed'], description: 'claim work: in_progress (alias claimed) signals you are doing this; response surfaces other in-progress entries to catch duplicate parallel work' },
         causal_parent: { type: 'string', description: 'ref this entry was caused by (chains the causal DAG)' },
         entryId: { type: 'string', description: 'present = update that entry; absent = create' },

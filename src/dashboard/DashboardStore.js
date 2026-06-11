@@ -6,7 +6,9 @@
 //
 // LOAD-BEARING INVARIANTS (see plan spicy-humming-wigderson.md):
 //   - Pointers, not content: an entry is a <=80-char one-liner + grounding refs.
-//     There is structurally no field to paste a body into.
+//     There is structurally no field to paste a body into — with ONE deliberate
+//     exception: `tips` entries carry a capped body (wikihow-style summary;
+//     the referenced doc stays canonical). See MAX_TIP_BODY.
 //   - Human-readable canonical form: one Markdown file per category, round-trips
 //     byte-stably so concurrent/hand edits produce minimal diffs.
 //   - Reuse the existing trace primitive: refs and the audit log carry FIPA
@@ -18,16 +20,22 @@ const os = require('os');
 const { atomicWrite } = require('./atomicWrite');
 const { hostFromCwd } = require('../utils/host');
 
-const CATEGORIES = ['description', 'challenges', 'tasks', 'todos', 'nicetohaves', 'bugs', 'adrs'];
+const CATEGORIES = ['description', 'challenges', 'tasks', 'todos', 'nicetohaves', 'bugs', 'adrs', 'tips'];
 const CATEGORY_PREFIX = {
   description: 'desc', challenges: 'chal', tasks: 'task',
-  todos: 'todo', nicetohaves: 'nice', bugs: 'bug', adrs: 'adr',
+  todos: 'todo', nicetohaves: 'nice', bugs: 'bug', adrs: 'adr', tips: 'tip',
 };
 // Categories whose entries must carry >=1 grounding ref (actionable work that
 // points at a durable artifact). `description` is narrative and exempt.
-const ACTIONABLE = new Set(['challenges', 'tasks', 'todos', 'nicetohaves', 'bugs', 'adrs']);
+// `tips` requires refs too: the body is a summary, the referenced doc stays
+// canonical.
+const ACTIONABLE = new Set(['challenges', 'tasks', 'todos', 'nicetohaves', 'bugs', 'adrs', 'tips']);
 const VALID_STATUS = new Set(['open', 'in_progress', 'closed', 'wontfix', 'promoted']);
 const MAX_ONELINER = 80;
+// `tips` is the one category with a body (wikihow-style how-to/gotcha summary,
+// queryable cross-repo). Capped so tips.md stays greppable and the dashboard's
+// pointers-not-content invariant bends without breaking.
+const MAX_TIP_BODY = 1500;
 const DEFAULT_CURATOR = 'claude-bukowski-1';
 const ROADMAP_EXCLUDED = new Set(['claude-bukowski-1', 'claude-projects-1']);
 
@@ -58,9 +66,13 @@ function parseLink(s) {
 
 // ─── Markdown grammar: entries ────────────────────────────────────────────
 // Line form:
-//   <id> [<status>] <oneliner>  ::refs a,b  ::links rel:uri  ::cause ref  ::ts N ::owner id
+//   <id> [<status>] <oneliner>  ::refs a,b  ::links rel:uri  ::cause ref  ::tags a,b  ::ts N ::owner id
 // Segments are introduced by a literal "  ::" (two spaces). The one-liner may
 // not contain "::" (enforced on write), so the split is unambiguous.
+// A tips entry may be followed by body lines, each indented exactly four
+// spaces; they attach to the preceding entry and round-trip byte-stably.
+
+const BODY_INDENT = '    ';
 
 function serializeEntry(e) {
   let s = `${e.id} [${e.status}] ${e.oneliner}`;
@@ -68,8 +80,12 @@ function serializeEntry(e) {
   if (e.links && e.links.length) s += `  ::links ${e.links.map((l) => `${l.rel}:${l.target}`).join(',')}`;
   if (e.causal_parent) s += `  ::cause ${e.causal_parent}`;
   if (e.repo) s += `  ::repo ${e.repo}`;
+  if (e.tags && e.tags.length) s += `  ::tags ${e.tags.join(',')}`;
   s += `  ::ts ${e.ts}`;
   s += `  ::owner ${e.owner}`;
+  if (e.body) {
+    for (const line of String(e.body).split('\n')) s += `\n${BODY_INDENT}${line}`;
+  }
   return s;
 }
 
@@ -81,7 +97,7 @@ function parseEntryLine(line) {
   if (!m) return null;
   const e = {
     id: m[1], status: m[2], oneliner: m[3].trim(),
-    refs: [], links: [], causal_parent: null, repo: null, ts: null, owner: null,
+    refs: [], links: [], causal_parent: null, repo: null, tags: [], body: null, ts: null, owner: null,
   };
   for (const seg of segPart.split('  ::').map((s) => s.trim()).filter(Boolean)) {
     const sp = seg.indexOf(' ');
@@ -91,6 +107,7 @@ function parseEntryLine(line) {
     else if (key === 'links') e.links = val.split(',').map((x) => x.trim()).filter(Boolean).map(parseLink);
     else if (key === 'cause') e.causal_parent = val || null;
     else if (key === 'repo') e.repo = val || null;
+    else if (key === 'tags') e.tags = val.split(',').map((x) => x.trim()).filter(Boolean);
     else if (key === 'ts') e.ts = Number(val);
     else if (key === 'owner') e.owner = val || null;
   }
@@ -110,6 +127,13 @@ function parseCategory(text) {
   for (const raw of text.split('\n')) {
     const line = raw.trimEnd();
     if (!line.trim() || line.trimStart().startsWith('#')) continue;
+    // Body line: exactly four-space indent, attaches to the previous entry.
+    if (line.startsWith(BODY_INDENT) && out.length) {
+      const prev = out[out.length - 1];
+      const bodyLine = line.slice(BODY_INDENT.length);
+      prev.body = prev.body == null ? bodyLine : `${prev.body}\n${bodyLine}`;
+      continue;
+    }
     const e = parseEntryLine(line);
     if (e) out.push(e);
   }
@@ -511,6 +535,19 @@ class DashboardStore {
     if (ACTIONABLE.has(category) && refs.length === 0) {
       throw derr('MISSING_REFS', `category '${category}' requires >=1 grounding ref (sha/file/conv/uri)`);
     }
+    // Body: only `tips` carries one (wikihow summary; the ref'd doc stays
+    // canonical). Normalized to single newlines so the four-space body-line
+    // grammar round-trips; capped to keep tips.md greppable.
+    let body = args.body == null ? undefined : String(args.body).replace(/\r/g, '').replace(/\n{2,}/g, '\n').trim();
+    if (body !== undefined && category !== 'tips') {
+      throw derr('BODY_NOT_ALLOWED', `category '${category}' is pointers-only; body is allowed only for tips`);
+    }
+    if (body !== undefined && body.length > MAX_TIP_BODY) {
+      throw derr('BODY_TOO_LONG', `tip body must be <= ${MAX_TIP_BODY} chars (got ${body.length}); link the doc and summarize`);
+    }
+    const tags = args.tags == null ? undefined
+      : (Array.isArray(args.tags) ? args.tags : String(args.tags).split(','))
+        .map((t) => String(t).trim().toLowerCase()).filter(Boolean);
     const owner = this._ownerForRepo(p, args.repo);
     if (caller !== owner && caller !== 'user') {
       throw derr('NOT_RESPONSIBLE', `only ${owner} (owner of ${args.repo}) may write this entry; FIPA them a request instead`, { caller, owner });
@@ -527,13 +564,16 @@ class DashboardStore {
         entry.refs = refs.length ? refs : entry.refs;
         if (args.causal_parent !== undefined) entry.causal_parent = args.causal_parent || null;
         if (stateArg) entry.status = stateArg;
+        if (body !== undefined) entry.body = body || null;
+        if (tags !== undefined) entry.tags = tags;
         entry.ts = ts;
       }
     } else {
       entry = {
         id: this._nextId(p, category), oneliner, refs,
         links: [], owner, status: stateArg || 'open', repo: args.repo,
-        causal_parent: args.causal_parent || null, ts,
+        causal_parent: args.causal_parent || null,
+        tags: tags || [], body: body || null, ts,
       };
       p.categories[category].push(entry);
     }
@@ -809,15 +849,29 @@ class DashboardStore {
 
   queryEntries(caller, args) {
     const p = this._project(args.projectId);
+    // Targeted get: {entryId} returns the single entry IN FULL (this is the
+    // read path for a tip's body). List results below omit bodies — they're
+    // the cheap index (id + one-liner + tags); fetch by id for the summary.
+    if (args.entryId) {
+      const { entry, category } = this._findEntry(p, args.entryId);
+      return { ok: true, projectId: p.id, rev: p.rev, entries: [{ ...entry, category }] };
+    }
     const cats = args.category ? [args.category] : CATEGORIES;
     if (args.repo) this._ownerForRepo(p, args.repo); // validates repo exists
+    const tag = args.tag ? String(args.tag).trim().toLowerCase() : null;
+    const q = args.q ? String(args.q).trim().toLowerCase() : null;
     const out = [];
     for (const cat of cats) {
       for (const e of p.categories[cat] || []) {
         if (args.repo && e.repo !== args.repo) continue;
         if (args.state && e.status !== args.state) continue;
         if (args.blockedOnly && !(e.links || []).some((l) => l.rel === 'blocked-on')) continue;
-        out.push({ ...e, category: cat });
+        if (tag && !(e.tags || []).includes(tag)) continue;
+        // Keyword: matches one-liner, tags, or body (bodies searchable, never returned in lists).
+        if (q && !(`${e.oneliner} ${(e.tags || []).join(' ')} ${e.body || ''}`.toLowerCase().includes(q))) continue;
+        const { body, ...rest } = e;
+        if (body) rest.hasBody = true; // fetch by entryId for the full body
+        out.push({ ...rest, category: cat });
       }
     }
     return { ok: true, projectId: p.id, rev: p.rev, entries: out };

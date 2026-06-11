@@ -266,5 +266,45 @@ assert.strictEqual(store.walkChain('conv:does-not-exist').found, false, 'unknown
 assert.strictEqual(store.walkChain('meddaemon://sha/112abcb').found, true, 'grounded ref → found:true');
 console.log('OK: chain found-flag distinguishes unknown vs grounded (Anomaly 2 fix)');
 
+// ── 9. tips: the one category with a body (wikihow gotcha surface) ────────────
+const tipBody = 'Symptom: broker hangs on SIGTERM.\nFix: bounce with SIGINT first, wait for "drained", THEN restart.\nNever kill -9 mid-corpus.';
+const tip = store.setEntry('claude-azra-1', {
+  projectId: NPID, repo: 'azra', category: 'tips',
+  oneliner: 'How to bounce the broker without losing in-flight rows',
+  refs: ['azra://docs/runbooks.md#broker-bounce'],
+  tags: ['Broker', 'restart'], body: tipBody + '\n\n\n', // blank lines must collapse
+}, { ts: ts++ });
+assert(tip.ok && /^tip-\d+$/.test(tip.entryId), 'tip create returns tip-N id');
+
+// body refused outside tips; refs + cap enforced for tips
+expectErr('BODY_NOT_ALLOWED', () => store.setEntry('claude-azra-1', { projectId: NPID, repo: 'azra', category: 'tasks', oneliner: 'no body here', refs: ['azra://sha/c'], body: 'nope' }, { ts: ts++ }));
+expectErr('BODY_TOO_LONG', () => store.setEntry('claude-azra-1', { projectId: NPID, repo: 'azra', category: 'tips', oneliner: 'too big', refs: ['azra://sha/c'], body: 'x'.repeat(1501) }, { ts: ts++ }));
+expectErr('MISSING_REFS', () => store.setEntry('claude-azra-1', { projectId: NPID, repo: 'azra', category: 'tips', oneliner: 'no doc ref', body: 'orphan summary' }, { ts: ts++ }));
+
+// list query: tag-filtered, body omitted, hasBody flagged, tags lowercased
+const tipList = store.queryEntries('user', { projectId: NPID, category: 'tips', tag: 'broker' }).entries;
+assert.strictEqual(tipList.length, 1, 'tag filter finds the tip');
+assert.strictEqual(tipList[0].body, undefined, 'list results must omit the body');
+assert.strictEqual(tipList[0].hasBody, true, 'list results flag hasBody');
+assert.deepStrictEqual(tipList[0].tags, ['broker', 'restart'], 'tags lowercased');
+
+// keyword query reaches into the body; entryId get returns it in full, blanks collapsed
+assert.strictEqual(store.queryEntries('user', { projectId: NPID, q: 'sigterm' }).entries.length, 1, 'q matches body text');
+const tipFull = store.queryEntries('user', { projectId: NPID, entryId: tip.entryId }).entries[0];
+assert.strictEqual(tipFull.body, tipBody, 'entryId get returns the normalized body');
+
+// digest stays titles-only — never leaks body lines
+const tipDigest = store.digest('user', { projectId: NPID }).digest;
+assert(tipDigest.includes('How to bounce the broker'), 'digest lists the tip title');
+assert(!tipDigest.includes('SIGTERM'), 'digest must not include tip bodies');
+
+// disk: body round-trips via four-space indent grammar, byte-stably
+const tipsMd = fs.readFileSync(path.join(ROOT, NPID, 'tips.md'), 'utf-8');
+assert(tipsMd.includes('    Symptom: broker hangs'), 'tips.md carries indented body lines');
+assert.strictEqual(_internals.serializeCategory('tips', store.projects.get(NPID).name, _internals.parseCategory(tipsMd)), tipsMd, 'tips.md must re-serialize byte-identically');
+const storeT = new DashboardStore({ root: ROOT });
+assert.strictEqual(storeT.queryEntries('user', { projectId: NPID, entryId: tip.entryId }).entries[0].body, tipBody, 'tip body survives reload');
+console.log('OK: tips carry capped bodies + tags, queryable, digest titles-only, byte-stable');
+
 console.log('OK: dashboard-store smoke passed');
 process.exit(0);
