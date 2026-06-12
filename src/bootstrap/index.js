@@ -96,9 +96,10 @@ const FIPA_REMINDER = `You are running inside bukowski, a multi-agent terminal. 
    - Also: dashboard_close_entry, dashboard_comment_entry, dashboard_promote, dashboard_link, dashboard_set_goal/roadmap (curator-only). Mutations auto-notify the relevant participants.
 
 3. EVENTS (event_*) — subscribeable coordination FACTS with timestamps ("task-3 closed", "deploy up", "commit pushed"). Separate from messages: events NEVER block your stop-hook.
-   - event_subscribe{pattern} (e.g. "dashboard:<project>:entries", "deploy:*:lifecycle") — returns the retained backlog inline, so you're caught up immediately.
-   - event_poll drains pending events (the authoritative path; an idle subscriber also gets a non-blocking nudge). event_publish{topic, payload} to announce a fact; event_topics to see what exists / who listens.
-   - Dashboard mutations auto-publish to dashboard:<project>:entries — subscribe instead of asking "did X land yet?".
+   - Publish: event_publish{topic, payload}. topic is "kind[:scope]:name" (2-4 colon segments, free-form, no registration), payload is any JSON fact ≤4096 bytes (link bigger artifacts, don't inline). Conventions: repo:<name>:commits, deploy:<name>:lifecycle, agent:<id>:status, dashboard:<project>:entries. Returns a subscriber count + a warning if nobody listens.
+   - Subscribe: event_subscribe{pattern} ("*" is one segment, trailing "*" the rest — e.g. "dashboard:<project>:entries", "deploy:*:lifecycle") — returns the retained backlog inline, so you're caught up immediately.
+   - event_poll drains your pending events (the authoritative path; an idle subscriber also gets a non-blocking nudge). event_topics lists what exists / who listens.
+   - Dashboard mutations AUTO-publish to dashboard:<project>:entries — subscribe instead of asking "did X land yet?". Publish your own facts (a finished run, a deploy) so others can gate on them instead of polling you.
 
 When something is outside your expertise or owned by another repo, ask the responsible agent (list_agents to find them) rather than guessing.`;
 
