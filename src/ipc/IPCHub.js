@@ -230,6 +230,14 @@ class IPCHub extends EventEmitter {
             reason: 'federation_forward_failed'
           });
         }
+      } else if (message.to === 'user') {
+        // 'user' is a human at the terminal, not a socketed/federated agent:
+        // it has no IPC socket and never appears in the federation roster.
+        // The user receives via the chat/conversation layer — FIPAHub.send
+        // records the message in ConversationManager, which the chat pane
+        // renders (and persists for a later-opened pane). So a missing socket
+        // here is NOT a delivery failure; emitting agent_not_connected would
+        // be a false alarm on every agent->user reply. Deliver out-of-band.
       } else {
         this.emit('delivery:failed', {
           messageId: message.id,
