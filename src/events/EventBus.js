@@ -122,17 +122,29 @@ class EventBus extends EventEmitter {
     t.published += 1;
 
     let delivered = 0;
+    const toWake = [];
     for (const [agentId, patterns] of this.subs) {
       if (agentId === ev.actor) continue; // publishers don't hear themselves
       let hit = false;
       for (const p of patterns) { if (patternMatches(p, topic)) { hit = true; break; } }
       if (!hit) continue;
       const q = this.queues.get(agentId) || { events: [], dropped: 0 };
+      // Coalesce wake-ups: only the empty→non-empty transition is worth a push.
+      // A burst of events to a subscriber who hasn't polled yet produces ONE
+      // wake, not one per event (lesson #5: don't flood). The queue re-arms
+      // after poll() drains it, so the next event wakes them again.
+      const wasEmpty = q.events.length === 0;
       q.events.push(ev);
       if (q.events.length > this.queueCap) { q.events.shift(); q.dropped += 1; }
       this.queues.set(agentId, q);
       delivered += 1;
+      if (wasEmpty) toWake.push(agentId);
     }
+    // 'wake' is a COURTESY push signal (the host turns it into a non-blocking
+    // channel nudge → the agent calls event_poll). It is NOT delivery: events
+    // live in the queue regardless, consumed at leisure, never blocking a
+    // stop-hook. An agent that ignores every wake still drains via event_poll.
+    for (const agentId of toWake) this.emit('wake', { agentId, topic, ts: ev.ts });
     if (!meta.remote) this.emit('published', ev);
     const res = { ok: true, topic, seq: ev.seq, subscribers: delivered };
     if (delivered === 0) res.warning = `nothing listens on '${topic}' (event retained for late joiners; check event_topics)`;

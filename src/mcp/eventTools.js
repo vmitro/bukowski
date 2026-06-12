@@ -30,7 +30,7 @@ const EVENT_TOOLS = [
   },
   {
     name: 'event_poll',
-    description: 'Drain your pending events (consume-at-leisure; this is the ONLY way events reach you — they never nag a stop-hook). Returns events in publish order plus remaining count and a dropped count (events shed when your queue overflowed since the last poll).',
+    description: 'Drain your pending events. event_poll is the authoritative delivery path — events never block a stop-hook. As a courtesy, an idle subscriber also gets a non-blocking <channel> nudge (kind:"event") when its queue first goes non-empty, telling it to poll; bursts coalesce to one nudge, and you may simply poll at your own cadence regardless. Returns events in publish order plus remaining count and a dropped count (events shed when your queue overflowed since the last poll).',
     inputSchema: { type: 'object', properties: { max: { type: 'number', description: 'max events to return (default 50)' } } },
   },
   {

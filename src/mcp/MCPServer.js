@@ -76,6 +76,12 @@ class MCPServer extends EventEmitter {
     // federation forwarding onto its 'published' signal.
     const { EventBus } = require('../events/EventBus');
     this.eventBus = new EventBus();
+    // Courtesy wake: when a subscriber's event queue goes empty→non-empty,
+    // push a non-blocking channel nudge so an idle agent calls event_poll
+    // without waiting for its next turn. Reuses the FIPA channel-push path but
+    // carries no payload and marks nothing delivered — event_poll stays the
+    // delivery contract; this only shortens latency for idle subscribers.
+    this.eventBus.on('wake', ({ agentId, topic }) => this.notifyNewEvent(agentId, topic));
   }
 
   /**
@@ -1195,6 +1201,43 @@ class MCPServer extends EventEmitter {
     // (dangerous-flag) channel is a single reliable connection, so this holds;
     // get_pending_messages still returns everything on an explicit pull.
     if (sent) message._channelDelivered = true;
+  }
+
+  /**
+   * Courtesy wake for a coordination event (sibling of notifyNewMessage, for
+   * the event bus instead of the FIPA queue).
+   *
+   * Differences from the FIPA push, all because events are consume-at-leisure:
+   *   - carries NO payload — just "you have pending events on <topic>, call
+   *     event_poll". event_poll is the authoritative delivery path; the wake
+   *     only saves an idle agent from waiting until its next turn to notice.
+   *   - marks nothing _channelDelivered — there is no stop-hook safety net for
+   *     events (by design: they must never block a stop), so nothing to dedup.
+   *   - skips busy agents (same thinking-block safety as FIPA); the event sits
+   *     in the queue and the agent drains it on its own schedule — no loss.
+   * Coalesced upstream: EventBus only emits 'wake' on the empty→non-empty
+   * transition, so a burst is one nudge, re-armed after event_poll.
+   * @private
+   */
+  notifyNewEvent(agentId, topic) {
+    if (!this._isClaudeAgent(agentId)) return;
+    if (this.busyAgents.has(agentId)) return; // catch it on the next poll
+    const sockets = new Set();
+    const chan = this.channelSockets.get(agentId);
+    if (chan) sockets.add(chan);
+    for (const [sock, st] of this.clients) {
+      if (st.agentId === agentId) sockets.add(sock);
+    }
+    if (sockets.size === 0) return;
+    const pending = (this.eventBus.queues.get(agentId)?.events || []).length;
+    const content = [
+      `Coordination event pending on topic '${topic}'`,
+      `${pending} event(s) in your event queue. Call event_poll to drain (facts only — not a message, no reply needed).`,
+    ].join('\n');
+    const meta = { topic: String(topic), kind: 'event', queue_size: String(pending) };
+    for (const sock of sockets) {
+      this._sendNotification(sock, 'notifications/claude/channel', { content, meta });
+    }
   }
 
   /**

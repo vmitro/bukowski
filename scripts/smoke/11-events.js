@@ -111,5 +111,24 @@ assert.strictEqual(bGot.events[0].payload.trainingDone, true, 'payload intact ac
 assert.strictEqual(bFwd, 0, 'injected remote event does not re-forward (no federation loop)');
 console.log('OK: cross-box event forwarding (origin preserved, no re-emit loop)');
 
+// ── courtesy wake: coalesced empty→non-empty, re-armed after poll ──────────
+const wbus = new EventBus({ host: 'testbox' });
+const wakes = [];
+wbus.on('wake', ({ agentId, topic }) => wakes.push({ agentId, topic }));
+wbus.subscribe('sleeper', 'agent:x:status');
+wbus.publish('agent:x:status', { n: 1 }, { actor: 'src' });
+wbus.publish('agent:x:status', { n: 2 }, { actor: 'src' });
+wbus.publish('agent:x:status', { n: 3 }, { actor: 'src' });
+assert.strictEqual(wakes.length, 1, 'a burst to an un-polled subscriber wakes exactly once (coalesced)');
+assert.deepStrictEqual(wakes[0], { agentId: 'sleeper', topic: 'agent:x:status' }, 'wake carries agent + triggering topic');
+wbus.poll('sleeper'); // drain → re-arm
+wbus.publish('agent:x:status', { n: 4 }, { actor: 'src' });
+assert.strictEqual(wakes.length, 2, 'next event after poll re-arms the wake');
+// publisher never wakes itself; no wake when nobody's queue transitions
+wbus.subscribe('src', 'agent:x:status');
+wbus.publish('agent:x:status', { n: 5 }, { actor: 'src' });
+assert.strictEqual(wakes.filter((w) => w.agentId === 'src').length, 0, 'publisher is never woken for its own event');
+console.log('OK: courtesy wake coalesces a burst, re-arms after poll, skips publisher');
+
 console.log('OK: events smoke passed');
 process.exit(0);
