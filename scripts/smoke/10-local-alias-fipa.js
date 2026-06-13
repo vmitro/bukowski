@@ -121,5 +121,40 @@ catch (e) { threw = /Unknown agent/.test(e.message); }
 if (!threw) fail('unknown id must still throw "Unknown agent"');
 console.log('fipa:   unknown id still rejected');
 
-console.log('OK: local-alias FIPA addressing smoke passed');
-process.exit(0);
+// ── event_publish fire-into-void warning is federation-aware ────────────────
+// EventBus counts subscribers on THIS instance only; under federation the event
+// still forwards to peers whose subscribers we can't see. So a bare "nothing
+// listens" is a false alarm when peers are connected — the handler must reword
+// it to scope the claim to local knowledge (loose-end #2 from the cross-box fix).
+(async () => {
+  // No peers connected → the base "nothing listens" warning stands verbatim.
+  fedHub.connectedHosts = () => [];
+  const v1 = await mcp._handleToolCall('event_publish', { topic: 'azra:rail:corpus', payload: { n: 1 } }, 'claude-1');
+  if (v1.subscribers !== 0 || !/nothing listens/.test(v1.warning || '')) {
+    fail('no-peers publish to an unheard topic must keep the bare "nothing listens" warning', JSON.stringify(v1));
+  }
+  console.log('event:  no peers → bare fire-into-void warning preserved');
+
+  // Peers connected → warning reworded to local-only scope, names the peers.
+  fedHub.connectedHosts = () => ['azra', 'meddaemon'];
+  const v2 = await mcp._handleToolCall('event_publish', { topic: 'azra:rail:corpus', payload: { n: 2 } }, 'claude-1');
+  if (v2.subscribers !== 0) fail('still no LOCAL subscribers', JSON.stringify(v2));
+  if (/nothing listens/.test(v2.warning || '') || !/no LOCAL listeners/.test(v2.warning || '')) {
+    fail('with peers connected, warning must be reworded away from asserting the void', JSON.stringify(v2));
+  }
+  if (!/azra, meddaemon/.test(v2.warning) || !/2 peer\(s\)/.test(v2.warning)) {
+    fail('reworded warning must name the peers it forwarded to', JSON.stringify(v2));
+  }
+  console.log('event:  peers connected → warning scoped to local knowledge, names forward targets');
+
+  // A real LOCAL subscriber → no warning at all, regardless of peers.
+  mcp.eventBus.subscribe('claude-azra-agent-1', 'azra:rail:*');
+  const v3 = await mcp._handleToolCall('event_publish', { topic: 'azra:rail:corpus', payload: { n: 3 } }, 'claude-2');
+  if (v3.subscribers < 1 || v3.warning) {
+    fail('a local subscriber must yield subscribers>=1 and no warning', JSON.stringify(v3));
+  }
+  console.log('event:  a local subscriber suppresses the warning entirely');
+
+  console.log('OK: local-alias FIPA addressing smoke passed');
+  process.exit(0);
+})().catch((e) => fail('event-publish warning block threw: ' + e.message));

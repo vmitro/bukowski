@@ -816,7 +816,22 @@ class MCPServer extends EventEmitter {
       case 'event_publish': {
         requireString('topic');
         const actor = this.federationHub?.federatedIdFor?.(callerAgentId) || callerAgentId;
-        return this.eventBus.publish(args.topic, args.payload, { actor, ts: Date.now() });
+        const res = this.eventBus.publish(args.topic, args.payload, { actor, ts: Date.now() });
+        // The fire-into-void warning is LOCAL-ONLY knowledge: EventBus counts
+        // subscribers on THIS instance. Under federation the event still
+        // forwards to every peer (broadcastEvent), where a remote box may have
+        // subscribers this instance can't see (subscription tables aren't
+        // gossiped across the mesh). So a bare "nothing listens" is a false
+        // alarm in exactly the cross-box case events exist for. When peers are
+        // connected, reword to scope the claim to local knowledge instead of
+        // asserting the void.
+        if (res.warning && res.subscribers === 0) {
+          const peers = this.federationHub?.connectedHosts?.() || [];
+          if (peers.length > 0) {
+            res.warning = `no LOCAL listeners on '${res.topic}', but forwarded to ${peers.length} peer(s) (${peers.join(', ')}) whose subscribers are not visible from here — not necessarily unheard. event_topics lists local listeners only.`;
+          }
+        }
+        return res;
       }
       case 'event_subscribe': {
         requireString('pattern');
