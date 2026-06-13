@@ -111,6 +111,39 @@ assert.strictEqual(bGot.events[0].payload.trainingDone, true, 'payload intact ac
 assert.strictEqual(bFwd, 0, 'injected remote event does not re-forward (no federation loop)');
 console.log('OK: cross-box event forwarding (origin preserved, no re-emit loop)');
 
+// ── cross-box LOCAL-ID COLLISION: federated keys must not self-exclude ──────
+// Regression for azra-agent-1's report (conv b08e2e5e): publisher azra-1 and
+// subscriber azra-agent-1 BOTH have session-local id "claude-1". If events are
+// keyed by the local id, the forwarded event's actor ("claude-1") aliases the
+// remote subscriber's key ("claude-1") and publish()'s self-exclusion
+// (agentId === ev.actor) wrongly drops it — retained backlog still shows it
+// (stored pre-fanout) but the live queue stays empty + no wake fires. MCPServer
+// canonicalizes both to the FEDERATED id (claude-<host>-N), which is globally
+// unique, so the collision cannot occur. This asserts the EventBus invariant
+// the canonicalization relies on: distinct federated keys deliver; identical
+// keys (a genuine self-publish) correctly exclude.
+const cBoxA = new EventBus({ host: 'azra' });
+const cBoxB = new EventBus({ host: 'azra-agent' });
+cBoxA.on('published', (ev) => cBoxB.injectRemote(ev));
+// WRONG namespace (what the running code did): both sides keyed local "claude-1".
+cBoxB.subscribe('claude-1', 'azra:projection-rail:*');
+cBoxA.publish('azra:projection-rail:corpus', { live: true }, { actor: 'claude-1' });
+assert.strictEqual(cBoxB.poll('claude-1').events.length, 0,
+  'local-id collision: forwarded actor "claude-1" self-excludes the same-named remote subscriber (the bug)');
+// RIGHT namespace (the fix): both sides keyed by their globally-unique federated id.
+const fBoxA = new EventBus({ host: 'azra' });
+const fBoxB = new EventBus({ host: 'azra-agent' });
+const fWakes = [];
+fBoxB.on('wake', ({ agentId }) => fWakes.push(agentId));
+fBoxA.on('published', (ev) => fBoxB.injectRemote(ev));
+fBoxB.subscribe('claude-azra-agent-1', 'azra:projection-rail:*');
+fBoxA.publish('azra:projection-rail:corpus', { live: true }, { actor: 'claude-azra-1' });
+const fGot = fBoxB.poll('claude-azra-agent-1');
+assert.strictEqual(fGot.events.length, 1, 'federated keys: forwarded event reaches the remote subscriber');
+assert.strictEqual(fGot.events[0].payload.live, true, 'payload intact');
+assert.deepStrictEqual(fWakes, ['claude-azra-agent-1'], 'and the empty→non-empty wake fires (the nudge azra-agent-1 expected)');
+console.log('OK: cross-box local-id collision excluded under local keys, delivered+woken under federated keys');
+
 // ── courtesy wake: coalesced empty→non-empty, re-armed after poll ──────────
 const wbus = new EventBus({ host: 'testbox' });
 const wakes = [];

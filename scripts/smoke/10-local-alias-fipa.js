@@ -53,6 +53,27 @@ if (fedHub.resolveLocalAlias(null) !== null) {
 }
 console.log('alias:  resolveLocalAlias maps claude-azra-agent-N -> claude-N, foreign -> null');
 
+// ── FederationHub.federatedIdFor (forward map, used to key coordination events)
+// Events must be published/subscribed under the GLOBALLY-UNIQUE federated id,
+// not the box-local one, or a same-numbered agent on another box collides.
+if (fedHub.federatedIdFor('claude-1') !== 'claude-azra-agent-1') {
+  fail('federatedIdFor(claude-1) !== claude-azra-agent-1');
+}
+if (fedHub.federatedIdFor('claude-2') !== 'claude-azra-agent-2') {
+  fail('federatedIdFor(claude-2) !== claude-azra-agent-2');
+}
+// Round-trips with its inverse.
+if (fedHub.resolveLocalAlias(fedHub.federatedIdFor('claude-1')) !== 'claude-1') {
+  fail('federatedIdFor/resolveLocalAlias not inverse');
+}
+if (fedHub.federatedIdFor('claude-99') !== null) {
+  fail('federatedIdFor of an unknown local id must be null (caller falls back to id as-given)');
+}
+if (fedHub.federatedIdFor(null) !== null) {
+  fail('federatedIdFor(null) must be null');
+}
+console.log('alias:  federatedIdFor maps claude-N -> claude-azra-agent-N (inverse of resolveLocalAlias)');
+
 // ── _sendFipaMessage canonicalization ──────────────────────────────────────
 const sent = [];
 const stubSession = {

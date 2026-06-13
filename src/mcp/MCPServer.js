@@ -805,20 +805,33 @@ class MCPServer extends EventEmitter {
 
       // ── coordination events (subscribeable facts; never touch the FIPA
       //    inbox or stop-hook). See src/events/EventBus.js. ────────────────
+      //    Keyed by the FEDERATED id, not the session-local one: a local id
+      //    like claude-1 is unique only within its own box, so using it as the
+      //    actor/subscriber key would collide across boxes (box B's own
+      //    claude-1 would be wrongly self-excluded from a forwarded event, and
+      //    an agent-scoped topic minted on two boxes would alias). The
+      //    federated alias (claude-<host>-N) is globally unique; we map it back
+      //    to the local id only at the wake→socket boundary (notifyNewEvent).
+      //    Falls back to the id as-given when there's no federation/roster hit.
       case 'event_publish': {
         requireString('topic');
-        return this.eventBus.publish(args.topic, args.payload, { actor: callerAgentId, ts: Date.now() });
+        const actor = this.federationHub?.federatedIdFor?.(callerAgentId) || callerAgentId;
+        return this.eventBus.publish(args.topic, args.payload, { actor, ts: Date.now() });
       }
       case 'event_subscribe': {
         requireString('pattern');
-        return this.eventBus.subscribe(callerAgentId, args.pattern);
+        const fed = this.federationHub?.federatedIdFor?.(callerAgentId) || callerAgentId;
+        return this.eventBus.subscribe(fed, args.pattern);
       }
       case 'event_unsubscribe': {
         requireString('pattern');
-        return this.eventBus.unsubscribe(callerAgentId, args.pattern);
+        const fed = this.federationHub?.federatedIdFor?.(callerAgentId) || callerAgentId;
+        return this.eventBus.unsubscribe(fed, args.pattern);
       }
-      case 'event_poll':
-        return this.eventBus.poll(callerAgentId, args.max);
+      case 'event_poll': {
+        const fed = this.federationHub?.federatedIdFor?.(callerAgentId) || callerAgentId;
+        return this.eventBus.poll(fed, args.max);
+      }
       case 'event_topics':
         return args.topic
           ? { ok: true, topic: args.topic, listeners: this.eventBus.whoListens(args.topic) }
@@ -1220,16 +1233,22 @@ class MCPServer extends EventEmitter {
    * @private
    */
   notifyNewEvent(agentId, topic) {
-    if (!this._isClaudeAgent(agentId)) return;
-    if (this.busyAgents.has(agentId)) return; // catch it on the next poll
+    // `agentId` arrives FEDERATED (claude-<host>-N) — the EventBus keys
+    // subscriptions/queues by federated id (see event_subscribe). Socket,
+    // claude-check and busy lookups are all keyed by the LOCAL id, so map back;
+    // the queue stays keyed federated. A no-roster fallback leaves it as-is.
+    const fedId = agentId;
+    const localId = this.federationHub?.resolveLocalAlias?.(fedId) || fedId;
+    if (!this._isClaudeAgent(localId)) return;
+    if (this.busyAgents.has(localId)) return; // catch it on the next poll
     const sockets = new Set();
-    const chan = this.channelSockets.get(agentId);
+    const chan = this.channelSockets.get(localId);
     if (chan) sockets.add(chan);
     for (const [sock, st] of this.clients) {
-      if (st.agentId === agentId) sockets.add(sock);
+      if (st.agentId === localId) sockets.add(sock);
     }
     if (sockets.size === 0) return;
-    const pending = (this.eventBus.queues.get(agentId)?.events || []).length;
+    const pending = (this.eventBus.queues.get(fedId)?.events || []).length;
     const content = [
       `Coordination event pending on topic '${topic}'`,
       `${pending} event(s) in your event queue. Call event_poll to drain (facts only — not a message, no reply needed).`,

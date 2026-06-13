@@ -200,6 +200,20 @@ class FederationHub extends EventEmitter {
   }
 
   /**
+   * Forward map: a local agent id (claude-1) -> its federated alias
+   * (claude-<host>-N). The inverse of resolveLocalAlias. Coordination events
+   * must travel under the federated id so a topic/actor minted on one box does
+   * not collide with a same-numbered local agent on another box. Returns null
+   * if the id isn't one of our own local agents (caller falls back to the id
+   * as-given).
+   */
+  federatedIdFor(localId) {
+    if (!localId) return null;
+    const hit = this._localRosterSnapshot().find(a => a.localId === localId);
+    return hit ? hit.federatedId : null;
+  }
+
+  /**
    * Forward an IPC-shape message to its federated recipient. The message
    * carries the agent-level `from`/`to` already in their federated forms
    * (caller's responsibility); FederationHub rewrites `to` down to the
