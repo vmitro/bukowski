@@ -444,7 +444,7 @@ const TOOLS = [
       required: ['to', 'proposition'],
       properties: {
         to: { type: 'string', description: 'Target agent ID' },
-        proposition: { type: 'string', description: 'The yes/no question to ask' },
+        proposition: { type: 'string', description: 'The yes/no question to ask. (Named per FIPA, not "content" — but you may pass it as "content" too.)' },
         conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }
     }
@@ -457,7 +457,7 @@ const TOOLS = [
       required: ['to', 'reference'],
       properties: {
         to: { type: 'string', description: 'Target agent ID' },
-        reference: { type: 'string', description: 'Description of the information requested' },
+        reference: { type: 'string', description: 'Description of the information requested. (Named per FIPA, not "content" — but you may pass it as "content" too.)' },
         conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }
     }

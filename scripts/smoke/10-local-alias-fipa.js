@@ -83,7 +83,9 @@ const stubSession = {
 };
 const stubFipaHub = {
   inform: (from, to, content, opts) => { sent.push({ performative: 'inform', from, to, content, opts }); return Promise.resolve(null); },
-  request: (from, to, content, opts) => { sent.push({ performative: 'request', from, to, content, opts }); return Promise.resolve(null); }
+  request: (from, to, content, opts) => { sent.push({ performative: 'request', from, to, content, opts }); return Promise.resolve(null); },
+  queryRef: (from, to, content, opts) => { sent.push({ performative: 'query-ref', from, to, content, opts }); return Promise.resolve(null); },
+  queryIf: (from, to, content, opts) => { sent.push({ performative: 'query-if', from, to, content, opts }); return Promise.resolve(null); }
 };
 const stubIpcHub = {};
 
@@ -154,6 +156,40 @@ console.log('fipa:   unknown id still rejected');
     fail('a local subscriber must yield subscribers>=1 and no warning', JSON.stringify(v3));
   }
   console.log('event:  a local subscriber suppresses the warning entirely');
+
+  // ── `content` is a universal alias for the performative-specific payload ──
+  // FIPA names each slot distinctly (reference/proposition/action/...); agents
+  // reach for `content` by muscle-memory. {to, content} to fipa_query_ref used
+  // to silently omit `reference` and hard-fail (orbis-mock-1 report). Now
+  // `content` fills the slot; the canonical name still wins when both present.
+  sent.length = 0;
+  await mcp._handleToolCall('fipa_query_ref', { to: 'claude-1', content: 'what is the corpus size?' }, 'claude-2');
+  if (sent.length !== 1 || sent[0].performative !== 'query-ref' || sent[0].content !== 'what is the corpus size?') {
+    fail('fipa_query_ref must accept `content` as an alias for `reference`', JSON.stringify(sent));
+  }
+  console.log('alias:  fipa_query_ref accepts `content` in place of `reference`');
+
+  sent.length = 0;
+  await mcp._handleToolCall('fipa_query_if', { to: 'claude-1', reference: 'wrong-slot', content: 'is it up?' }, 'claude-2');
+  if (sent.length !== 1 || sent[0].performative !== 'query-if' || sent[0].content !== 'is it up?') {
+    fail('fipa_query_if must accept `content` as an alias for `proposition`', JSON.stringify(sent));
+  }
+  console.log('alias:  fipa_query_if accepts `content` in place of `proposition`');
+
+  sent.length = 0;
+  await mcp._handleToolCall('fipa_query_ref', { to: 'claude-1', reference: 'canonical wins', content: 'ignored' }, 'claude-2');
+  if (sent.length !== 1 || sent[0].content !== 'canonical wins') {
+    fail('canonical field must win over the `content` alias when both are present', JSON.stringify(sent));
+  }
+  console.log('alias:  canonical field wins over `content` when both supplied');
+
+  let aliasThrew = '';
+  try { await mcp._handleToolCall('fipa_query_ref', { to: 'claude-1' }, 'claude-2'); }
+  catch (e) { aliasThrew = e.message; }
+  if (!/reference/.test(aliasThrew) || !/content/.test(aliasThrew)) {
+    fail('missing payload error must name both the canonical field and the `content` alias', aliasThrew);
+  }
+  console.log('alias:  missing-payload error names the canonical field AND the content alias');
 
   console.log('OK: local-alias FIPA addressing smoke passed');
   process.exit(0);

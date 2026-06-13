@@ -131,7 +131,7 @@ class MCPServer extends EventEmitter {
           required: ['to', 'proposition'],
           properties: {
             to: { type: 'string', description: 'Target agent ID' },
-            proposition: { type: 'string', description: 'The yes/no question to ask' },
+            proposition: { type: 'string', description: 'The yes/no question to ask. (Named per FIPA, not "content" — but you may pass it as "content" too.)' },
             conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
           }
         }
@@ -144,7 +144,7 @@ class MCPServer extends EventEmitter {
           required: ['to', 'reference'],
           properties: {
             to: { type: 'string', description: 'Target agent ID' },
-            reference: { type: 'string', description: 'Description of the information requested' },
+            reference: { type: 'string', description: 'Description of the information requested. (Named per FIPA, not "content" — but you may pass it as "content" too.)' },
             conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
           }
         }
@@ -564,26 +564,44 @@ class MCPServer extends EventEmitter {
         throw new Error(`${toolName} requires a non-empty string "${field}" argument`);
       }
     };
+    // Resolve a performative's payload slot, accepting `content` as a universal
+    // alias. FIPA names each slot distinctly per the spec (action / proposition
+    // / reference / proposal / reason / task), but muscle-memory and codegen
+    // reach for `content` — so {to, content} passed to fipa_query_ref used to
+    // silently omit the required field and hard-fail (orbis-mock-1 report).
+    // Canonical field wins when both are present; `content` only fills a gap.
+    const payload = (field) => {
+      let v = args?.[field];
+      if ((typeof v !== 'string' || v.length === 0) &&
+          field !== 'content' &&
+          typeof args?.content === 'string' && args.content.length > 0) {
+        v = args.content;
+      }
+      if (typeof v !== 'string' || v.length === 0) {
+        throw new Error(`${toolName} requires a non-empty string "${field}" argument (you may also pass it as "content")`);
+      }
+      return v;
+    };
 
     switch (toolName) {
       case 'fipa_request':
-        requireString('to'); requireString('action');
-        return this._sendFipaMessage('request', callerAgentId, args.to, args.action, args.conversationId);
+        requireString('to');
+        return this._sendFipaMessage('request', callerAgentId, args.to, payload('action'), args.conversationId);
 
       case 'fipa_inform':
-        requireString('to'); requireString('content');
-        return this._sendFipaMessage('inform', callerAgentId, args.to, args.content, args.conversationId);
+        requireString('to');
+        return this._sendFipaMessage('inform', callerAgentId, args.to, payload('content'), args.conversationId);
 
       case 'fipa_query_if':
-        requireString('to'); requireString('proposition');
-        return this._sendFipaMessage('query-if', callerAgentId, args.to, args.proposition, args.conversationId);
+        requireString('to');
+        return this._sendFipaMessage('query-if', callerAgentId, args.to, payload('proposition'), args.conversationId);
 
       case 'fipa_query_ref':
-        requireString('to'); requireString('reference');
-        return this._sendFipaMessage('query-ref', callerAgentId, args.to, args.reference, args.conversationId);
+        requireString('to');
+        return this._sendFipaMessage('query-ref', callerAgentId, args.to, payload('reference'), args.conversationId);
 
       case 'fipa_cfp': {
-        requireString('task');
+        const task = payload('task');
         const localRecipients = this.session.getAllAgents()
           .filter(a => a.id !== callerAgentId && a.type !== 'chat')
           .map(a => a.id);
@@ -594,22 +612,22 @@ class MCPServer extends EventEmitter {
           : [];
         const recipients = [...localRecipients, ...externalRecipients, ...federatedRecipients];
         return this.fipaHub.cfp(callerAgentId, recipients, {
-          task: args.task,
+          task,
           deadline: args.deadline
         });
       }
 
       case 'fipa_propose':
-        requireString('to'); requireString('proposal');
-        return this._sendFipaMessage('propose', callerAgentId, args.to, args.proposal, args.conversationId);
+        requireString('to');
+        return this._sendFipaMessage('propose', callerAgentId, args.to, payload('proposal'), args.conversationId);
 
       case 'fipa_agree':
         requireString('to');
         return this._sendFipaMessage('agree', callerAgentId, args.to, null, args.conversationId);
 
       case 'fipa_refuse':
-        requireString('to'); requireString('reason');
-        return this._sendFipaMessage('refuse', callerAgentId, args.to, args.reason, args.conversationId);
+        requireString('to');
+        return this._sendFipaMessage('refuse', callerAgentId, args.to, payload('reason'), args.conversationId);
 
       case 'list_agents': {
         // Local session agents.
