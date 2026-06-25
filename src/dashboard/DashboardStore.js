@@ -240,6 +240,7 @@ class DashboardStore {
       name: meta.name || id,
       goal: meta.goal || '',
       participants: meta.participants || [],
+      grants: meta.grants || [],
       repos: meta.repos || [],
       curator: meta.curator || this.curator,
       categories: {},
@@ -257,6 +258,10 @@ class DashboardStore {
     }
     const rf = path.join(dir, 'roadmap.md');
     if (fs.existsSync(rf)) project.roadmap = parseRoadmap(fs.readFileSync(rf, 'utf-8'));
+    // Recompute the effective participant set from its two persisted sources
+    // (repo-derived owners ∪ direct grants); the persisted participants line is
+    // a render cache, the union is authoritative and survives a remap.
+    this._recomputeParticipants(project);
     this.projects.set(id, project);
     return project;
   }
@@ -274,6 +279,7 @@ class DashboardStore {
       else if (key === 'curator') meta.curator = val;
       else if (key === 'rev') meta.rev = Number(val) || 0;
       else if (key === 'participants') meta.participants = val.split(',').map((s) => s.trim()).filter(Boolean);
+      else if (key === 'grants') meta.grants = val.split(',').map((s) => s.trim()).filter(Boolean);
       else if (key === 'repos') {
         meta.repos = val.split(',').map((s) => s.trim()).filter(Boolean).map((pair) => {
           const eq = pair.indexOf('=');
@@ -292,6 +298,7 @@ class DashboardStore {
       `# ${p.name}`, '',
       `goal: ${p.goal}`,
       `participants: ${p.participants.join(', ')}`,
+      `grants: ${(p.grants || []).join(', ')}`,
       `repos: ${repos}`,
       `curator: ${p.curator}`,
       `rev: ${p.rev}`, '',
@@ -412,6 +419,54 @@ class DashboardStore {
     return hc !== null && hc === this._hostOf(owner);
   }
 
+  // Participants come from two sources kept SEPARATELY: the repo-owner set
+  // derived from the repo map, and direct curator grants. They must not share
+  // storage — map_repos re-derives the whole repo set, so a grant living in the
+  // same list would be clobbered on every remap. Effective set is the union,
+  // recomputed whenever either source changes (create / map_repos / add /
+  // remove / load). Grants exist because root→host→agent derivation can't
+  // distinguish co-tenant agents sharing one checkout (codex- and claude-
+  // <host>-1 derive to the same owner), so a curator names them directly.
+  _deriveParticipants(p) {
+    return p.repos.map((r) => r.owner).filter((o) => !ROADMAP_EXCLUDED.has(o));
+  }
+
+  _recomputeParticipants(p) {
+    const set = new Set(this._deriveParticipants(p));
+    for (const g of (p.grants || [])) set.add(g);
+    p.participants = [...set];
+  }
+
+  addParticipant(caller, args, ctx = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    this._requireCurator(caller, p);
+    const agentId = this._federate(String(args.agentId || '').trim());
+    if (!agentId) throw derr('BAD_KEY', 'agentId required');
+    if (!p.grants) p.grants = [];
+    const already = p.participants.includes(agentId);
+    if (!p.grants.includes(agentId)) p.grants.push(agentId);
+    this._recomputeParticipants(p);
+    this._mutate(p, { ts: ctx.ts || Date.now(), actor: caller, op: 'add-participant', after: agentId }, ctx);
+    return { ok: true, op: 'add-participant', projectId: p.id, agentId, alreadyParticipant: already, rev: p.rev };
+  }
+
+  removeParticipant(caller, args, ctx = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    this._requireCurator(caller, p);
+    const agentId = this._federate(String(args.agentId || '').trim());
+    if (!agentId) throw derr('BAD_KEY', 'agentId required');
+    if (!p.grants) p.grants = [];
+    p.grants = p.grants.filter((g) => g !== agentId);
+    this._recomputeParticipants(p);
+    // remove revokes the DIRECT grant only; a repo-owner-derived participant
+    // stays (drop it via map_repos, not here). Surface which case happened.
+    const stillDerived = this._deriveParticipants(p).includes(agentId);
+    this._mutate(p, { ts: ctx.ts || Date.now(), actor: caller, op: 'remove-participant', after: agentId }, ctx);
+    return { ok: true, op: 'remove-participant', projectId: p.id, agentId, stillParticipantViaRepo: stillDerived, rev: p.rev };
+  }
+
   _requireCurator(caller, p) {
     if (caller !== p.curator && caller !== 'user') {
       throw derr('NOT_CURATOR', `only the curator (${p.curator}) may do this`, { caller });
@@ -486,9 +541,6 @@ class DashboardStore {
       const root = typeof r === 'string' ? '' : (r.root || '');
       return { repo, root, owner: `claude-${hostFromCwd(root)}-1` };
     });
-    const participants = repos
-      .map((r) => r.owner)
-      .filter((o) => !ROADMAP_EXCLUDED.has(o));
     // Per-project curator (the lead who owns this project's goal/roadmap/repo
     // map) is distinct from the dashboard-framework curator (this.curator, who
     // owns the category set + bootstraps creation). Defaults to the lead named
@@ -496,10 +548,11 @@ class DashboardStore {
     // own entries regardless of who leads the project.
     const projectCurator = args.curator ? this._federate(args.curator) : caller;
     const p = {
-      id, name, goal: String(args.goal || ''), participants,
-      repos, curator: projectCurator, categories: {}, roadmap: [], rev: 0, election: null,
+      id, name, goal: String(args.goal || ''), participants: [],
+      grants: [], repos, curator: projectCurator, categories: {}, roadmap: [], rev: 0, election: null,
     };
     for (const cat of CATEGORIES) p.categories[cat] = [];
+    this._recomputeParticipants(p);
     this.projects.set(id, p);
     const ts = ctx.ts || Date.now();
     this._mutate(p, { ts, actor: caller, op: 'create-project', after: name }, ctx);
@@ -525,7 +578,9 @@ class DashboardStore {
       const root = typeof r === 'string' ? '' : (r.root || '');
       return { repo, root, owner: `claude-${hostFromCwd(root)}-1` };
     });
-    p.participants = p.repos.map((r) => r.owner).filter((o) => !ROADMAP_EXCLUDED.has(o));
+    // Re-derive from the new repo map, then UNION back the direct grants so a
+    // remap never silently drops a curator-granted co-tenant participant.
+    this._recomputeParticipants(p);
     this._mutate(p, { ts: ctx.ts || Date.now(), actor: caller, op: 'map-repos', after: p.repos.map((r) => r.repo).join(',') }, ctx);
     return { ok: true, op: 'map-repos', projectId: p.id, rev: p.rev };
   }
@@ -846,6 +901,7 @@ class DashboardStore {
     const p = this.projects.get(projectId);
     if (!p) return [];
     const PROJECT_OPS = new Set(['create-project', 'set-goal', 'map-repos', 'set-roadmap',
+      'add-participant', 'remove-participant',
       'transfer-curator', 'open-election', 'vote', 'elect-curator', 'delete-project']);
     const recip = new Set();
     const allEntries = [];

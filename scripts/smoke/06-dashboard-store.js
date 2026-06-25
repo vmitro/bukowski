@@ -351,5 +351,46 @@ expectErr('NOT_RESPONSIBLE', () => store.setEntry('claude-meddaemon-1', { projec
 expectErr('NOT_RESPONSIBLE', () => store.setEntry('claude-projects-3', { projectId: RPID, repo: 'azra-agent', category: 'bugs', oneliner: 'different id-segment host', refs: ['azra-agent://sha/r5'] }, { ts: ts++ }));
 console.log('OK: repo-residency multi-edit — same-host box-mates co-curate, cross-host + off-segment rejected');
 
+// ── 12. direct participant grants: reach co-tenant agents derivation can't ────
+// codex-azra-agent-1 and claude-azra-agent-1 share one checkout root, so the
+// repo map derives ONE owner and codex is invisible — hard-blocked from
+// commenting. A curator grants it directly; the grant is stored separately and
+// MUST survive a later map_repos re-derivation (the clobber regression).
+const pp = store.createProject('claude-bukowski-1', { name: 'Grant Test', goal: 'g', curator: 'claude-meddaemon-1', repos: [
+  { repo: 'meddaemon', root: '/home/sheemeh/projects/meddaemon' },
+  { repo: 'azra-agent', root: '/home/sheemeh/projects/azra-agent' },
+] }, { ts: ts++ });
+const PPID = pp.projectId;
+const aEntry = store.setEntry('claude-azra-agent-1', { projectId: PPID, repo: 'azra-agent', category: 'challenges', oneliner: 'chal-13 stand-in', refs: ['azra-agent://sha/c13'] }, { ts: ts++ });
+// co-tenant codex is NOT a derived participant → comment blocked
+expectErr('NOT_RESPONSIBLE', () => store.commentEntry('codex-azra-agent-1', { projectId: PPID, entryId: aEntry.entryId, text: 'before grant' }, { ts: ts++ }));
+// non-curator cannot grant
+expectErr('NOT_CURATOR', () => store.addParticipant('claude-azra-1', { projectId: PPID, agentId: 'codex-azra-agent-1' }, { ts: ts++ }));
+// curator grants codex directly
+const g1 = store.addParticipant('claude-meddaemon-1', { projectId: PPID, agentId: 'codex-azra-agent-1' }, { ts: ts++ });
+assert(g1.ok && store.projects.get(PPID).participants.includes('codex-azra-agent-1'), 'grant adds codex to effective participants');
+// now codex can comment (the chal-13 unblock)
+assert(store.commentEntry('codex-azra-agent-1', { projectId: PPID, entryId: aEntry.entryId, text: 'after grant' }, { ts: ts++ }).ok, 'granted co-tenant may comment');
+// THE CLOBBER REGRESSION: a later map_repos re-derives, grant must survive
+store.mapRepos('claude-meddaemon-1', { projectId: PPID, repos: [
+  { repo: 'meddaemon', root: '/home/sheemeh/projects/meddaemon' },
+  { repo: 'azra-agent', root: '/home/sheemeh/projects/azra-agent' },
+  { repo: 'azra', root: '/home/sheemeh/projects/azra' },
+] }, { ts: ts++ });
+assert(store.projects.get(PPID).participants.includes('codex-azra-agent-1'), 'direct grant survives a map_repos re-derivation (no clobber)');
+assert(store.commentEntry('codex-azra-agent-1', { projectId: PPID, entryId: aEntry.entryId, text: 'after remap' }, { ts: ts++ }).ok, 'codex still a participant after remap');
+// grant survives a fresh reload from disk (separate persistence)
+const storeG = new DashboardStore({ root: ROOT });
+assert(storeG.projects.get(PPID).participants.includes('codex-azra-agent-1'), 'grant persists across reload (separate grants: line in meta)');
+// remove revokes the DIRECT grant → comment blocked again
+const rm = store.removeParticipant('claude-meddaemon-1', { projectId: PPID, agentId: 'codex-azra-agent-1' }, { ts: ts++ });
+assert(rm.ok && rm.stillParticipantViaRepo === false, 'remove revokes the grant; codex not derived');
+expectErr('NOT_RESPONSIBLE', () => store.commentEntry('codex-azra-agent-1', { projectId: PPID, entryId: aEntry.entryId, text: 'after remove' }, { ts: ts++ }));
+// precedence: removing a DERIVED owner via remove_participant does NOT drop it
+const rmDerived = store.removeParticipant('claude-meddaemon-1', { projectId: PPID, agentId: 'claude-azra-agent-1' }, { ts: ts++ });
+assert(rmDerived.stillParticipantViaRepo === true, 'remove_participant cannot drop a repo-derived participant (use map_repos)');
+assert(store.projects.get(PPID).participants.includes('claude-azra-agent-1'), 'derived owner remains a participant after a no-op direct remove');
+console.log('OK: direct participant grants — unblock co-tenant, survive remap+reload, remove revokes, derived owners protected');
+
 console.log('OK: dashboard-store smoke passed');
 process.exit(0);

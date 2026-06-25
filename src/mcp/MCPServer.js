@@ -755,6 +755,18 @@ class MCPServer extends EventEmitter {
         this._signalDashboardChange(r.projectId, { op: 'map-repos', rev: r.rev, by: callerAgentId });
         return r;
       }
+      case 'dashboard_add_participant': {
+        requireString('projectId'); requireString('agentId');
+        const r = this._dash().addParticipant(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'add-participant', rev: r.rev, by: callerAgentId });
+        return r;
+      }
+      case 'dashboard_remove_participant': {
+        requireString('projectId'); requireString('agentId');
+        const r = this._dash().removeParticipant(callerAgentId, args, { ts: Date.now() });
+        this._signalDashboardChange(r.projectId, { op: 'remove-participant', rev: r.rev, by: callerAgentId });
+        return r;
+      }
       case 'dashboard_set_roadmap': {
         requireString('projectId');
         const r = this._dash().setRoadmap(callerAgentId, args, { ts: Date.now() });

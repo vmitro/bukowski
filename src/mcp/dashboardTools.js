@@ -46,8 +46,18 @@ const DASHBOARD_TOOLS = [
   },
   {
     name: 'dashboard_map_repos',
-    description: 'Curator-only. Replace a project\'s repo map (and re-derive participants).',
+    description: 'Curator-only. Replace a project\'s repo map (and re-derive participants). Direct grants (dashboard_add_participant) are preserved across a remap.',
     inputSchema: { type: 'object', required: ['projectId', 'repos'], properties: { projectId: { type: 'string' }, repos: { type: 'array', items: repoItem } } },
+  },
+  {
+    name: 'dashboard_add_participant',
+    description: 'Curator-only. Directly grant an agent participant rights (comment/vote/election) on a project, bypassing repo-owner derivation. For co-tenant agents that share one checkout root and so cannot be distinguished by the repo map (e.g. codex- and claude-<host>-1 on the same root), or cross-host guests with no repo in the project. The grant is stored separately and survives dashboard_map_repos.',
+    inputSchema: { type: 'object', required: ['projectId', 'agentId'], properties: { projectId: { type: 'string' }, agentId: { type: 'string', description: 'federated agent id to grant, e.g. codex-azra-agent-1' } } },
+  },
+  {
+    name: 'dashboard_remove_participant',
+    description: 'Curator-only. Revoke a DIRECT participant grant (added via dashboard_add_participant). Does not remove a repo-owner-derived participant — change the repo map for that. Response flags stillParticipantViaRepo if the agent remains a participant through derivation.',
+    inputSchema: { type: 'object', required: ['projectId', 'agentId'], properties: { projectId: { type: 'string' }, agentId: { type: 'string', description: 'federated agent id whose direct grant to revoke' } } },
   },
   {
     name: 'dashboard_transfer_curator',
