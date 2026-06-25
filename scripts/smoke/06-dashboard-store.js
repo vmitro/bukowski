@@ -321,5 +321,35 @@ const pr2 = store.setEntry('claude-azra-1', { projectId: era2.projectId, repo: '
 assert.notStrictEqual(pr2.entryId, pr1.entryId, 'a promoted-away id must never be re-issued');
 console.log('OK: id watermark survives delete/recreate eras and promote vacancies');
 
+// ── 11. repo-residency multi-edit: same-host box-mates co-curate entries ───────
+// Entries owned by claude-azra-agent-1 (host=azra-agent) are editable by ANY
+// agent resident on that host — codex-azra-agent-1, claude-azra-agent-2, etc. —
+// not just the single named owner. Residency keys off the id host segment (the
+// SAME source on both sides), never the transport machine-host field.
+const rp = store.createProject('claude-bukowski-1', { name: 'Residency Test', goal: 'g', curator: 'claude-bukowski-1', repos: [
+  { repo: 'azra-agent', root: '/home/sheemeh/projects/azra-agent' },
+] }, { ts: ts++ });
+const RPID = rp.projectId;
+// owner is minted from the repo-root basename → claude-azra-agent-1
+const owned = store.setEntry('claude-azra-agent-1', { projectId: RPID, repo: 'azra-agent', category: 'tasks', oneliner: 'owner creates the entry', refs: ['azra-agent://sha/r1'] }, { ts: ts++ });
+assert.strictEqual(store.queryEntries('user', { projectId: RPID, entryId: owned.entryId }).entries[0].owner, 'claude-azra-agent-1', 'entry owner is the host-1 id');
+// THE PROOF: a different agent type on the SAME host edits the owner's entry.
+const coEdit = store.setEntry('codex-azra-agent-1', { projectId: RPID, repo: 'azra-agent', category: 'tasks', oneliner: 'box-mate codex edits it', refs: ['azra-agent://sha/r2'], entryId: owned.entryId }, { ts: ts++ });
+assert(coEdit.ok, 'codex-azra-agent-1 (same host) must set/update a claude-azra-agent-1-owned entry');
+assert.strictEqual(store.queryEntries('user', { projectId: RPID, entryId: owned.entryId }).entries[0].oneliner, 'box-mate codex edits it', 'co-edit applied');
+// box-mate can also close/promote/link
+const coClose = store.closeEntry('codex-azra-agent-1', { projectId: RPID, entryId: owned.entryId }, { ts: ts++ });
+assert(coClose.ok, 'same-host box-mate may close the entry');
+// a higher-N same-host agent is also in-residency (claude-azra-agent-2)
+const co2 = store.setEntry('claude-azra-agent-2', { projectId: RPID, repo: 'azra-agent', category: 'bugs', oneliner: 'agent-2 also resident', refs: ['azra-agent://sha/r3'] }, { ts: ts++ });
+assert(co2.ok, 'claude-azra-agent-2 is resident on the same host and may write');
+// NEGATIVE: a DIFFERENT-host agent is still rejected (no cross-host widening).
+expectErr('NOT_RESPONSIBLE', () => store.setEntry('claude-meddaemon-1', { projectId: RPID, repo: 'azra-agent', category: 'bugs', oneliner: 'cross-host write', refs: ['azra-agent://sha/r4'] }, { ts: ts++ }));
+// NEGATIVE: the flagged edge case — an id whose host SEGMENT differs (cwd
+// basename "projects", even if it shares a machine host) is NOT in residency.
+// Residency is the id segment, so claude-projects-3 stays scoped out.
+expectErr('NOT_RESPONSIBLE', () => store.setEntry('claude-projects-3', { projectId: RPID, repo: 'azra-agent', category: 'bugs', oneliner: 'different id-segment host', refs: ['azra-agent://sha/r5'] }, { ts: ts++ }));
+console.log('OK: repo-residency multi-edit — same-host box-mates co-curate, cross-host + off-segment rejected');
+
 console.log('OK: dashboard-store smoke passed');
 process.exit(0);

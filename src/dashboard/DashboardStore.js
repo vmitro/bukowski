@@ -386,6 +386,32 @@ class DashboardStore {
     return r.owner;
   }
 
+  // The "residency" of a federated id is its host segment — the middle piece of
+  // claude-<host>-<n> (host may itself contain hyphens, e.g. azra-agent). This
+  // is the SAME source on both sides of an edit check: an entry's owner is
+  // minted as claude-<hostFromCwd(repoRoot)>-1, and a caller arrives federated
+  // to <type>-<host>-<n>. We deliberately key off the id segment, never the
+  // transport "host" field (machine hostname) reported by list_agents — that
+  // field is asymmetric (owner derivation never uses it) and can diverge from
+  // the id segment (an agent whose cwd basename differs from its machine host
+  // carries a different residency than its box-mates, and stays scoped to it).
+  _hostOf(id) {
+    const m = /^(?:claude|codex|gemini)-(.+)-\d+$/.exec(id || '');
+    return m ? m[1] : null;
+  }
+
+  // Repo-residency multi-edit: any agent resident on the same host as an entry's
+  // owner may curate that entry (set/close/promote/link), so {claude,codex}-
+  // <host>-{1,2,...} collectively own their box's entries instead of a single
+  // named seat. Exact-id still passes (covers ids that don't parse). A null host
+  // never matches — unparseable ids fall back to strict owner equality, so this
+  // can only widen access among well-formed same-host ids, never beyond them.
+  _sameResidency(caller, owner) {
+    if (caller === owner) return true;
+    const hc = this._hostOf(caller);
+    return hc !== null && hc === this._hostOf(owner);
+  }
+
   _requireCurator(caller, p) {
     if (caller !== p.curator && caller !== 'user') {
       throw derr('NOT_CURATOR', `only the curator (${p.curator}) may do this`, { caller });
@@ -566,8 +592,8 @@ class DashboardStore {
       : (Array.isArray(args.tags) ? args.tags : String(args.tags).split(','))
         .map((t) => String(t).trim().toLowerCase()).filter(Boolean);
     const owner = this._ownerForRepo(p, args.repo);
-    if (caller !== owner && caller !== 'user') {
-      throw derr('NOT_RESPONSIBLE', `only ${owner} (owner of ${args.repo}) may write this entry; FIPA them a request instead`, { caller, owner });
+    if (!this._sameResidency(caller, owner) && caller !== 'user') {
+      throw derr('NOT_RESPONSIBLE', `only agents resident on ${owner}'s host (owner of ${args.repo}) may write this entry; FIPA them a request instead`, { caller, owner });
     }
     if (entry && args.ifRev != null && Number(args.ifRev) !== p.rev) {
       throw derr('CONFLICT', `stale write: ifRev=${args.ifRev} but project rev=${p.rev}`);
@@ -633,8 +659,8 @@ class DashboardStore {
     caller = this._federate(caller);
     const p = this._project(args.projectId);
     const { entry, category } = this._findEntry(p, args.entryId);
-    if (caller !== entry.owner && caller !== 'user') {
-      throw derr('NOT_RESPONSIBLE', `only ${entry.owner} or the user may close ${entry.id}`, { caller });
+    if (!this._sameResidency(caller, entry.owner) && caller !== 'user') {
+      throw derr('NOT_RESPONSIBLE', `only agents resident on ${entry.owner}'s host or the user may close ${entry.id}`, { caller });
     }
     const before = entry.status;
     entry.status = args.status === 'wontfix' ? 'wontfix' : 'closed';
@@ -663,8 +689,8 @@ class DashboardStore {
     caller = this._federate(caller);
     const p = this._project(args.projectId);
     const { entry, category } = this._findEntry(p, args.entryId);
-    if (caller !== entry.owner && caller !== 'user') {
-      throw derr('NOT_RESPONSIBLE', `only ${entry.owner} may promote ${entry.id}`, { caller });
+    if (!this._sameResidency(caller, entry.owner) && caller !== 'user') {
+      throw derr('NOT_RESPONSIBLE', `only agents resident on ${entry.owner}'s host may promote ${entry.id}`, { caller });
     }
     const to = args.toCategory;
     if (!CATEGORIES.includes(to)) throw derr('BAD_CATEGORY', `unknown category: ${to}`);
@@ -686,8 +712,8 @@ class DashboardStore {
     caller = this._federate(caller);
     const p = this._project(args.projectId);
     const { entry, category } = this._findEntry(p, args.entryId);
-    if (caller !== entry.owner && caller !== 'user') {
-      throw derr('NOT_RESPONSIBLE', `only ${entry.owner} may link ${entry.id}`, { caller });
+    if (!this._sameResidency(caller, entry.owner) && caller !== 'user') {
+      throw derr('NOT_RESPONSIBLE', `only agents resident on ${entry.owner}'s host may link ${entry.id}`, { caller });
     }
     const rel = args.rel || 'blocked-on';
     if (!['blocked-on', 'supersedes', 'caused-by'].includes(rel)) {

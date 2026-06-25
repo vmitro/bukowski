@@ -111,12 +111,12 @@ const DASHBOARD_TOOLS = [
   },
   {
     name: 'dashboard_set_entry',
-    description: 'Create or update an entry you own (you must own the target repo). One-liner <=80 chars; actionable categories require >=1 grounding ref. Pointers only, never bodies — except category "tips" (wikihow-style how-to/gotcha): a tip carries a body (<=1500 chars summary) plus tags, and its refs MUST point at the canonical doc the body summarizes.',
+    description: 'Create or update an entry for a repo you are RESIDENT on — any agent on the same host as the repo\'s owner may write it (box-mates co-curate; not a single named seat). One-liner <=80 chars; actionable categories require >=1 grounding ref. Pointers only, never bodies — except category "tips" (wikihow-style how-to/gotcha): a tip carries a body (<=1500 chars summary) plus tags, and its refs MUST point at the canonical doc the body summarizes.',
     inputSchema: {
       type: 'object', required: ['projectId', 'repo', 'category', 'oneliner'],
       properties: {
         projectId: { type: 'string' },
-        repo: { type: 'string', description: 'repo you own; the entry is attributed to its owner agent' },
+        repo: { type: 'string', description: 'a repo you are resident on (same host as its owner); the entry is attributed to that repo\'s owner agent' },
         category: { type: 'string', enum: CATEGORY_ENUM },
         oneliner: { type: 'string', description: 'HARD LIMIT 80 chars — count before sending, the server rejects 81 (top recurring agent error); no "::"; details live in the referenced artifact' },
         refs: { type: 'array', items: { type: 'string' }, description: 'grounding refs. Grammar: <repo>://sha/<hash>, <repo>://pr/<N>, <repo>://adr/<N>, <repo>://entry/<id>, <repo>://file/<path>[:line], file:<path>, conv:<uuid>. <repo> must be a repo mapped into the project — unknown prefixes come back as warnings; fix them, a typo poisons the provenance chain' },
@@ -131,7 +131,7 @@ const DASHBOARD_TOOLS = [
   },
   {
     name: 'dashboard_close_entry',
-    description: 'Close an entry. Only the entry owner (or the user) may close. Pass status:"wontfix" to mark won\'t-fix.',
+    description: 'Close an entry. Any agent resident on the owner\'s host (or the user) may close. Pass status:"wontfix" to mark won\'t-fix.',
     inputSchema: { type: 'object', required: ['projectId', 'entryId'], properties: { projectId: { type: 'string' }, entryId: { type: 'string' }, status: { type: 'string', enum: ['closed', 'wontfix'] } } },
   },
   {
@@ -141,12 +141,12 @@ const DASHBOARD_TOOLS = [
   },
   {
     name: 'dashboard_promote',
-    description: 'Re-file an entry into another category in place (owner-only). Same id-lineage, no duplication.',
+    description: 'Re-file an entry into another category in place (owner-host residents only). Same id-lineage, no duplication.',
     inputSchema: { type: 'object', required: ['projectId', 'entryId', 'toCategory'], properties: { projectId: { type: 'string' }, entryId: { type: 'string' }, toCategory: { type: 'string', enum: CATEGORY_ENUM } } },
   },
   {
     name: 'dashboard_link',
-    description: 'Add typed links from an entry to other entries/refs (owner-only). Link, don\'t copy. supersedes/caused-by also extend dashboard_chain.',
+    description: 'Add typed links from an entry to other entries/refs (owner-host residents only). Link, don\'t copy. supersedes/caused-by also extend dashboard_chain.',
     inputSchema: {
       type: 'object', required: ['projectId', 'entryId', 'targets'],
       properties: {
