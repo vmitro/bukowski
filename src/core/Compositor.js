@@ -213,7 +213,11 @@ class Compositor {
    * Update scroll positions for non-focused panes with followTail enabled
    */
   updateFollowTailScrolls() {
-    for (const pane of this.layoutManager.getAllPanes()) {
+    // Use getRealPanes() not getAllPanes(): when zoomed, getAllPanes() returns
+    // only the detached zoom pane, so background panes never advance their
+    // scroll offset and show stale text on unzoom. getRealPanes() yields every
+    // pane (background panes keep their pre-zoom bounds, valid for restore).
+    for (const pane of this.layoutManager.getRealPanes()) {
       const paneId = pane.id;
       if (paneId === this.layoutManager.focusedPaneId) continue; // Already handled
 

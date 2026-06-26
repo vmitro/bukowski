@@ -102,6 +102,20 @@ class LayoutManager {
   }
 
   /**
+   * Get all panes in the REAL layout, ignoring zoom.
+   * When zoomed, this.layout is a detached single-pane zoom view, so
+   * getAllPanes() only sees the zoomed pane. The background panes (with
+   * their pre-zoom bounds) live in savedLayout. Callers that must touch
+   * every agent's pane even while zoomed (e.g. follow-tail scroll updates)
+   * use this instead of getAllPanes().
+   */
+  getRealPanes() {
+    return this.zoomedPaneId && this.savedLayout
+      ? this._getAllPanesUncached(this.savedLayout)
+      : this.getAllPanes();
+  }
+
+  /**
    * Get focused pane
    */
   getFocusedPane() {
