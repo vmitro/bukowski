@@ -53,6 +53,20 @@ class MCPServer extends EventEmitter {
     // agents and lets the boundary hooks (Stop) deliver instead.
     this.busyAgents = new Set();
 
+    // Sliding-window backstop against a STUCK busy flag. busyAgents is cleared
+    // by the Stop hook's best-effort markIdle (stop.js, 800ms timeout, swallowed
+    // catch). If that RPC times out, or the agent finishes a turn and then sits
+    // idle waiting on FIPA (no further Stop fires to clear it), the flag stays
+    // set and live channel pushes are suppressed forever for a genuinely-idle
+    // agent — the exact "never learns until it idles" symptom. We stamp the last
+    // activity time per busy agent and treat the flag as stale after BUSY_TTL_MS
+    // of silence. The window slides on every tool call (see tools/call), so a
+    // genuinely-running turn (which keeps making tool calls) never expires; only
+    // a truly silent agent does, and an idle agent is exactly the one it is safe
+    // to push to.
+    this.busyTouched = new Map();  // agentId -> last activity ms (only while busy)
+    this.busyTtlMs = parseInt(process.env.BUKOWSKI_BUSY_TTL_MS, 10) || 300000; // 5 min
+
     // Define available tools
     this.tools = this._defineTools();
 
@@ -450,6 +464,9 @@ class MCPServer extends EventEmitter {
         try {
           // Use clientState.agentId, or fallback to _callerAgentId from bridge
           const callerAgentId = clientState.agentId || params.arguments?._callerAgentId || 'unknown';
+          // A tool call is proof the turn is still active — slide the busy
+          // window so a long-but-active turn never trips the stale-busy TTL.
+          this._touchBusy(callerAgentId);
           const result = await this._handleToolCall(
             params.name,
             params.arguments,
@@ -470,8 +487,20 @@ class MCPServer extends EventEmitter {
         // block (see notifyNewMessage / busyAgents). Not an MCP tool.
         const tId = params?.agentId || clientState.agentId;
         if (tId) {
-          if (params?.state === 'busy') this.busyAgents.add(tId);
-          else this.busyAgents.delete(tId);
+          if (params?.state === 'busy') {
+            this.busyAgents.add(tId);
+            this.busyTouched.set(tId, Date.now());
+          } else {
+            this.busyAgents.delete(tId);
+            this.busyTouched.delete(tId);
+            // The turn just closed. Any message that arrived WHILE this agent
+            // was busy was suppressed by notifyNewMessage and never re-pushed —
+            // and if the agent now sits idle waiting on FIPA, no further turn
+            // boundary fires to surface it. Re-push anything still undelivered
+            // now that the busy gate is clear, so an idle recipient gets the
+            // live <channel> block instead of waiting for an unrelated turn.
+            this._flushPendingPushes(tId);
+          }
         }
         this._sendResult(socket, id, { ok: true, busy: tId ? this.busyAgents.has(tId) : false });
         break;
@@ -1218,17 +1247,88 @@ class MCPServer extends EventEmitter {
    * @param {string} agentId
    * @param {Object} message - The FIPA message
    */
+  /**
+   * Whether an agent is mid-turn for the purpose of suppressing channel pushes.
+   * Honours the sliding TTL: a busy flag with no activity for busyTtlMs is
+   * treated as stale (the agent went idle without a clean idle signal) and
+   * self-cleared, so pushes can resume. A genuinely-running turn keeps the
+   * window fresh via _touchBusy on each tool call and never expires here.
+   * @private
+   */
+  _isBusy(agentId) {
+    if (!this.busyAgents.has(agentId)) return false;
+    const touched = this.busyTouched.get(agentId) || 0;
+    if (Date.now() - touched > this.busyTtlMs) {
+      // Stale: clear so subsequent checks are O(1) and pushes resume.
+      this.busyAgents.delete(agentId);
+      this.busyTouched.delete(agentId);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Slide the busy window for an agent that is currently busy. Called on each
+   * tool call so a long but active turn never trips the stale-busy TTL. No-op
+   * for agents that aren't busy (don't resurrect a cleared flag).
+   * @private
+   */
+  _touchBusy(agentId) {
+    if (agentId && this.busyAgents.has(agentId)) {
+      this.busyTouched.set(agentId, Date.now());
+    }
+  }
+
+  /**
+   * Trace a channel-push drop that is EXPECTED in normal operation (busy
+   * suppression, non-claude target). Off by default to keep the shared
+   * bukowski.log quiet; set BUKOWSKI_DEBUG_PUSH=1 to surface every drop when
+   * diagnosing a "message didn't push" report. The no-socket drop is logged
+   * unconditionally instead — that one is always an anomaly.
+   * @private
+   */
+  _debugPush(agentId, reason) {
+    if (!process.env.BUKOWSKI_DEBUG_PUSH) return;
+    console.error(`[push] suppressed for ${agentId}: ${reason}`);
+  }
+
+  /**
+   * Re-push every queued message for an agent that hasn't yet landed on the
+   * channel. Called when an agent transitions busy→idle: messages that arrived
+   * mid-turn were suppressed (thinking-block safety) and notifyNewMessage does
+   * not retry, so without this an idle recipient never gets the live <channel>
+   * block — the message only surfaces at the next turn boundary (which, for an
+   * agent now sitting idle, may never come). notifyNewMessage re-checks the
+   * busy gate (now clear) and marks _channelDelivered on success so the hook
+   * peek won't double-deliver. Safe to call when the queue is empty.
+   * @private
+   */
+  _flushPendingPushes(agentId) {
+    const queue = this.messageQueues.get(agentId);
+    if (!queue || queue.length === 0) return;
+    for (const message of queue) {
+      if (message._channelDelivered) continue;
+      this.notifyNewMessage(agentId, message);
+    }
+  }
+
   notifyNewMessage(agentId, message) {
     // Channels are a Claude Code feature; codex/gemini clients don't implement
     // notifications/claude/channel and just ignore it. Only push to claude.
-    if (!this._isClaudeAgent(agentId)) return;
+    if (!this._isClaudeAgent(agentId)) {
+      this._debugPush(agentId, 'not-a-claude-agent');
+      return;
+    }
     // SAFETY: never inject an out-of-turn <channel> block while the agent is
     // mid-turn. Its open assistant message carries `thinking` blocks that must
     // be re-sent verbatim; a channel injection there corrupts them and the API
     // rejects the next request (400 thinking-blocks-cannot-be-modified). The
     // message stays queued (NOT marked _channelDelivered), so the Stop hook
     // delivers it at the safe turn boundary. Idle agents get the immediate push.
-    if (this.busyAgents.has(agentId)) return;
+    if (this._isBusy(agentId)) {
+      this._debugPush(agentId, 'busy-suppressed');
+      return;
+    }
     // Broadcast the channel event to EVERY connection this agent holds: the
     // channel connection (plugin server, role=channel) injects it as a <channel>
     // block; a tools-only connection ignores the unknown notification. We don't
@@ -1246,7 +1346,21 @@ class MCPServer extends EventEmitter {
     for (const [sock, st] of this.clients) {
       if (st.agentId === agentId) sockets.add(sock);
     }
-    if (sockets.size === 0) return;
+    if (sockets.size === 0) {
+      // ANOMALY: a claude agent with no channel socket AND no tools socket. The
+      // channel plugin connects once at startup and stays, so an idle agent
+      // should always have one — if it doesn't, the live push is silently lost
+      // and delivery falls back to the next turn-boundary hook peek (the exact
+      // "idle agent never got the FIPA" symptom). Log unconditionally; this is
+      // rare and actionable (usually an id-mismatch between the FIPA `to` and
+      // the socket's registered agentId, or a dropped channel connection).
+      console.error(
+        `[push] no socket for ${agentId} — channel push dropped, `
+        + `falling back to hook peek (channelSockets=${this.channelSockets.has(agentId)}, `
+        + `knownAgentIds=[${[...new Set([...this.clients.values()].map(s => s.agentId).filter(Boolean))].join(',')}])`
+      );
+      return;
+    }
     const { content, meta } = this._buildChannelEvent(agentId, message);
     let sent = false;
     for (const sock of sockets) {
@@ -1285,7 +1399,7 @@ class MCPServer extends EventEmitter {
     const fedId = agentId;
     const localId = this.federationHub?.resolveLocalAlias?.(fedId) || fedId;
     if (!this._isClaudeAgent(localId)) return;
-    if (this.busyAgents.has(localId)) return; // catch it on the next poll
+    if (this._isBusy(localId)) return; // catch it on the next poll
     const sockets = new Set();
     const chan = this.channelSockets.get(localId);
     if (chan) sockets.add(chan);
