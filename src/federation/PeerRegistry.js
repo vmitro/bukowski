@@ -23,6 +23,15 @@ const { hostFromCwd, shortHash } = require('../utils/host');
 
 const DEFAULT_PEERS_DIR = path.join(os.homedir(), '.bukowski', 'peers');
 
+// Static peers describe a bukowski on ANOTHER box whose fedSocket has been
+// forwarded here over an SSH StreamLocalForward (see `bukowski --join`). Unlike
+// pid peers they carry no local PID — their "liveness" is simply whether the
+// forwarded socket is still present (the SSH tunnel holds it; teardown/
+// StreamLocalBindUnlink removes it). So they live in a SEPARATE dir that the
+// pid-liveness pruner never touches, and are surfaced only while their socket
+// exists. File shape: { host, sessionId, fedSocket, static:true }.
+const DEFAULT_STATIC_PEERS_DIR = path.join(os.homedir(), '.bukowski', 'peers.static');
+
 function isPidAlive(pid) {
   try { process.kill(pid, 0); return true; }
   catch (err) { return err.code === 'EPERM'; }
@@ -33,6 +42,7 @@ class PeerRegistry extends EventEmitter {
     super();
 
     this.peersDir = opts.peersDir || DEFAULT_PEERS_DIR;
+    this.staticPeersDir = opts.staticPeersDir || DEFAULT_STATIC_PEERS_DIR;
     this.pid = opts.pid || process.pid;
     this.sessionId = opts.sessionId || null;
     this.ipcSocket = opts.ipcSocket || null;
@@ -59,6 +69,8 @@ class PeerRegistry extends EventEmitter {
    */
   start() {
     fs.mkdirSync(this.peersDir, { recursive: true, mode: 0o700 });
+    try { fs.mkdirSync(this.staticPeersDir, { recursive: true, mode: 0o700 }); }
+    catch { /* static peers are optional; ignore if unavailable */ }
     this._prune();
     this.host = this._resolveHost();
     this.peerFile = path.join(this.peersDir, `${this.pid}.json`);
@@ -91,6 +103,10 @@ class PeerRegistry extends EventEmitter {
     if (this.watcher) {
       try { this.watcher.close(); } catch { /* ignore */ }
       this.watcher = null;
+    }
+    if (this.staticWatcher) {
+      try { this.staticWatcher.close(); } catch { /* ignore */ }
+      this.staticWatcher = null;
     }
     if (this._scanTimer) {
       clearTimeout(this._scanTimer);
@@ -242,11 +258,58 @@ class PeerRegistry extends EventEmitter {
       }
     }
 
-    for (const pid of Array.from(this.peers.keys())) {
-      if (!seen.has(pid)) {
-        const gone = this.peers.get(pid);
-        this.peers.delete(pid);
+    // Static (forwarded-over-SSH) peers share the same map + events but are
+    // keyed by a string id so they never collide with integer pids.
+    this._scanStatic(seen);
+
+    for (const key of Array.from(this.peers.keys())) {
+      if (!seen.has(key)) {
+        const gone = this.peers.get(key);
+        this.peers.delete(key);
         this.emit('peer:gone', gone);
+      }
+    }
+  }
+
+  /**
+   * Scan the static-peers dir. Each valid file whose forwarded fedSocket
+   * currently exists is surfaced as a peer keyed `static:<basename>`; when its
+   * socket disappears (SSH tunnel dropped) it falls out of `seen` and the
+   * caller's gone-loop emits peer:gone. No pid-liveness — these have no local
+   * pid. Entries missing host/fedSocket are skipped (dial() needs both).
+   * @param {Set} seen - accumulates live keys for the caller's gone-detection
+   * @private
+   */
+  _scanStatic(seen) {
+    let entries;
+    try { entries = fs.readdirSync(this.staticPeersDir); }
+    catch { return; }
+
+    for (const file of entries) {
+      if (!file.endsWith('.json')) continue;
+      let info;
+      try {
+        info = JSON.parse(fs.readFileSync(path.join(this.staticPeersDir, file), 'utf-8'));
+      } catch { continue; }
+      if (!info || !info.host || !info.fedSocket) continue;
+      // Liveness = the forwarded socket is present. A dropped tunnel (with
+      // StreamLocalBindUnlink) removes it, so the peer ages out on next scan.
+      if (!fs.existsSync(info.fedSocket)) continue;
+      info.static = true;
+
+      const key = `static:${file.replace(/\.json$/, '')}`;
+      seen.add(key);
+      const prev = this.peers.get(key);
+      if (!prev) {
+        this.peers.set(key, info);
+        this.emit('peer:appeared', info);
+      } else if (
+        prev.fedSocket !== info.fedSocket ||
+        prev.host !== info.host ||
+        prev.sessionId !== info.sessionId
+      ) {
+        this.peers.set(key, info);
+        this.emit('peer:updated', info);
       }
     }
   }
@@ -265,7 +328,19 @@ class PeerRegistry extends EventEmitter {
       // Watcher couldn't be created — the 5s poll covers us.
       this.emit('error', err);
     }
+    // Watch the static dir too so a `--join` peer file appears/vanishes
+    // promptly. Best-effort; the 5s safety poll is the real guarantee.
+    try {
+      this.staticWatcher = fs.watch(this.staticPeersDir, () => {
+        if (this._scanTimer || this._stopped) return;
+        this._scanTimer = setTimeout(() => {
+          this._scanTimer = null;
+          this._scan();
+        }, 50);
+      });
+      this.staticWatcher.on('error', () => { /* poll covers it */ });
+    } catch { /* dir may not exist; poll covers it */ }
   }
 }
 
-module.exports = { PeerRegistry, DEFAULT_PEERS_DIR };
+module.exports = { PeerRegistry, DEFAULT_PEERS_DIR, DEFAULT_STATIC_PEERS_DIR };
