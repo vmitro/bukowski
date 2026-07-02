@@ -42,6 +42,7 @@ const { OverlayManager } = require('./src/ui/OverlayManager');
 const { MCPServer } = require('./src/mcp/MCPServer');
 const { PeerRegistry } = require('./src/federation/PeerRegistry');
 const { FederationHub } = require('./src/federation/FederationHub');
+const { SshJoin } = require('./src/federation/sshJoin');
 const { FIPAMessage: FIPAMessageClass } = require('./src/acl/FIPAMessage');
 const {
   extractSelectedText,
@@ -77,6 +78,7 @@ let chatPane = null;
 let compositor = null;
 let peerRegistry = null;
 let federationHub = null;
+let sshJoin = null;
 
 // Load quotes for splash screen
 const quotesPath = path.join(__dirname, 'quotes.txt');
@@ -963,11 +965,28 @@ terminal.registerSignalHandlers();
       // MCPServer surfaces federated agents in list_agents.
       try { mcpServer.attachFederation(federationHub); } catch { /* ignore */ }
 
+      // --join: federate with a remote bukowski over SSH. The tunnel forwards
+      // our fed socket both ways and plants static peers on each side; the
+      // existing dial/dedup machinery meshes the two hubs from there.
+      if (cliArgs.join) {
+        try {
+          sshJoin = new SshJoin({
+            endpoint: cliArgs.join,
+            local: { host: resolvedHost, sessionId: session.id, fedSocket: fedSocketPath },
+            log: (m) => broadcastSystemMessage(`[fed] ${m}`),
+          });
+          sshJoin.start();
+        } catch (err) {
+          broadcastSystemMessage(`[fed] join ${cliArgs.join} failed: ${err.message}`);
+        }
+      }
+
       terminal.onShutdown(() => {
         try { session.off('agent:added', onAgentAdded); } catch { /* ignore */ }
         try { session.off('agent:removed', onAgentRemoved); } catch { /* ignore */ }
         try { ipcHub.attachFederation(null); } catch { /* ignore */ }
         try { mcpServer.attachFederation(null); } catch { /* ignore */ }
+        try { if (sshJoin) sshJoin.stop(); } catch { /* ignore */ }
         try { federationHub.stop(); } catch { /* ignore */ }
         try { peerRegistry.stop(); } catch { /* ignore */ }
       });

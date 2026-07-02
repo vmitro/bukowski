@@ -266,6 +266,7 @@ function parseArgs() {
     restore: null,
     sessionName: null,
     single: false,
+    join: null,
     agentArgs: []
   };
 
@@ -287,6 +288,14 @@ function parseArgs() {
         result.sessionName = nextArg;
         i++;
       }
+    } else if (arg === '--join' || arg === '-j') {
+      // Join a remote bukowski's federation over SSH: forward fed sockets
+      // both ways and register static peers so the two mesh across the net.
+      const nextArg = args[i + 1];
+      if (nextArg && !nextArg.startsWith('-')) {
+        result.join = nextArg;
+        i++;
+      }
     } else if (arg === '--help' || arg === '-h') {
       console.log(`bukowski - multi-agent terminal
 
@@ -297,6 +306,8 @@ Options:
   -r, --restore [id|name]  Restore a saved session (default: latest)
       --resume             Alias for --restore
   -s, --session <name>     Set session name
+  -j, --join <endpoint>    Federate with a remote bukowski over SSH
+                           (e.g. user@host:2222 or an ssh_config alias)
   -h, --help               Show this help
 
 Session Commands (in normal mode, type :):
