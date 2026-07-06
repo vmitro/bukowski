@@ -965,6 +965,20 @@ terminal.registerSignalHandlers();
       // MCPServer surfaces federated agents in list_agents.
       try { mcpServer.attachFederation(federationHub); } catch { /* ignore */ }
 
+      // Roster self-heal. Restored-session agents are added (multi.js ~234)
+      // BEFORE onAgentAdded is wired, so their agent:added never announces; and
+      // an agent whose pty spawns after the hello handshake is absent from that
+      // snapshot too. Without a re-sync it stays invisible in peers' list_agents
+      // until it happens to message them. A slow gossip re-broadcasts the live
+      // roster so a peer converges within one tick regardless of the race.
+      const rosterResyncTimer = setInterval(() => {
+        try { federationHub.resyncRoster(); } catch { /* best effort */ }
+      }, parseInt(process.env.BUKOWSKI_ROSTER_RESYNC_MS, 10) || 30000);
+      if (rosterResyncTimer.unref) rosterResyncTimer.unref();
+      // Immediate catch-up once the socket is up (covers agents already
+      // federatable now that weren't announced during startup).
+      setTimeout(() => { try { federationHub.resyncRoster(); } catch { /* ignore */ } }, 1500);
+
       // --join: federate with a remote bukowski over SSH. The tunnel forwards
       // our fed socket both ways and plants static peers on each side; the
       // existing dial/dedup machinery meshes the two hubs from there.
@@ -982,6 +996,7 @@ terminal.registerSignalHandlers();
       }
 
       terminal.onShutdown(() => {
+        try { clearInterval(rosterResyncTimer); } catch { /* ignore */ }
         try { session.off('agent:added', onAgentAdded); } catch { /* ignore */ }
         try { session.off('agent:removed', onAgentRemoved); } catch { /* ignore */ }
         try { ipcHub.attachFederation(null); } catch { /* ignore */ }

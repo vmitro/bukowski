@@ -145,6 +145,39 @@ class FederationHub extends EventEmitter {
   }
 
   /**
+   * Push our CURRENT full local roster to one peer as roster:add deltas.
+   * The hello carries a point-in-time snapshot, so an agent that wasn't yet
+   * federatable when the handshake ran (e.g. a restored-session agent whose
+   * pty spawns late, or one added before the agent:added listener was wired)
+   * is missing from the peer's view with no other way to appear. Re-sending
+   * the live snapshot on connect heals that; ingest is idempotent (keyed by
+   * federatedId on the receiver).
+   * @private
+   */
+  _syncRosterTo(peer) {
+    for (const agent of this._localRosterSnapshot()) {
+      this._send(peer, { type: 'roster', op: 'add', agent });
+    }
+  }
+
+  /**
+   * Re-broadcast our current full local roster to every connected peer. A
+   * cheap self-healing gossip: any announce/hello that raced a link (re)connect
+   * or an agent's pty coming up is reconciled on the next call. Callers run it
+   * on a slow timer so a peer's list_agents converges even when the delta path
+   * missed an agent. Idempotent on receivers.
+   */
+  resyncRoster() {
+    const snapshot = this._localRosterSnapshot();
+    if (!snapshot.length) return;
+    for (const peer of this.peers.values()) {
+      for (const agent of snapshot) {
+        this._send(peer, { type: 'roster', op: 'add', agent });
+      }
+    }
+  }
+
+  /**
    * Fan a locally-published coordination event out to every connected peer.
    * `ev` is the EventBus event record { topic, payload, actor, host, ts, seq }.
    * `hops` carries the origin-host path for loop suppression in a multi-peer
@@ -526,6 +559,9 @@ class FederationHub extends EventEmitter {
 
     this.peers.set(host, peer);
     this.emit('peer:connected', { host, sessionId, direction, hello });
+    // The hello roster was a point-in-time snapshot; push our live roster now
+    // so agents that weren't federatable at handshake still reach this peer.
+    this._syncRosterTo(peer);
     return peer;
   }
 
