@@ -557,8 +557,11 @@ class Compositor {
     const panes = this.layoutManager.getAllPanes();
     const focusedPaneId = this.layoutManager.focusedPaneId;
 
-    // Build output with DEC 2026 sync update (like index.js)
-    let frame = '\x1b[?2026h';      // Begin sync update
+    // Build output with DEC 2026 sync update (like index.js). Some old/limited
+    // terminals (ConnectBot on Android) mishandle ?2026 badly enough to drop the
+    // session — BUKOWSKI_NO_SYNC=1 omits the wrap (minor tearing, no drop).
+    const noSync = process.env.BUKOWSKI_NO_SYNC === '1';
+    let frame = noSync ? '' : '\x1b[?2026h';      // Begin sync update
     frame += '\x1b[?25l\x1b[H';     // Hide cursor, home
 
     // Row 0: Tab bar
@@ -584,7 +587,7 @@ class Compositor {
     // hidden) — never a bare show: that left the cursor wherever the status
     // bar write ended, a stray cursor in whatever pane that overlapped.
     frame += this.hardwareCursorSeq();
-    frame += '\x1b[?2026l';         // End sync update
+    frame += noSync ? '' : '\x1b[?2026l';         // End sync update
 
     process.stdout.write(frame);
   }
@@ -635,7 +638,8 @@ class Compositor {
    * Main draw function for chat mode
    */
   drawChat() {
-    let frame = '\x1b[?2026h';      // Begin sync update
+    const noSync = process.env.BUKOWSKI_NO_SYNC === '1';
+    let frame = noSync ? '' : '\x1b[?2026h';      // Begin sync update
     frame += '\x1b[?25l\x1b[H';     // Hide cursor, home
 
     const listWidth = 30;
@@ -661,7 +665,7 @@ class Compositor {
     frame += this.renderStatusBar();
 
     // Cursor stays hidden: renderChatInput paints its own inline cursor.
-    frame += '\x1b[?2026l';         // End sync update
+    frame += noSync ? '' : '\x1b[?2026l';         // End sync update
 
     process.stdout.write(frame);
   }
