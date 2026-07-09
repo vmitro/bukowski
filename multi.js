@@ -90,6 +90,58 @@ const cliArgs = parseArgs();
 // Compositor reads it, so emoji clusters render as BMP-safe "··" placeholders.
 if (cliArgs.ugly) process.env.BUKOWSKI_BMP_ONLY = '1';
 
+// Runtime version stamp + SIGUSR1 poke. A long-lived node process keeps running
+// the code it loaded at launch even after a `git pull` (stale-code gotcha), and
+// guessing staleness from start-time vs a file mtime is fragile. Instead: stamp
+// the git SHA this process launched with, and on SIGUSR1 write {launchSha,
+// diskSha, stale} to /tmp/bukowski-runtime-<pid>.json (+ the log). `kill -USR1
+// <pid>` then tells you definitively whether that process is running current
+// code. (Registering SIGUSR1 also disables node's inspector-on-USR1 — fine for
+// a TUI; use --inspect if you need the debugger.)
+const _gitSha = (dir) => {
+  try {
+    return require('child_process')
+      .execSync('git rev-parse --short HEAD', { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .trim();
+  } catch { return 'unknown'; }
+};
+const LAUNCH_SHA = _gitSha(__dirname);
+const LAUNCH_TIME = new Date().toISOString();
+process.on('SIGUSR1', () => {
+  const diskSha = _gitSha(__dirname);
+  const info = {
+    pid: process.pid, launchSha: LAUNCH_SHA, launchTime: LAUNCH_TIME,
+    diskSha, stale: LAUNCH_SHA !== 'unknown' && diskSha !== 'unknown' && LAUNCH_SHA !== diskSha,
+  };
+  try { fs.writeFileSync(`/tmp/bukowski-runtime-${process.pid}.json`, JSON.stringify(info) + '\n'); } catch { /* ignore */ }
+  try { console.log(`[version] SIGUSR1 pid=${info.pid} launch=${info.launchSha} disk=${info.diskSha} stale=${info.stale}`); } catch { /* ignore */ }
+});
+
+// SIGUSR2: self-restart with the SAME launch args, in place, onto current code.
+// `kill -USR2 <pid>` reloads a stale process without a manual pkill+relaunch.
+// A node process can't exec-replace itself, and spawn+exit fights the parent
+// shell for the tty — so we use `tmux respawn-pane -k`, which kills this process
+// and relaunches the exact command in the same pane (fresh code, same args,
+// same cwd). Requires running inside tmux ($TMUX_PANE); logs + no-ops otherwise.
+process.on('SIGUSR2', () => {
+  const pane = process.env.TMUX_PANE;
+  const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+  const relaunch = [process.execPath, ...process.argv.slice(1)].map(q).join(' ');
+  if (!pane) {
+    try { console.log(`[restart] SIGUSR2 but not in tmux ($TMUX_PANE unset) — cannot self-restart; relaunch manually: ${relaunch}`); } catch { /* ignore */ }
+    return;
+  }
+  try {
+    // Detached so it survives our imminent death; respawn-pane -k does the kill.
+    require('child_process')
+      .spawn('tmux', ['respawn-pane', '-k', '-t', pane, relaunch], { detached: true, stdio: 'ignore' })
+      .unref();
+    try { console.log(`[restart] SIGUSR2 respawning pane ${pane}: ${relaunch}`); } catch { /* ignore */ }
+  } catch (err) {
+    try { console.log(`[restart] SIGUSR2 respawn failed: ${err.message}`); } catch { /* ignore */ }
+  }
+});
+
 // Optional debug logging to a file (captures console logs/errors) without polluting stdout
 let logStream = null;
 function enableFileLogging() {
