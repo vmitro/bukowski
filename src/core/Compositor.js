@@ -600,14 +600,15 @@ class Compositor {
    * NOT console — so it never corrupts the alt-screen.
    */
   _emitFrame(frame) {
-    // Downgrade to the Basic Multilingual Plane for terminal emulators that
-    // crash on astral-plane (>U+FFFF, 4-byte UTF-8) or ZWJ grapheme clusters —
-    // ConnectBot on Android dies its whole VT parser on Claude's family/people
-    // ZWJ emoji (👨‍👩‍👧, 🧑🏽‍💻, …). Strip the zero-width joiners/selectors and
-    // map each astral codepoint to a 1-cell BMP placeholder. Minor width drift
-    // (cosmetic) in exchange for the client not crashing. BUKOWSKI_BMP_ONLY=1.
-    if (process.env.BUKOWSKI_BMP_ONLY === '1') {
-      frame = frame.replace(/[‍️]/g, '').replace(/[\u{10000}-\u{10FFFF}]/gu, '·');
+    // BMP_ONLY: collapse every emoji grapheme cluster — base + skin-tone /
+    // ZWJ-joined parts / variation selectors, astral (family/people) OR BMP
+    // (pause/heart) — to ONE 2-cell placeholder. bukowski width table treats
+    // emoji as width-2, so "··" keeps layout aligned; ConnectBot never sees a
+    // 4-byte/ZWJ byte to crash its VT parser on. TERM cannot gate this
+    // (ConnectBot reports xterm-256color like a capable term) -> explicit flag.
+    if (this._bmpOnly === undefined) this._bmpOnly = process.env.BUKOWSKI_BMP_ONLY === '1';
+    if (this._bmpOnly) {
+      frame = frame.replace(/\p{Extended_Pictographic}(?:[\u{1F3FB}-\u{1F3FF}\uFE0F\u20E3]|\u200D\p{Extended_Pictographic})*/gu, '\u00b7\u00b7');
     }
     if (process.env.BUKOWSKI_LOG_FRAMES === '1') {
       try {
