@@ -34,6 +34,17 @@ class TerminalManager {
    * Cleanup terminal state
    */
   cleanup() {
+    // Restore stdin to cooked mode FIRST. multi.js puts stdin in raw mode for
+    // the TUI; without undoing it a crash/exit leaves the terminal with no echo
+    // and no line editing — which over SSH looks exactly like a dropped session
+    // ("kicked out"), when the connection is actually still up. This is the
+    // tty-wedge fix.
+    try {
+      if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+        process.stdin.setRawMode(false);
+      }
+    } catch { /* ignore */ }
+
     process.stdout.write('\x1b[?1000l\x1b[?1006l'); // Disable mouse
     process.stdout.write('\x1b[?25h');              // Show cursor
     process.stdout.write('\x1b[?1049l');            // Exit alt screen
@@ -84,6 +95,21 @@ class TerminalManager {
 
     // Exit cleanup
     process.on('exit', () => self.cleanup());
+
+    // A crash must never leave the terminal wedged (raw mode + alt screen). On
+    // an uncaught error, restore the terminal, print the error to the RESTORED
+    // screen so it's readable (an alt-screen crash is otherwise invisible), then
+    // exit. Without this, a startup throw (e.g. a failed agent spawn) would drop
+    // the user into a dead-looking shell.
+    const onFatal = (label) => (err) => {
+      try { self.cleanup(); } catch { /* ignore */ }
+      try {
+        process.stderr.write(`\n[bukowski] fatal ${label}: ${(err && err.stack) || err}\n`);
+      } catch { /* ignore */ }
+      process.exit(1);
+    };
+    process.on('uncaughtException', onFatal('uncaughtException'));
+    process.on('unhandledRejection', onFatal('unhandledRejection'));
 
     // SIGTSTP handler (CTRL+Z) - suspend gracefully
     process.on('SIGTSTP', () => {
