@@ -26,7 +26,13 @@ class TerminalManager {
    */
   setup() {
     process.stdout.write('\x1b[?1049h');            // Enter alt screen
-    process.stdout.write('\x1b[?1000h\x1b[?1006h'); // Enable mouse (SGR mode)
+    // Mouse (SGR) reporting. Some constrained SSH clients — notably ConnectBot
+    // on Android — mishandle mouse-mode escapes badly enough to garble or drop
+    // the whole session. BUKOWSKI_NO_MOUSE=1 skips enabling it so those clients
+    // stay usable (you lose click/scroll, keyboard nav is unaffected).
+    if (process.env.BUKOWSKI_NO_MOUSE !== '1') {
+      process.stdout.write('\x1b[?1000h\x1b[?1006h'); // Enable mouse (SGR mode)
+    }
     process.stdout.write('\x1b[?25l');              // Hide cursor (compositor manages it)
   }
 
