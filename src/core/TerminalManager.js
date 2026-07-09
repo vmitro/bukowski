@@ -26,6 +26,15 @@ class TerminalManager {
    */
   setup() {
     process.stdout.write('\x1b[?1049h');            // Enter alt screen
+    // Disable autowrap (DECAWM) for the whole TUI. The compositor absolute-
+    // positions every cell with CUP, so it never relies on wrapping — but if a
+    // rendered line happens to reach the last column, autowrap makes the
+    // terminal scroll the WHOLE frame up, every render. On flaky clients
+    // (ConnectBot at certain geometries — portrait / keyboard-hidden) that
+    // per-frame scroll storm wedges and drops the session. With autowrap off an
+    // overflowing line just stops. This is why two ConnectBot sessions of
+    // DIFFERENT sizes behaved differently: only the overflowing geometry dropped.
+    process.stdout.write('\x1b[?7l');               // Autowrap OFF
     // Mouse (SGR) reporting. Some constrained SSH clients — notably ConnectBot
     // on Android — mishandle mouse-mode escapes badly enough to garble or drop
     // the whole session. BUKOWSKI_NO_MOUSE=1 skips enabling it so those clients
@@ -51,6 +60,7 @@ class TerminalManager {
       }
     } catch { /* ignore */ }
 
+    process.stdout.write('\x1b[?7h');               // Restore autowrap
     process.stdout.write('\x1b[?1000l\x1b[?1006l'); // Disable mouse
     process.stdout.write('\x1b[?25h');              // Show cursor
     process.stdout.write('\x1b[?1049l');            // Exit alt screen
