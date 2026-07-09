@@ -53,6 +53,23 @@ class Compositor {
     this.bufferBaseYs = new Map();        // paneId -> last buffer.baseY (for trim detection)
     this.scrollbackStrategies = new Map(); // paneId -> strategy ('compensate-trim' | 'none')
     this.enableTrimCompensation = process.argv.includes('--debug-enable-compensations');
+
+    // Idle keepalive. Frame dedup + fps-gating make bukowski byte-SILENT when
+    // nothing changes (e.g. during Claude's think phase). On a mobile/NAT'd or
+    // DERP-relayed path that silence lets the idle TCP flow expire, and the
+    // death only surfaces on the NEXT write — the first answer frame — dropping
+    // the session. Trickle a zero-effect DECSC+DECRC (save+restore cursor, no
+    // visual change) after ~20s of silence to keep the socket warm without
+    // re-sending frames. Disable with BUKOWSKI_NO_KEEPALIVE=1.
+    this._lastWriteAt = Date.now();
+    if (process.env.BUKOWSKI_NO_KEEPALIVE !== '1') {
+      this._keepaliveTimer = setInterval(() => {
+        if (Date.now() - this._lastWriteAt >= 20000) {
+          try { process.stdout.write('\x1b7\x1b8'); this._lastWriteAt = Date.now(); } catch { /* ignore */ }
+        }
+      }, 20000);
+      if (this._keepaliveTimer.unref) this._keepaliveTimer.unref();
+    }
   }
 
   startCursorBlink() {
@@ -637,6 +654,7 @@ class Compositor {
     if (frame === this._lastEmittedFrame) return;
     this._lastEmittedFrame = frame;
     process.stdout.write(frame);
+    this._lastWriteAt = Date.now();  // reset idle-keepalive timer on real output
   }
 
   /**
