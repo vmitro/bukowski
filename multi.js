@@ -993,9 +993,20 @@ terminal.registerSignalHandlers();
           sshJoin = new SshJoin({
             endpoint: cliArgs.join,
             local: { host: resolvedHost, sessionId: session.id, fedSocket: fedSocketPath },
+            // Persistent channel: errors + detail land in the chat scrollback.
             log: (m) => broadcastSystemMessage(`[fed] ${m}`),
+            // Transient channel: join lifecycle flashes on the vim-style
+            // statusline, auto-clearing after their timeout.
+            onStatus: (m, t) => compositor?.showStatusMessage?.(m, t),
           });
-          sshJoin.start();
+          // Defer start: its preflight/discovery/tunnel ssh calls block, so
+          // running inline would stall boot AND fire lifecycle flashes before
+          // the compositor (statusline) exists. A short defer lets the UI come
+          // up first so the flashes actually land.
+          setTimeout(() => {
+            try { sshJoin.start(); }
+            catch (err) { broadcastSystemMessage(`[fed] join ${cliArgs.join} failed: ${err.message}`); }
+          }, 800);
         } catch (err) {
           broadcastSystemMessage(`[fed] join ${cliArgs.join} failed: ${err.message}`);
         }

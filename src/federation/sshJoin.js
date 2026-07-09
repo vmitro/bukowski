@@ -123,6 +123,11 @@ class SshJoin {
     this.endpoint = opts.endpoint;
     this.local = opts.local;
     this.log = opts.log || (() => {});
+    // Transient statusline flashes for join lifecycle (joining/linking/linked/
+    // dropped). Separate from `log`, which is the persistent channel for errors
+    // and detail. (text, timeoutMs) — glyphs only, no ANSI (statusline counts
+    // string length for its width math).
+    this.onStatus = opts.onStatus || (() => {});
     this._ep = parseEndpoint(opts.endpoint);
     this.child = null;
     this._stopped = false;
@@ -132,13 +137,59 @@ class SshJoin {
     this._remoteSock = null;
   }
 
+  // ControlMaster args so every control-plane ssh to this peer (preflight,
+  // discovery, pre-clean) rides ONE shared, already-authenticated connection
+  // instead of a fresh TCP+auth handshake each time — fewer handshakes means
+  // less brute-force-looking churn (avoids tripping the peer's fail2ban) and
+  // faster calls. The persistent -N tunnel stays its own connection.
+  _muxArgs() {
+    if (!this._ctlPath) {
+      this._ctlPath = path.join(os.tmpdir(), `bukowski-cm-${this._ep.label}-${process.pid}.sock`);
+    }
+    return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${this._ctlPath}`, '-o', 'ControlPersist=120s'];
+  }
+
   _ssh(extraArgs, input) {
     const base = [];
     if (this._ep.port) base.push('-p', String(this._ep.port));
-    base.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10');
-    return execFileSync('ssh', [...base, this._ep.sshTarget, ...extraArgs], {
-      input: input || undefined, encoding: 'utf8', timeout: 15000,
-    });
+    base.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', ...this._muxArgs());
+    try {
+      return execFileSync('ssh', [...base, this._ep.sshTarget, ...extraArgs], {
+        input: input || undefined, encoding: 'utf8', timeout: 15000,
+      });
+    } catch (err) {
+      // Surface ssh's own stderr (e.g. "Permission denied (publickey)") on the
+      // error so callers/_preflight can classify the failure precisely.
+      const stderr = (err.stderr || '').toString().trim();
+      if (stderr) err.message = `${err.message.split('\n')[0]} — ${stderr.split('\n').pop()}`;
+      throw err;
+    }
+  }
+
+  // Cheap sanity probe before we plant files / spawn the tunnel. Turns a silent
+  // "joined nothing, agent sits alone" into an actionable log line naming the
+  // exact SSH fault (auth / refused / timeout / host key).
+  _preflight() {
+    try {
+      this._ssh(['true']);
+      return { ok: true };
+    } catch (err) {
+      const m = (err.message || '').toLowerCase();
+      const tgt = this._ep.sshTarget;
+      if (m.includes('permission denied')) {
+        return { ok: false, reason: `SSH auth refused by ${tgt} — add this host's key to its ~/.ssh/authorized_keys (e.g. \`ssh-copy-id ${tgt}\`)` };
+      }
+      if (m.includes('connection refused')) {
+        return { ok: false, reason: `SSH refused by ${tgt} — sshd down, wrong port (${this._ep.port || 22}), or this IP is banned there` };
+      }
+      if (m.includes('timed out') || m.includes('timeout')) {
+        return { ok: false, reason: `SSH to ${tgt} timed out — host unreachable / firewalled` };
+      }
+      if (m.includes('host key') || m.includes('known_hosts')) {
+        return { ok: false, reason: `SSH host-key problem for ${tgt} — check ~/.ssh/known_hosts` };
+      }
+      return { ok: false, reason: `SSH preflight to ${tgt} failed — ${err.message}` };
+    }
   }
 
   /** Read the peer box's own peer files and pick the live federation hub. */
@@ -152,6 +203,16 @@ class SshJoin {
   }
 
   start() {
+    // Sanity-probe the SSH path first so an auth/reachability fault surfaces as
+    // a clear reason instead of the agent silently ending up with no peers.
+    const pf = this._preflight();
+    if (!pf.ok) {
+      this.log(`join ${this.endpoint}: ${pf.reason}`);
+      this.onStatus(`⚠ fed: ${this._ep.label} — ${pf.reason.split(' — ')[0]}`, 8000);
+      return false;
+    }
+    this.onStatus(`⟳ federating → ${this._ep.label}…`, 4000);
+
     let hub;
     try {
       hub = this._discoverPeerHub();
@@ -216,6 +277,8 @@ class SshJoin {
   _spawnTunnel() {
     if (this._stopped) return;
     this._precleanRemoteSock();
+    const peer = this._peerHost || this._ep.label;
+    this.onStatus(`⇄ linking ${peer}…`, 4000);
     this.child = spawn('ssh', this._sshArgs, { stdio: ['ignore', 'ignore', 'ignore'] });
     this.child.on('exit', () => {
       this.child = null;
@@ -224,11 +287,15 @@ class SshJoin {
       const wait = this._backoffMs;
       this._backoffMs = Math.min(this._backoffMs * 2, 30000);
       this.log(`join ${this.endpoint}: tunnel down, reconnecting in ${Math.round(wait / 1000)}s`);
+      this.onStatus(`↻ ${peer} dropped · retry ${Math.round(wait / 1000)}s`, Math.max(wait, 3000));
       this._reconnectTimer = setTimeout(() => this._spawnTunnel(), wait);
       if (this._reconnectTimer.unref) this._reconnectTimer.unref();
     });
-    // A tunnel that stays up for 10s is healthy → reset backoff.
-    this._stableTimer = setTimeout(() => { this._backoffMs = 1000; }, 10000);
+    // A tunnel that stays up for 10s is healthy → reset backoff + flag it linked.
+    this._stableTimer = setTimeout(() => {
+      this._backoffMs = 1000;
+      this.onStatus(`🔗 federated ⟷ ${peer}`, 5000);
+    }, 10000);
     if (this._stableTimer.unref) this._stableTimer.unref();
   }
 
