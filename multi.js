@@ -105,6 +105,27 @@ function enableFileLogging() {
 // Activate file logging so console.log/error go to bukowski.log instead of stderr
 enableFileLogging();
 
+// Diagnostic: tap EVERY byte written to the real terminal (frames AND non-frame
+// writes like OSC 52, terminal-query forwarding, bells) with timing, so the
+// exact last bytes before a client (ConnectBot) drops are captured — the frame
+// logger only sees compositor frames and would miss a killer non-frame write.
+// BUKOWSKI_LOG_STDOUT=1 → BUKOWSKI_STDOUT_LOG (default ./stdout.log).
+if (process.env.BUKOWSKI_LOG_STDOUT === '1') {
+  const _fs = require('fs');
+  const _sfile = process.env.BUKOWSKI_STDOUT_LOG || 'stdout.log';
+  const _origStdoutWrite = process.stdout.write.bind(process.stdout);
+  let _wseq = 0;
+  process.stdout.write = function (chunk, ...rest) {
+    try {
+      const s = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      const esc = s.replace(/[\x00-\x1f\x7f-\x9f]/g, (c) =>
+        c === '\x1b' ? '\\e' : '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+      _fs.appendFileSync(_sfile, `#${++_wseq} t=${Date.now()} len=${s.length} | ${esc}\n`);
+    } catch { /* ignore */ }
+    return _origStdoutWrite(chunk, ...rest);
+  };
+}
+
 // Per-agent PTY output logging is OFF by default: it captures the full
 // interactive TUI screen (spinners, timers, token counters repaint every frame
 // and defeat line-dedup), growing bukowski.log by GB/hundreds-of-MB per session
