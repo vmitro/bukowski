@@ -605,10 +605,18 @@ class Compositor {
         const fs = require('fs');
         const file = process.env.BUKOWSKI_FRAME_LOG || 'frames.log';
         this._frameSeq = (this._frameSeq || 0) + 1;
+        // Track rate + whether this frame is byte-identical to the last (a
+        // redundant re-render). A flood of dup frames on a slow link is a prime
+        // drop suspect.
+        const now = Date.now();
+        const dtMs = this._lastFrameAt ? now - this._lastFrameAt : 0;
+        const dup = frame === this._lastFrameBytes ? ' DUP' : '';
+        this._lastFrameAt = now;
+        this._lastFrameBytes = frame;
         const esc = frame.replace(/[\x00-\x1f\x7f-\x9f]/g, (c) =>
           c === '\x1b' ? '\\e' : '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'));
         fs.appendFileSync(file,
-          `#${this._frameSeq} ${this.cols}x${this.rows} len=${frame.length} | ${esc}\n`);
+          `#${this._frameSeq} +${dtMs}ms ${this.cols}x${this.rows} len=${frame.length}${dup} | ${esc}\n`);
       } catch { /* ignore */ }
     }
     process.stdout.write(frame);
