@@ -1125,9 +1125,14 @@ class Compositor {
 
       // Show lock indicator when viewport is frozen
       const lockIndicator = isLocked ? '🔒' : '';
-      const cps = this.getClearCps(paneId);
-      const fps = this.getFps();
-      right += `${lockIndicator}[${from}-${to}/${contentHeight}] ${pctStr} ${fps.toFixed(1)}fps ${cps.toFixed(1)}cps `;
+      // Live fps/cps is debug info that changes EVERY frame — it drove a
+      // constant redundant frame stream (~30% of frames differed ONLY by this
+      // counter, which the identical-frame dedup can't collapse), keeping a
+      // lossy link busy enough to drop it. Off by default; BUKOWSKI_SHOW_FPS=1.
+      const perf = process.env.BUKOWSKI_SHOW_FPS === '1'
+        ? ` ${this.getFps().toFixed(1)}fps ${this.getClearCps(paneId).toFixed(1)}cps`
+        : '';
+      right += `${lockIndicator}[${from}-${to}/${contentHeight}] ${pctStr}${perf} `;
     }
 
     if (focusedAgent) {
