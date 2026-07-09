@@ -619,6 +619,13 @@ class Compositor {
           `#${this._frameSeq} +${dtMs}ms ${this.cols}x${this.rows} len=${frame.length}${dup} | ${esc}\n`);
       } catch { /* ignore */ }
     }
+    // Skip a byte-identical frame: it's already on screen, so re-sending it is
+    // pure bandwidth waste (measured ~41% of output, runs of up to 8). Emitting
+    // it keeps a constant ~11fps stream flowing even when nothing changes, which
+    // stalls/drops lossy links (phone wifi on ConnectBot) where a normal
+    // idle-silent TUI survives. Correctness is unaffected — nothing changed.
+    if (frame === this._lastEmittedFrame) return;
+    this._lastEmittedFrame = frame;
     process.stdout.write(frame);
   }
 
