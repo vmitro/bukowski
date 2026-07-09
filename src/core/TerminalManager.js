@@ -115,7 +115,15 @@ class TerminalManager {
       process.exit(1);
     };
     process.on('uncaughtException', onFatal('uncaughtException'));
-    process.on('unhandledRejection', onFatal('unhandledRejection'));
+    // An unhandled promise rejection is NOT fatal. bukowski runs long-lived
+    // async work (federation dials, PTY spawns, socket I/O) that can reject in
+    // isolation without corrupting the session — killing the whole TUI on one
+    // stray rejection drops the user's session for no reason (a regression that
+    // looked like "SSH keeps dropping"). Log it (console is file-redirected in
+    // multi.js) and keep running.
+    process.on('unhandledRejection', (reason) => {
+      try { console.error(`[bukowski] unhandledRejection: ${(reason && reason.stack) || reason}`); } catch { /* ignore */ }
+    });
 
     // SIGTSTP handler (CTRL+Z) - suspend gracefully
     process.on('SIGTSTP', () => {
