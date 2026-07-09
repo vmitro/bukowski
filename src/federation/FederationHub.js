@@ -400,7 +400,7 @@ class FederationHub extends EventEmitter {
       socket._pendingState = null;
     }
 
-    const peer = this._registerPeer(socket, peerHost, peerSessionId, 'inbound', hello);
+    const peer = this._registerPeer(socket, peerHost, peerSessionId, 'inbound', hello, !!hello.local);
     this._ingestPeerRoster(peerHost, hello.agents);
     // Reply with our hello so the dialing side knows the connection is good.
     this._sendHello(peer);
@@ -442,6 +442,10 @@ class FederationHub extends EventEmitter {
         host: this.host,
         sessionId: this.sessionId,
         startedAt: this.startedAt,
+        // Same-box pid peer (not an SSH-forwarded static peer) → local link.
+        // Locality is symmetric, so the accepter trusts this flag to decide
+        // whether to skip its heartbeat-timeout teardown.
+        local: !peerInfo.static,
         agents: this._localRosterSnapshot()
       });
 
@@ -497,7 +501,7 @@ class FederationHub extends EventEmitter {
       try { socket.removeListener('close', state.onClose); } catch { /* ignore */ }
       try { socket.removeListener('error', state.onError); } catch { /* ignore */ }
 
-      const peer = this._registerPeer(socket, msg.host, msg.sessionId || null, 'outbound', msg);
+      const peer = this._registerPeer(socket, msg.host, msg.sessionId || null, 'outbound', msg, !peerInfo.static);
       this._ingestPeerRoster(msg.host, msg.agents);
       if (state.buffer.length > 0) {
         peer._stream.buffer = state.buffer;
@@ -524,13 +528,14 @@ class FederationHub extends EventEmitter {
   // ─────────────────────────────────────────────────────────────────────
   // Established connection: track peer, set up data handler + heartbeat.
 
-  _registerPeer(socket, host, sessionId, direction, hello) {
+  _registerPeer(socket, host, sessionId, direction, hello, local = false) {
     const peer = {
       host,
       sessionId,
       direction,
       socket,
       hello,
+      local,
       lastSeen: Date.now(),
       hbTimer: null,
       hbCheckTimer: null,
@@ -550,8 +555,25 @@ class FederationHub extends EventEmitter {
     }, HEARTBEAT_INTERVAL_MS);
     if (peer.hbTimer.unref) peer.hbTimer.unref();
 
+    // A LOCAL peer is a same-box instance reached over a real unix socket.
+    // When such a peer's process dies the kernel closes the socket at once
+    // ('close'/'error' above tears it down immediately) — there is no network
+    // in between, so a half-open silent-but-alive socket does not happen. The
+    // heartbeat-timeout teardown then only ever fires as a FALSE positive when
+    // the peer's event loop stalls under load (RAM thrash, a busy medd fleet),
+    // purging a live peer and dropping all its agents until it reconnects. So
+    // for local peers we trust the socket lifecycle and skip the timeout kill;
+    // we still emit a warning so a genuinely wedged local peer is visible.
     peer.hbCheckTimer = setInterval(() => {
       if (Date.now() - peer.lastSeen > HEARTBEAT_TIMEOUT_MS) {
+        if (peer.local) {
+          this.emit('warning', {
+            kind: 'local_peer_silent',
+            host: peer.host,
+            silentMs: Date.now() - peer.lastSeen
+          });
+          return;
+        }
         this._teardownPeer(peer, 'heartbeat_timeout');
       }
     }, HEARTBEAT_INTERVAL_MS);

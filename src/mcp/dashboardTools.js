@@ -121,7 +121,7 @@ const DASHBOARD_TOOLS = [
   },
   {
     name: 'dashboard_set_entry',
-    description: 'Create or update an entry for a repo you are RESIDENT on — any agent on the same host as the repo\'s owner may write it (box-mates co-curate; not a single named seat). One-liner <=80 chars; actionable categories require >=1 grounding ref. Pointers only, never bodies — except category "tips" (wikihow-style how-to/gotcha): a tip carries a body (<=1500 chars summary) plus tags, and its refs MUST point at the canonical doc the body summarizes.',
+    description: 'Create/update/file/add a board ENTRY — a task, todo, bug, challenge, nicetohave, adr, or tip. THIS is the tool to create a todo/task/bug (NOT dashboard_set_roadmap, which is curator-only project structure). For a repo you are RESIDENT on — any agent on the same host as the repo\'s owner may write it (box-mates co-curate; not a single named seat). One-liner <=80 chars; actionable categories require >=1 grounding ref. Pointers only, never bodies — except category "tips" (wikihow-style how-to/gotcha): a tip carries a body (<=1500 chars summary) plus tags, and its refs MUST point at the canonical doc the body summarizes.',
     inputSchema: {
       type: 'object', required: ['projectId', 'repo', 'category', 'oneliner'],
       properties: {

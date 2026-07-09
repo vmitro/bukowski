@@ -201,8 +201,21 @@ class SshJoin {
     return true;
   }
 
+  // Best-effort removal of our -R socket on the peer before (re)binding it.
+  // The remote sshd defaults to StreamLocalBindUnlink=no, so an ungraceful
+  // tunnel death (network blip, ssh killed) leaves the -R socket behind; the
+  // next bind then fails and ExitOnForwardFailure makes ssh exit in ~2s,
+  // looping forever until the join is stopped. start() pre-cleans once, but
+  // reconnects did not — so re-clean before every (re)spawn.
+  _precleanRemoteSock() {
+    if (!this._remoteSock) return;
+    try { this._ssh([`rm -f ${this._remoteSock}`]); }
+    catch { /* best-effort; the bind + ExitOnForwardFailure still retries */ }
+  }
+
   _spawnTunnel() {
     if (this._stopped) return;
+    this._precleanRemoteSock();
     this.child = spawn('ssh', this._sshArgs, { stdio: ['ignore', 'ignore', 'ignore'] });
     this.child.on('exit', () => {
       this.child = null;

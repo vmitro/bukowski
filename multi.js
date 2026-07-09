@@ -102,10 +102,16 @@ function enableFileLogging() {
     } catch { /* ignore logging errors */ }
   };
 }
-enableFileLogging();
-
 // Activate file logging so console.log/error go to bukowski.log instead of stderr
 enableFileLogging();
+
+// Per-agent PTY output logging is OFF by default: it captures the full
+// interactive TUI screen (spinners, timers, token counters repaint every frame
+// and defeat line-dedup), growing bukowski.log by GB/hundreds-of-MB per session
+// and adding disk I/O that starves a RAM-tight box (→ federation HB timeouts).
+// Set BUKOWSKI_LOG_PTY=1 to opt in for debugging. Structured [INFO]/[ERROR]
+// console logging above is unaffected.
+const LOG_PTY = process.env.BUKOWSKI_LOG_PTY === '1';
 
 // Single-pane mode: exec single.js and exit
 if (cliArgs.single) {
@@ -349,7 +355,7 @@ terminal.registerSignalHandlers();
   }
 
   function logAgentData(agentId, chunk) {
-    if (!chunk || !logStream) return;
+    if (!LOG_PTY || !chunk || !logStream) return;
     const buffer = agentLogBuffers.get(agentId) || '';
     const text = buffer + (typeof chunk === 'string' ? chunk : chunk.toString());
     const parts = text.split(NEWLINE_RE);
