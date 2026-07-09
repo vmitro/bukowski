@@ -628,6 +628,12 @@ class Compositor {
    * starts with ?25l).
    */
   hardwareCursorSeq() {
+    // Native-cursor parking (Claude Code >=2.1.170) shows + repositions the host
+    // hardware cursor every frame. Some limited clients (ConnectBot on Android)
+    // drop the session on this — it is the ONLY byte-level difference between a
+    // frame stream that survives and one that dies (verified via frame dumps).
+    // BUKOWSKI_NO_NATIVE_CURSOR=1 keeps the cursor hidden (like older Claude).
+    if (process.env.BUKOWSKI_NO_NATIVE_CURSOR === '1') return '';
     const pane = this.layoutManager.getFocusedPane();
     if (!pane) return '';
     const agent = this.session.getAgent(pane.agentId);
