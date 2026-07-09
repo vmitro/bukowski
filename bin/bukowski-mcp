@@ -1,0 +1,160 @@
+#!/usr/bin/env node
+// bin/bukowski-mcp - CLI for managing bukowski MCP server installation
+// Usage: bukowski-mcp [install|uninstall|status]
+
+const path = require('path');
+const { installAll, uninstallAll, checkStatus } = require('../src/mcp/install');
+
+// ANSI colors
+const GREEN = '\x1b[32m';
+const RED = '\x1b[31m';
+const YELLOW = '\x1b[33m';
+const CYAN = '\x1b[36m';
+const RESET = '\x1b[0m';
+const BOLD = '\x1b[1m';
+const DIM = '\x1b[2m';
+
+function printUsage() {
+  console.log(`
+${BOLD}bukowski-mcp${RESET} - Manage bukowski MCP server for AI agents
+
+${BOLD}USAGE:${RESET}
+  bukowski-mcp <command>
+
+${BOLD}COMMANDS:${RESET}
+  install     Install bukowski MCP server for Claude, Codex, and Gemini
+  uninstall   Remove bukowski MCP server from all agents
+  status      Check installation status
+
+${BOLD}DESCRIPTION:${RESET}
+  This tool adds the bukowski MCP server to your AI agents' configurations,
+  enabling them to communicate with each other via FIPA ACL messages when
+  running inside bukowski.
+
+${BOLD}EXAMPLES:${RESET}
+  ${DIM}# Install for all agents${RESET}
+  bukowski-mcp install
+
+  ${DIM}# Check what's installed${RESET}
+  bukowski-mcp status
+
+  ${DIM}# Remove from all agents${RESET}
+  bukowski-mcp uninstall
+`);
+}
+
+function printInstallResults(results) {
+  console.log(`\n${BOLD}Installation Results:${RESET}\n`);
+
+  for (const [agent, result] of Object.entries(results)) {
+    const icon = result.installed ? `${GREEN}✓${RESET}` : `${RED}✗${RESET}`;
+    const status = result.installed ? `${GREEN}installed${RESET}` : `${RED}failed${RESET}`;
+
+    console.log(`  ${icon} ${BOLD}${agent}${RESET}: ${status}`);
+
+    if (result.error) {
+      console.log(`    ${DIM}Error: ${result.error}${RESET}`);
+    }
+  }
+
+  console.log();
+}
+
+function printUninstallResults(results) {
+  console.log(`\n${BOLD}Uninstallation Results:${RESET}\n`);
+
+  for (const [agent, result] of Object.entries(results)) {
+    const icon = result.uninstalled ? `${GREEN}✓${RESET}` : `${YELLOW}-${RESET}`;
+    const status = result.uninstalled
+      ? `${GREEN}removed${RESET}`
+      : `${DIM}not installed${RESET}`;
+
+    console.log(`  ${icon} ${BOLD}${agent}${RESET}: ${status}`);
+
+    if (result.error) {
+      console.log(`    ${DIM}Error: ${result.error}${RESET}`);
+    }
+  }
+
+  console.log();
+}
+
+function printStatus(status) {
+  console.log(`\n${BOLD}Installation Status:${RESET}\n`);
+
+  // Bridge script
+  const bridgeIcon = status.bridgeExists ? `${GREEN}✓${RESET}` : `${RED}✗${RESET}`;
+  console.log(`  ${BOLD}Bridge script:${RESET}`);
+  console.log(`    ${bridgeIcon} ${status.bridgePath}`);
+  console.log();
+
+  // Each agent
+  for (const [agent, info] of Object.entries(status)) {
+    if (agent === 'bridgePath' || agent === 'bridgeExists') continue;
+
+    const icon = info.installed ? `${GREEN}✓${RESET}` : `${DIM}-${RESET}`;
+    const state = info.installed
+      ? `${GREEN}installed${RESET}`
+      : `${DIM}not installed${RESET}`;
+
+    console.log(`  ${icon} ${BOLD}${agent}${RESET}: ${state}`);
+    console.log(`    ${DIM}Config: ${info.configPath}${RESET}`);
+  }
+
+  console.log();
+
+  // Tips
+  if (!status.claude.installed && !status.codex.installed && !status.gemini.installed) {
+    console.log(`  ${CYAN}Tip:${RESET} Run '${BOLD}bukowski-mcp install${RESET}' to enable agent communication.\n`);
+  } else {
+    console.log(`  ${CYAN}Note:${RESET} Agents need to restart to pick up config changes.\n`);
+  }
+}
+
+// Main
+const command = process.argv[2];
+
+switch (command) {
+  case 'install': {
+    console.log(`\n${CYAN}Installing bukowski MCP server for AI agents...${RESET}`);
+    const results = installAll();
+    printInstallResults(results);
+
+    // The channel plugin is best-effort: if it can't be set up, bukowski falls
+    // back to the `--dangerously-load-development-channels` flag, so don't gate
+    // the exit code on it — only on the core MCP server installs.
+    const allSuccess = ['claude', 'codex', 'gemini'].every(a => results[a].installed);
+    if (allSuccess) {
+      console.log(`${GREEN}Done!${RESET} Agents will connect to bukowski when started.\n`);
+    } else {
+      console.log(`${YELLOW}Some installations failed.${RESET} Check errors above.\n`);
+      process.exit(1);
+    }
+    break;
+  }
+
+  case 'uninstall': {
+    console.log(`\n${CYAN}Removing bukowski MCP server from AI agents...${RESET}`);
+    const results = uninstallAll();
+    printUninstallResults(results);
+    console.log(`${GREEN}Done!${RESET}\n`);
+    break;
+  }
+
+  case 'status': {
+    const status = checkStatus();
+    printStatus(status);
+    break;
+  }
+
+  case '--help':
+  case '-h':
+  case undefined:
+    printUsage();
+    break;
+
+  default:
+    console.error(`${RED}Unknown command: ${command}${RESET}\n`);
+    printUsage();
+    process.exit(1);
+}
