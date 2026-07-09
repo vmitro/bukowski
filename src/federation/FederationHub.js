@@ -402,8 +402,10 @@ class FederationHub extends EventEmitter {
 
     const peer = this._registerPeer(socket, peerHost, peerSessionId, 'inbound', hello, !!hello.local);
     this._ingestPeerRoster(peerHost, hello.agents);
-    // Reply with our hello so the dialing side knows the connection is good.
+    // Reply with our hello FIRST (the dialer's pre-adoption reader accepts only
+    // a hello as the first message); THEN push our live roster.
     this._sendHello(peer);
+    this._syncRosterTo(peer);
     // Any bytes that arrived after the hello line are queued on the socket
     // buffer — process them now.
     if (leftoverBuffer && leftoverBuffer.length > 0) {
@@ -503,6 +505,8 @@ class FederationHub extends EventEmitter {
 
       const peer = this._registerPeer(socket, msg.host, msg.sessionId || null, 'outbound', msg, !peerInfo.static);
       this._ingestPeerRoster(msg.host, msg.agents);
+      // We already sent our hello at connect; now push our live roster.
+      this._syncRosterTo(peer);
       if (state.buffer.length > 0) {
         peer._stream.buffer = state.buffer;
         this._consumeEstablishedBuffer(peer);
@@ -581,9 +585,11 @@ class FederationHub extends EventEmitter {
 
     this.peers.set(host, peer);
     this.emit('peer:connected', { host, sessionId, direction, hello });
-    // The hello roster was a point-in-time snapshot; push our live roster now
-    // so agents that weren't federatable at handshake still reach this peer.
-    this._syncRosterTo(peer);
+    // Roster is synced by the CALLER, AFTER the hello handshake reply — NEVER
+    // here. Syncing inline made _registerPeer emit roster deltas before the
+    // reply hello; the peer's pre-adoption reader rejects any first message that
+    // isn't 'hello' (destroys the socket), so the mesh never links once an
+    // instance actually has an agent to sync. Hello-first is mandatory.
     return peer;
   }
 
