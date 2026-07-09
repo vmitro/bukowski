@@ -86,6 +86,10 @@ const QUOTES = loadQuotes(quotesPath);
 
 const cliArgs = parseArgs();
 
+// --ugly is a CLI alias for BUKOWSKI_BMP_ONLY=1: set the env before the
+// Compositor reads it, so emoji clusters render as BMP-safe "··" placeholders.
+if (cliArgs.ugly) process.env.BUKOWSKI_BMP_ONLY = '1';
+
 // Optional debug logging to a file (captures console logs/errors) without polluting stdout
 let logStream = null;
 function enableFileLogging() {

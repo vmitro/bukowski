@@ -267,6 +267,7 @@ function parseArgs() {
     sessionName: null,
     single: false,
     join: null,
+    ugly: false,
     agentArgs: []
   };
 
@@ -296,6 +297,11 @@ function parseArgs() {
         result.join = nextArg;
         i++;
       }
+    } else if (arg === '--ugly') {
+      // Constrained-terminal mode: collapse emoji clusters to BMP-safe "··"
+      // placeholders so old emulators (ConnectBot on Android) don't crash their
+      // VT parser on Claude's astral/ZWJ emoji. Same as BUKOWSKI_BMP_ONLY=1.
+      result.ugly = true;
     } else if (arg === '--help' || arg === '-h') {
       console.log(`bukowski - multi-agent terminal
 
@@ -308,6 +314,9 @@ Options:
   -s, --session <name>     Set session name
   -j, --join <endpoint>    Federate with a remote bukowski over SSH
                            (e.g. user@host:2222 or an ssh_config alias)
+      --ugly               BMP-safe rendering: collapse emoji to "··" so old
+                           terminals (ConnectBot) don't crash on astral/ZWJ
+                           emoji. Same as BUKOWSKI_BMP_ONLY=1.
   -h, --help               Show this help
 
 Session Commands (in normal mode, type :):
