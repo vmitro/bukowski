@@ -73,6 +73,13 @@ class Agent {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        // UTF-8 locale fallback (before this.env so a caller can override).
+        // Without a UTF-8 locale the child terminal app (Claude Code) computes
+        // wide-char (emoji) widths wrong; the mismatch vs the compositor/host
+        // desyncs the cursor enough to wedge or DROP limited clients (ConnectBot
+        // on Android). This is why an `export LANG=C.UTF-8` was needed by hand.
+        ...(/utf-?8/i.test(process.env.LC_ALL || process.env.LC_CTYPE || process.env.LANG || '')
+          ? {} : { LANG: 'C.UTF-8', LC_CTYPE: 'C.UTF-8' }),
         ...this.env,
         FORCE_COLOR: '1',
         BUKOWSKI_AGENT_ID: this.id,    // For MCP bridge to use session agent ID
