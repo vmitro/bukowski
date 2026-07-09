@@ -600,6 +600,15 @@ class Compositor {
    * NOT console — so it never corrupts the alt-screen.
    */
   _emitFrame(frame) {
+    // Downgrade to the Basic Multilingual Plane for terminal emulators that
+    // crash on astral-plane (>U+FFFF, 4-byte UTF-8) or ZWJ grapheme clusters —
+    // ConnectBot on Android dies its whole VT parser on Claude's family/people
+    // ZWJ emoji (👨‍👩‍👧, 🧑🏽‍💻, …). Strip the zero-width joiners/selectors and
+    // map each astral codepoint to a 1-cell BMP placeholder. Minor width drift
+    // (cosmetic) in exchange for the client not crashing. BUKOWSKI_BMP_ONLY=1.
+    if (process.env.BUKOWSKI_BMP_ONLY === '1') {
+      frame = frame.replace(/[‍️]/g, '').replace(/[\u{10000}-\u{10FFFF}]/gu, '·');
+    }
     if (process.env.BUKOWSKI_LOG_FRAMES === '1') {
       try {
         const fs = require('fs');
