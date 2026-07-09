@@ -589,6 +589,28 @@ class Compositor {
     frame += this.hardwareCursorSeq();
     frame += noSync ? '' : '\x1b[?2026l';         // End sync update
 
+    this._emitFrame(frame);
+  }
+
+  /**
+   * Write a rendered frame to the real terminal. When BUKOWSKI_LOG_FRAMES=1,
+   * also append the exact bytes (control chars escaped) + length + a counter to
+   * a frame log (BUKOWSKI_FRAME_LOG or ./frames.log) so we can inspect the last
+   * frame(s) before a client (e.g. ConnectBot) drops. Uses fs.appendFileSync —
+   * NOT console — so it never corrupts the alt-screen.
+   */
+  _emitFrame(frame) {
+    if (process.env.BUKOWSKI_LOG_FRAMES === '1') {
+      try {
+        const fs = require('fs');
+        const file = process.env.BUKOWSKI_FRAME_LOG || 'frames.log';
+        this._frameSeq = (this._frameSeq || 0) + 1;
+        const esc = frame.replace(/[\x00-\x1f\x7f-\x9f]/g, (c) =>
+          c === '\x1b' ? '\\e' : '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+        fs.appendFileSync(file,
+          `#${this._frameSeq} ${this.cols}x${this.rows} len=${frame.length} | ${esc}\n`);
+      } catch { /* ignore */ }
+    }
     process.stdout.write(frame);
   }
 
@@ -667,7 +689,7 @@ class Compositor {
     // Cursor stays hidden: renderChatInput paints its own inline cursor.
     frame += noSync ? '' : '\x1b[?2026l';         // End sync update
 
-    process.stdout.write(frame);
+    this._emitFrame(frame);
   }
 
   /**
