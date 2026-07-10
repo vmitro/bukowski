@@ -146,12 +146,44 @@ class FederationHub extends EventEmitter {
   }
 
   /**
-   * Send a roster delta to every connected peer. `agent` is
-   * { localId, type, federatedId }.
+   * Announce one of OUR OWN local agents to the mesh. `agent` is
+   * { localId, type, federatedId }. Seeds a path-vector delta rooted here
+   * (origin = us, path = [us]) and fans it out; hubs relay it onward so a
+   * spoke that only connects to the hub still learns this agent.
    */
   broadcastRoster(op, agent) {
-    const msg = { type: 'roster', op, agent };
+    this._fanRosterDelta({
+      op,
+      agent,
+      origin: { host: this.host, machineHost: this.machineHost },
+      path: [this.host],
+    }, null);
+  }
+
+  /**
+   * Forward a roster delta to peers, path-vector style. `entry` is
+   * { op, agent, origin:{host,machineHost}, path:[host,...] }. We append our
+   * host to the outgoing path, then send to every peer EXCEPT:
+   *   - the neighbour we received it from (`fromNeighbourHost`), and
+   *   - any peer already on the path (split-horizon: they have it / it loops).
+   * This makes a hub relay a spoke's agents to the other spokes without echo
+   * or loops in an arbitrary mesh.
+   * @private
+   */
+  _fanRosterDelta(entry, fromNeighbourHost) {
+    const outPath = entry.path.includes(this.host)
+      ? entry.path
+      : entry.path.concat(this.host);
+    const msg = {
+      type: 'roster',
+      op: entry.op,
+      agent: entry.agent,
+      origin: entry.origin,
+      path: outPath,
+    };
     for (const peer of this.peers.values()) {
+      if (peer.host === fromNeighbourHost) continue;
+      if (outPath.includes(peer.host)) continue;
       this._send(peer, msg);
     }
   }
@@ -167,8 +199,31 @@ class FederationHub extends EventEmitter {
    * @private
    */
   _syncRosterTo(peer) {
+    // Our own local agents, rooted here.
     for (const agent of this._localRosterSnapshot()) {
-      this._send(peer, { type: 'roster', op: 'add', agent });
+      const outPath = [this.host];
+      if (outPath.includes(peer.host)) continue;
+      this._send(peer, {
+        type: 'roster', op: 'add', agent,
+        origin: { host: this.host, machineHost: this.machineHost },
+        path: outPath,
+      });
+    }
+    // Transitively-known remote agents (learned from OTHER neighbours) so a
+    // spoke joining the hub immediately sees the rest of the mesh. Split-horizon:
+    // never send a peer the agents we learned from it, nor any whose path
+    // already includes it.
+    for (const [federatedId, info] of this.remoteAgents) {
+      if (info.via === peer.host) continue;
+      const basePath = info.path || [info.peerHost];
+      const outPath = basePath.includes(this.host) ? basePath : basePath.concat(this.host);
+      if (outPath.includes(peer.host)) continue;
+      this._send(peer, {
+        type: 'roster', op: 'add',
+        agent: { federatedId, localId: info.localTargetId, type: info.type },
+        origin: { host: info.peerHost, machineHost: info.machineHost },
+        path: outPath,
+      });
     }
   }
 
@@ -182,9 +237,10 @@ class FederationHub extends EventEmitter {
   resyncRoster() {
     const snapshot = this._localRosterSnapshot();
     if (!snapshot.length) return;
+    const origin = { host: this.host, machineHost: this.machineHost };
     for (const peer of this.peers.values()) {
       for (const agent of snapshot) {
-        this._send(peer, { type: 'roster', op: 'add', agent });
+        this._send(peer, { type: 'roster', op: 'add', agent, origin, path: [this.host] });
       }
     }
   }
@@ -640,11 +696,19 @@ class FederationHub extends EventEmitter {
           // lastSeen updated above; nothing else to do.
           break;
         case 'roster': {
+          // Path-vector fields (absent from pre-forwarding peers → default to a
+          // single-hop delta rooted at the sending neighbour, so their local
+          // agents still propagate onward).
+          const origin = msg.origin || { host: peer.host, machineHost: peer.machineHost };
+          const path = Array.isArray(msg.path) && msg.path.length ? msg.path : [origin.host];
+          if (path.includes(this.host)) break; // loop: we already relayed this
+
           if (msg.op === 'add' && msg.agent?.federatedId && msg.agent?.localId) {
             this.remoteAgents.set(msg.agent.federatedId, {
-              peerHost: peer.host,
-              machineHost: peer.machineHost || peer.host,
+              peerHost: origin.host,
+              machineHost: origin.machineHost || origin.host,
               via: peer.host,
+              path,
               localTargetId: msg.agent.localId,
               type: msg.agent.type || null
             });
@@ -652,6 +716,10 @@ class FederationHub extends EventEmitter {
             this.remoteAgents.delete(msg.agent.federatedId);
           }
           this.emit('roster', { from: peer.host, op: msg.op, agent: msg.agent });
+          // Relay to our OTHER peers so the delta crosses the whole mesh.
+          if (msg.agent?.federatedId) {
+            this._fanRosterDelta({ op: msg.op, agent: msg.agent, origin, path }, peer.host);
+          }
           break;
         }
         case 'forward': {
@@ -721,21 +789,43 @@ class FederationHub extends EventEmitter {
 
   _ingestPeerRoster(peerHost, agents, peerMachineHost) {
     if (!Array.isArray(agents)) return;
+    const origin = { host: peerHost, machineHost: peerMachineHost || peerHost };
     for (const entry of agents) {
       if (!entry || !entry.federatedId || !entry.localId) continue;
       this.remoteAgents.set(entry.federatedId, {
         peerHost,
-        machineHost: peerMachineHost || peerHost,
+        machineHost: origin.machineHost,
         via: peerHost,
+        path: [peerHost],
         localTargetId: entry.localId,
         type: entry.type || null
       });
+      // A directly-connected neighbour's own agents (from its hello snapshot)
+      // must also cross the mesh — relay to our other peers so the far side of
+      // a hub sees them.
+      this._fanRosterDelta({
+        op: 'add',
+        agent: { federatedId: entry.federatedId, localId: entry.localId, type: entry.type || null },
+        origin,
+        path: [peerHost],
+      }, peerHost);
     }
   }
 
-  _purgePeerRoster(peerHost) {
+  // A neighbour link dropped: purge everything we learned THROUGH it (keyed by
+  // `via`, so a hub losing a spoke also drops the far agents that spoke relayed)
+  // and propagate the removals across the rest of the mesh so downstream peers
+  // don't keep routing to a now-unreachable agent.
+  _purgePeerRoster(neighbourHost) {
     for (const [fid, info] of Array.from(this.remoteAgents.entries())) {
-      if (info.peerHost === peerHost) this.remoteAgents.delete(fid);
+      if (info.via !== neighbourHost) continue;
+      this.remoteAgents.delete(fid);
+      this._fanRosterDelta({
+        op: 'remove',
+        agent: { federatedId: fid, localId: info.localTargetId, type: info.type },
+        origin: { host: info.peerHost, machineHost: info.machineHost },
+        path: [this.host],
+      }, neighbourHost);
     }
   }
 
