@@ -43,6 +43,7 @@ const { MCPServer } = require('./src/mcp/MCPServer');
 const { PeerRegistry } = require('./src/federation/PeerRegistry');
 const { FederationHub } = require('./src/federation/FederationHub');
 const { SshJoin } = require('./src/federation/sshJoin');
+const { machineHost: resolveMachineHost } = require('./src/utils/host');
 const { FIPAMessage: FIPAMessageClass } = require('./src/acl/FIPAMessage');
 const {
   extractSelectedText,
@@ -856,8 +857,10 @@ terminal.registerSignalHandlers();
     //          and FederationHub.forward events deliver inbound back
     //          through IPCHub.injectFederatedMessage.
     try {
+      const resolvedMachineHost = resolveMachineHost();
       peerRegistry = new PeerRegistry({
         sessionId: session.id,
+        machineHost: resolvedMachineHost,
         ipcSocket: ipcHub.getSocketPath?.() || null,
         mcpSocket: socketPath
       });
@@ -906,6 +909,7 @@ terminal.registerSignalHandlers();
 
       federationHub = new FederationHub({
         host: resolvedHost,
+        machineHost: resolvedMachineHost,
         sessionId: session.id,
         peerRegistry,
         getLocalRoster: snapshotLocalRoster
@@ -1069,7 +1073,7 @@ terminal.registerSignalHandlers();
         try {
           sshJoin = new SshJoin({
             endpoint: cliArgs.join,
-            local: { host: resolvedHost, sessionId: session.id, fedSocket: fedSocketPath },
+            local: { host: resolvedHost, machineHost: resolvedMachineHost, sessionId: session.id, fedSocket: fedSocketPath },
             // Persistent channel: errors + detail land in the chat scrollback.
             log: (m) => broadcastSystemMessage(`[fed] ${m}`),
             // Transient channel: join lifecycle flashes on the vim-style

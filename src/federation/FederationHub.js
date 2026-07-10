@@ -5,7 +5,7 @@
 // PeerRegistry). Two bukowskis end up with exactly one duplex connection.
 //
 // Wire protocol (newline-delimited JSON, same shape as IPCHub):
-//   { type:'hello',     host, sessionId, startedAt, agents:[...] }
+//   { type:'hello',     host, machineHost, sessionId, startedAt, agents:[...] }
 //   { type:'roster',    op:'add'|'remove', agent }
 //   { type:'forward',   from, to, message, hops:[host,...] }
 //   { type:'heartbeat', ts }
@@ -25,6 +25,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const EventEmitter = require('events');
+
+const { machineHost } = require('../utils/host');
 
 const HEARTBEAT_INTERVAL_MS = 15000;
 const HEARTBEAT_TIMEOUT_MS = 45000;
@@ -57,6 +59,10 @@ class FederationHub extends EventEmitter {
     if (!opts.host) throw new Error('FederationHub: host is required');
 
     this.host = opts.host;
+    // Truthful machine identity, carried alongside the cwd-derived routing host
+    // so list_agents can tell two same-named "bukowski" boxes apart. Defaults
+    // to the local machine; a caller may override (e.g. a friendly label).
+    this.machineHost = opts.machineHost || machineHost();
     this.sessionId = opts.sessionId || null;
     this.startedAt = opts.startedAt || Date.now();
     this.peerRegistry = opts.peerRegistry || null;
@@ -69,7 +75,10 @@ class FederationHub extends EventEmitter {
 
     // host -> { socket, direction, sessionId, lastSeen, hbTimer, hbCheckTimer, helloSent }
     this.peers = new Map();
-    // federatedId -> { peerHost, localTargetId, type }
+    // federatedId -> { peerHost, machineHost, via, localTargetId, type }
+    // peerHost = routing host of the peer that owns the agent; machineHost =
+    // that peer's true machine identity (for display/disambiguation); via =
+    // the directly-connected peer we learned it through (the next hop).
     this.remoteAgents = new Map();
     // Sockets that have connected but haven't sent a hello yet.
     this.pendingInbound = new Set();
@@ -372,7 +381,22 @@ class FederationHub extends EventEmitter {
     }
 
     if (peerHost === this.host) {
-      // Connected to ourselves — drop.
+      // Same routing host. If the sessionId also matches it's genuinely us
+      // (a self-dial) — drop quietly. If the sessionId DIFFERS it's a distinct
+      // box that happens to share our cwd-derived host (e.g. two checkouts both
+      // in a dir named "bukowski"): we still can't admit it (peers are keyed by
+      // host, so it would collide in the map), but surface it instead of
+      // silently treating a real peer as self — otherwise it vanishes with no
+      // trace. Fix is a distinct BUKOWSKI_HOST on one side.
+      if (peerSessionId && peerSessionId !== this.sessionId) {
+        this.emit('warning', {
+          kind: 'host_collision',
+          host: peerHost,
+          machineHost: hello.machineHost || null,
+          ourSessionId: this.sessionId,
+          peerSessionId
+        });
+      }
       try { socket.destroy(); } catch { /* ignore */ }
       return;
     }
@@ -404,7 +428,7 @@ class FederationHub extends EventEmitter {
     }
 
     const peer = this._registerPeer(socket, peerHost, peerSessionId, 'inbound', hello, !!hello.local);
-    this._ingestPeerRoster(peerHost, hello.agents);
+    this._ingestPeerRoster(peerHost, hello.agents, hello.machineHost);
     // Reply with our hello FIRST (the dialer's pre-adoption reader accepts only
     // a hello as the first message); THEN push our live roster.
     this._sendHello(peer);
@@ -445,6 +469,7 @@ class FederationHub extends EventEmitter {
       this._writeRaw(socket, {
         type: 'hello',
         host: this.host,
+        machineHost: this.machineHost,
         sessionId: this.sessionId,
         startedAt: this.startedAt,
         // Same-box pid peer (not an SSH-forwarded static peer) → local link.
@@ -507,7 +532,7 @@ class FederationHub extends EventEmitter {
       try { socket.removeListener('error', state.onError); } catch { /* ignore */ }
 
       const peer = this._registerPeer(socket, msg.host, msg.sessionId || null, 'outbound', msg, !peerInfo.static);
-      this._ingestPeerRoster(msg.host, msg.agents);
+      this._ingestPeerRoster(msg.host, msg.agents, msg.machineHost);
       // We already sent our hello at connect; now push our live roster.
       this._syncRosterTo(peer);
       if (state.buffer.length > 0) {
@@ -538,6 +563,7 @@ class FederationHub extends EventEmitter {
   _registerPeer(socket, host, sessionId, direction, hello, local = false) {
     const peer = {
       host,
+      machineHost: (hello && hello.machineHost) || host,
       sessionId,
       direction,
       socket,
@@ -617,6 +643,8 @@ class FederationHub extends EventEmitter {
           if (msg.op === 'add' && msg.agent?.federatedId && msg.agent?.localId) {
             this.remoteAgents.set(msg.agent.federatedId, {
               peerHost: peer.host,
+              machineHost: peer.machineHost || peer.host,
+              via: peer.host,
               localTargetId: msg.agent.localId,
               type: msg.agent.type || null
             });
@@ -673,6 +701,7 @@ class FederationHub extends EventEmitter {
     this._send(peer, {
       type: 'hello',
       host: this.host,
+      machineHost: this.machineHost,
       sessionId: this.sessionId,
       startedAt: this.startedAt,
       agents: this._localRosterSnapshot()
@@ -690,12 +719,14 @@ class FederationHub extends EventEmitter {
     }
   }
 
-  _ingestPeerRoster(peerHost, agents) {
+  _ingestPeerRoster(peerHost, agents, peerMachineHost) {
     if (!Array.isArray(agents)) return;
     for (const entry of agents) {
       if (!entry || !entry.federatedId || !entry.localId) continue;
       this.remoteAgents.set(entry.federatedId, {
         peerHost,
+        machineHost: peerMachineHost || peerHost,
+        via: peerHost,
         localTargetId: entry.localId,
         type: entry.type || null
       });

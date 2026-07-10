@@ -687,7 +687,14 @@ class MCPServer extends EventEmitter {
               id: federatedId,
               name: federatedId,
               type: info.type,
-              host: info.peerHost,
+              // Truthful machine identity of the box the agent runs on — lets a
+              // caller tell two same-named "bukowski" peers apart. Falls back to
+              // the routing host for peers still on pre-machineHost code.
+              host: info.machineHost || info.peerHost,
+              // The directly-connected peer this agent was learned through (the
+              // next hop). Equals host in a 2-node link; differs once a hub
+              // relays a third box's agents (proxy-jump / hub-and-spoke).
+              via: info.via || info.peerHost,
               source: 'federated'
             });
           }

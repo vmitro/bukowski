@@ -228,7 +228,8 @@ class SshJoin {
     // Static peer file on the PEER → its registry dials us via the -R socket.
     this._remoteStaticName = `${ourHost}.json`;
     const remoteJson = JSON.stringify({
-      host: ourHost, sessionId: this.local.sessionId, fedSocket: this._remoteSock, static: true,
+      host: ourHost, machineHost: this.local.machineHost || null,
+      sessionId: this.local.sessionId, fedSocket: this._remoteSock, static: true,
     });
     try {
       // Pre-clean a stale -R socket (server may lack StreamLocalBindUnlink) and
@@ -261,7 +262,8 @@ class SshJoin {
     // Static peer file HERE → our registry dials the peer via the -L socket.
     this._localStaticFile = path.join(STATIC_DIR, `${this._ep.label}.json`);
     fs.writeFileSync(this._localStaticFile, JSON.stringify({
-      host: hub.host, sessionId: hub.sessionId, fedSocket: this._localSockPath, static: true,
+      host: hub.host, machineHost: hub.machineHost || null,
+      sessionId: hub.sessionId, fedSocket: this._localSockPath, static: true,
     }, null, 2), { mode: 0o600 });
     this._sshArgs = buildSshArgs({
       sshTarget: this._ep.sshTarget, port: this._ep.port,

@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const { hostFromCwd, shortHash } = require('../utils/host');
+const { hostFromCwd, shortHash, machineHost } = require('../utils/host');
 
 const DEFAULT_PEERS_DIR = path.join(os.homedir(), '.bukowski', 'peers');
 
@@ -53,6 +53,9 @@ class PeerRegistry extends EventEmitter {
     this.host = null;
     this._baseHost = opts.host
       || hostFromCwd(process.env.BUKOWSKI_HOST || process.cwd());
+    // Truthful machine identity, advertised alongside the cwd-derived routing
+    // host so consumers can disambiguate two same-named boxes.
+    this.machineHost = opts.machineHost || machineHost();
 
     this.peers = new Map();   // pid -> peerInfo
     this.peerFile = null;
@@ -149,6 +152,7 @@ class PeerRegistry extends EventEmitter {
     const info = {
       pid: this.pid,
       host: this.host,
+      machineHost: this.machineHost,
       sessionId: this.sessionId,
       ipcSocket: this.ipcSocket,
       mcpSocket: this.mcpSocket,
