@@ -29,6 +29,9 @@ const EventEmitter = require('events');
 const HEARTBEAT_INTERVAL_MS = 15000;
 const HEARTBEAT_TIMEOUT_MS = 45000;
 const HELLO_TIMEOUT_MS = 5000;
+// How often to retry dialing known-but-unconnected peers (self-heals a dial
+// that raced a not-yet-ready socket; idempotent via _maybeDial's guards).
+const DIAL_RECONCILE_MS = 5000;
 
 function defaultSocketPath(pid) {
   return path.join('/tmp', `bukowski-fed-${pid}.sock`);
@@ -759,6 +762,19 @@ class FederationHub extends EventEmitter {
     // Dial any already-known peers (registry may have scanned before we
     // attached).
     for (const peer of r.list()) this._maybeDial(peer);
+
+    // Dial reconciler. _maybeDial is otherwise purely event-driven (fires once
+    // per peer:appeared/updated), so a single dial that races a not-yet-ready
+    // socket — e.g. a `--join` tunnel that just respawned after the remote hub
+    // restarted — fails and is never retried, because the static file's fields
+    // don't change again to re-emit an event. This idempotent sweep (guarded by
+    // peers.has/dialing.has in _maybeDial) retries such stuck peers until they
+    // connect. Cheap: a handful of map lookups every few seconds.
+    this._dialReconcileTimer = setInterval(() => {
+      if (this._stopped) return;
+      for (const peer of r.list()) this._maybeDial(peer);
+    }, DIAL_RECONCILE_MS);
+    if (this._dialReconcileTimer.unref) this._dialReconcileTimer.unref();
   }
 
   _detachRegistry() {
@@ -768,6 +784,7 @@ class FederationHub extends EventEmitter {
     r.off('peer:appeared', onAppeared);
     r.off('peer:updated', onUpdated);
     r.off('peer:gone', onGone);
+    if (this._dialReconcileTimer) { clearInterval(this._dialReconcileTimer); this._dialReconcileTimer = null; }
     this._registryHandlers = null;
   }
 
