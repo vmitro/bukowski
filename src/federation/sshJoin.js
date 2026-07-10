@@ -223,14 +223,7 @@ class SshJoin {
 
     const ourHost = this.local.host;
     this._remoteSock = `${FWD_PREFIX}-${ourHost}.sock`;              // -R bind on peer
-    const localSock = `${FWD_PREFIX}-${this._ep.label}-${process.pid}.sock`; // -L bind here
-
-    // Static peer file HERE → our registry dials the peer via the -L socket.
-    fs.mkdirSync(STATIC_DIR, { recursive: true, mode: 0o700 });
-    this._localStaticFile = path.join(STATIC_DIR, `${this._ep.label}.json`);
-    fs.writeFileSync(this._localStaticFile, JSON.stringify({
-      host: hub.host, sessionId: hub.sessionId, fedSocket: localSock, static: true,
-    }, null, 2), { mode: 0o600 });
+    this._localSockPath = `${FWD_PREFIX}-${this._ep.label}-${process.pid}.sock`; // -L bind here
 
     // Static peer file on the PEER → its registry dials us via the -R socket.
     this._remoteStaticName = `${ourHost}.json`;
@@ -251,15 +244,40 @@ class SshJoin {
       return false;
     }
 
-    this._sshArgs = buildSshArgs({
-      sshTarget: this._ep.sshTarget, port: this._ep.port,
-      ourFedSocket: this.local.fedSocket, peerFedSocket: hub.fedSocket,
-      remoteSock: this._remoteSock, localSock,
-    });
-    this._peerHost = hub.host;
+    this._applyHub(hub);
     this._spawnTunnel();
     this.log(`join ${this.endpoint}: linking ${ourHost} ↔ ${hub.host} over SSH`);
     return true;
+  }
+
+  // (Re)point our side at a discovered peer hub: rewrite our local static peer
+  // file + the tunnel argv against this hub's fedSocket. A peer that restarts
+  // gets a new pid → new fedSocket/sessionId, so re-running this before a
+  // reconnect keeps the -L forward aimed at the live socket instead of a dead
+  // one. The -R side (our host/socket) is stable, so the peer's static file
+  // and our remote staging don't need touching.
+  _applyHub(hub) {
+    fs.mkdirSync(STATIC_DIR, { recursive: true, mode: 0o700 });
+    // Static peer file HERE → our registry dials the peer via the -L socket.
+    this._localStaticFile = path.join(STATIC_DIR, `${this._ep.label}.json`);
+    fs.writeFileSync(this._localStaticFile, JSON.stringify({
+      host: hub.host, sessionId: hub.sessionId, fedSocket: this._localSockPath, static: true,
+    }, null, 2), { mode: 0o600 });
+    this._sshArgs = buildSshArgs({
+      sshTarget: this._ep.sshTarget, port: this._ep.port,
+      ourFedSocket: this.local.fedSocket, peerFedSocket: hub.fedSocket,
+      remoteSock: this._remoteSock, localSock: this._localSockPath,
+    });
+    this._peerHost = hub.host;
+  }
+
+  // Before a reconnect, re-discover the peer hub so a restarted peer (new
+  // fedSocket) is re-pointed instead of endlessly dialing a dead socket. On
+  // failure keep the current argv and let backoff retry — the peer may just be
+  // briefly down and about to come back on the same socket.
+  _reprepare() {
+    try { this._applyHub(this._discoverPeerHub()); }
+    catch (err) { this.log(`join ${this.endpoint}: re-discovery failed — ${err.message}`); }
   }
 
   // Best-effort removal of our -R socket on the peer before (re)binding it.
@@ -288,7 +306,7 @@ class SshJoin {
       this._backoffMs = Math.min(this._backoffMs * 2, 30000);
       this.log(`join ${this.endpoint}: tunnel down, reconnecting in ${Math.round(wait / 1000)}s`);
       this.onStatus(`↻ ${peer} dropped · retry ${Math.round(wait / 1000)}s`, Math.max(wait, 3000));
-      this._reconnectTimer = setTimeout(() => this._spawnTunnel(), wait);
+      this._reconnectTimer = setTimeout(() => { this._reprepare(); this._spawnTunnel(); }, wait);
       if (this._reconnectTimer.unref) this._reconnectTimer.unref();
     });
     // A tunnel that stays up for 10s is healthy → reset backoff + flag it linked.
