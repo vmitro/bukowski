@@ -904,7 +904,16 @@ terminal.registerSignalHandlers();
         // federatedId are the same.
         const bridgeAgents = (mcpServer.getExternalAgents?.() || [])
           .map(a => ({ localId: a.id, type: a.type, federatedId: a.id }));
-        return [...ptyAgents, ...bridgeAgents];
+        // Chat rooms federate as themselves. A room id is `chat-<convId>` where
+        // convId is a globally-unique UUID, so its federatedId == localId (like
+        // bridge agents). This lets a remote agent ADDRESS the room; when its
+        // message reaches us (the host) the room reflector fans it to every
+        // other participant. Without this a room is session-local and only
+        // co-located agents can post into it.
+        const roomAgents = session.getAllAgents()
+          .filter(a => a.type === 'chat')
+          .map(a => ({ localId: a.id, type: 'chat', federatedId: a.id }));
+        return [...ptyAgents, ...bridgeAgents, ...roomAgents];
       }
 
       federationHub = new FederationHub({
@@ -966,6 +975,13 @@ terminal.registerSignalHandlers();
               // its messageQueue key, so deliver straight to that queue (the
               // bridge polls get_pending_messages).
               resolvedLocalId = federatedTo;
+            } else if (session.getAllAgents().some(a => a.type === 'chat' && a.id === federatedTo)) {
+              // A chat ROOM we host. Record it so the human's ChatPane renders
+              // it, then let the room reflector (message:received listener) fan
+              // it to the other participants. A room has no per-agent queue, so
+              // there is nothing to deliverFipaToLocal — return after recording.
+              try { fipaHub.conversations.handleMessage(fipaMessage); } catch { /* ignore */ }
+              return;
             } else {
               broadcastSystemMessage(
                 `federation: dropped misrouted forward (to ${federatedTo}; no local match)`
@@ -983,6 +999,50 @@ terminal.registerSignalHandlers();
           try { ipcHub.injectFederatedMessage(ipcMsg); }
           catch (err) { console.error('federation: inbound delivery failed:', err.message); }
         }
+      });
+
+      // ── Federated chat room: single-host reflector ───────────────────────
+      // A message addressed to a chat room we HOST is fanned out to every other
+      // agent we know (local session + external bridges + federated peers),
+      // attributed to the original sender. Only the room's host reflects;
+      // recipients get a normal message targeted at THEIR own id (never a room
+      // id, no room conversationId) so it never re-fans and our own ChatPane
+      // does not duplicate it. The human already sees the original via the
+      // ChatPane's own conversation listener. This is what makes a room a
+      // cross-session broadcast proxy rather than a session-local pane.
+      function reflectRoomMessage(fipaMessage) {
+        if (!fipaMessage || fipaMessage.receiver == null) return;
+        const receivers = Array.isArray(fipaMessage.receiver)
+          ? fipaMessage.receiver : [fipaMessage.receiver];
+        const localRoomIds = new Set(
+          session.getAllAgents().filter(a => a.type === 'chat').map(a => a.id)
+        );
+        const room = receivers.map(r => r?.name).find(n => localRoomIds.has(n));
+        if (!room) return;  // not addressed to a room we host
+        const sender = fipaMessage.sender?.name;
+        const content = fipaMessage.content;
+        // Fan-out set: every agent we can reach, keyed by the id we deliver to
+        // (LOCAL id for our own agents/bridges, FEDERATED id for remote peers),
+        // minus the original sender, the room itself, and the human.
+        const targets = new Set();
+        for (const a of session.getAllAgents()) {
+          if (isFederatable(a)) targets.add(a.id);
+        }
+        for (const a of (mcpServer.getExternalAgents?.() || [])) targets.add(a.id);
+        for (const fid of federationHub.remoteAgents.keys()) targets.add(fid);
+        targets.delete(sender);
+        targets.delete(room);
+        targets.delete('user');
+        targets.delete(undefined);
+        for (const to of targets) {
+          // Reflect as inform, attributed to the original sender. No room-id
+          // receiver / room conversationId → recipients don't loop, our pane
+          // doesn't duplicate. Best-effort per target.
+          try { fipaHub.inform(sender, to, content); } catch { /* per-target */ }
+        }
+      }
+      fipaHub.conversations.on('message:received', ({ message }) => {
+        try { reflectRoomMessage(message); } catch { /* advisory */ }
       });
 
       // Coordination-event federation: fan locally-published events out to
