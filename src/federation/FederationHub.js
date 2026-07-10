@@ -336,7 +336,11 @@ class FederationHub extends EventEmitter {
       to: remote.localTargetId,
       _federatedTo: ipcMessage.to
     };
-    return this.forwardTo(remote.peerHost, { ipcMessage: rewritten });
+    // Send toward the NEXT HOP (`via`), not the agent's origin host — the origin
+    // may be several hubs away and not a direct peer. Intermediate nodes relay
+    // onward (see the 'forward' case in _consumeEstablishedBuffer). Falls back
+    // to peerHost for a directly-connected agent (via === peerHost there).
+    return this.forwardTo(remote.via || remote.peerHost, { ipcMessage: rewritten });
   }
 
   /**
@@ -703,8 +707,9 @@ class FederationHub extends EventEmitter {
           const path = Array.isArray(msg.path) && msg.path.length ? msg.path : [origin.host];
           if (path.includes(this.host)) break; // loop: we already relayed this
 
+          let changed = true;
           if (msg.op === 'add' && msg.agent?.federatedId && msg.agent?.localId) {
-            this.remoteAgents.set(msg.agent.federatedId, {
+            changed = this._recordRemote(msg.agent.federatedId, {
               peerHost: origin.host,
               machineHost: origin.machineHost || origin.host,
               via: peer.host,
@@ -713,11 +718,12 @@ class FederationHub extends EventEmitter {
               type: msg.agent.type || null
             });
           } else if (msg.op === 'remove' && msg.agent?.federatedId) {
-            this.remoteAgents.delete(msg.agent.federatedId);
+            changed = this.remoteAgents.delete(msg.agent.federatedId);
           }
-          this.emit('roster', { from: peer.host, op: msg.op, agent: msg.agent });
-          // Relay to our OTHER peers so the delta crosses the whole mesh.
-          if (msg.agent?.federatedId) {
+          if (changed) this.emit('roster', { from: peer.host, op: msg.op, agent: msg.agent });
+          // Relay only when our knowledge actually changed — a longer path that
+          // lost to a shorter one must NOT re-flood, or the mesh never converges.
+          if (changed && msg.agent?.federatedId) {
             this._fanRosterDelta({ op: msg.op, agent: msg.agent, origin, path }, peer.host);
           }
           break;
@@ -726,6 +732,19 @@ class FederationHub extends EventEmitter {
           if (Array.isArray(msg.hops) && msg.hops.includes(this.host)) {
             // Loop: drop.
             break;
+          }
+          // Multi-hop relay: if this forward targets an agent that is NOT local
+          // to us but we know a route to it, pass it toward the next hop instead
+          // of handing it up for a delivery that would fail ("misrouted"). This
+          // mirrors the roster path-vector so a message reaches an agent several
+          // hubs away, not only a direct peer's agents.
+          const dest = msg.ipcMessage && msg.ipcMessage._federatedTo;
+          if (dest && !this.resolveLocalAlias(dest)) {
+            const remote = this.remoteAgents.get(dest);
+            if (remote && remote.via && remote.via !== peer.host) {
+              this.forwardTo(remote.via, { ipcMessage: msg.ipcMessage, hops: msg.hops });
+              break;
+            }
           }
           this.emit('forward', { from: peer.host, payload: msg });
           break;
@@ -792,7 +811,7 @@ class FederationHub extends EventEmitter {
     const origin = { host: peerHost, machineHost: peerMachineHost || peerHost };
     for (const entry of agents) {
       if (!entry || !entry.federatedId || !entry.localId) continue;
-      this.remoteAgents.set(entry.federatedId, {
+      const changed = this._recordRemote(entry.federatedId, {
         peerHost,
         machineHost: origin.machineHost,
         via: peerHost,
@@ -802,14 +821,34 @@ class FederationHub extends EventEmitter {
       });
       // A directly-connected neighbour's own agents (from its hello snapshot)
       // must also cross the mesh — relay to our other peers so the far side of
-      // a hub sees them.
-      this._fanRosterDelta({
-        op: 'add',
-        agent: { federatedId: entry.federatedId, localId: entry.localId, type: entry.type || null },
-        origin,
-        path: [peerHost],
-      }, peerHost);
+      // a hub sees them. Only when this was new/shorter (avoids re-flooding).
+      if (changed) {
+        this._fanRosterDelta({
+          op: 'add',
+          agent: { federatedId: entry.federatedId, localId: entry.localId, type: entry.type || null },
+          origin,
+          path: [peerHost],
+        }, peerHost);
+      }
     }
+  }
+
+  // Record a remote agent, keeping the SHORTEST known route. Roster deltas can
+  // arrive by several paths (a direct hello AND a relayed copy); without a
+  // length preference the last writer wins and `via` may point down a longer
+  // path — which now matters because message forwarding follows `via`. Returns
+  // true iff we adopted this entry (new, or strictly shorter than what we had),
+  // so callers relay only on a real change and the mesh converges instead of
+  // re-flooding.
+  _recordRemote(federatedId, entry) {
+    const existing = this.remoteAgents.get(federatedId);
+    const newLen = Array.isArray(entry.path) ? entry.path.length : 1;
+    const oldLen = existing
+      ? (Array.isArray(existing.path) ? existing.path.length : 1)
+      : Infinity;
+    if (existing && oldLen <= newLen) return false;
+    this.remoteAgents.set(federatedId, entry);
+    return true;
   }
 
   // A neighbour link dropped: purge everything we learned THROUGH it (keyed by
