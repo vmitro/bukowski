@@ -269,6 +269,7 @@ class SshJoin {
       remoteSock: this._remoteSock, localSock: this._localSockPath,
     });
     this._peerHost = hub.host;
+    this._peerFedSocket = hub.fedSocket; // watchdog compares against this
   }
 
   // Before a reconnect, re-discover the peer hub so a restarted peer (new
@@ -300,6 +301,7 @@ class SshJoin {
     this.child = spawn('ssh', this._sshArgs, { stdio: ['ignore', 'ignore', 'ignore'] });
     this.child.on('exit', () => {
       this.child = null;
+      if (this._watchdogTimer) { clearInterval(this._watchdogTimer); this._watchdogTimer = null; }
       if (this._stopped) return;
       // Backoff reconnect, capped at 30s.
       const wait = this._backoffMs;
@@ -315,6 +317,24 @@ class SshJoin {
       this.onStatus(`🔗 federated ⟷ ${peer}`, 5000);
     }, 10000);
     if (this._stableTimer.unref) this._stableTimer.unref();
+
+    // Watchdog: the -L forward stays bound even when the PEER's bukowski
+    // restarts (its box/sshd up, only the hub process died) — ssh never exits,
+    // so the reconnect path never fires, yet the forward now aims at a dead
+    // fedSocket and the link is silently down. Poll the peer's advertised hub;
+    // if its fedSocket changed, cycle the tunnel so the exit handler's
+    // _reprepare re-points -L at the live socket.
+    this._watchdogTimer = setInterval(() => {
+      if (this._stopped || !this.child) return;
+      let hub;
+      try { hub = this._discoverPeerHub(); }
+      catch { return; } // peer briefly unreachable — leave the tunnel, retry next tick
+      if (hub.fedSocket && this._peerFedSocket && hub.fedSocket !== this._peerFedSocket) {
+        this.log(`join ${this.endpoint}: peer hub restarted (fedSocket changed), relinking`);
+        try { this.child.kill(); } catch { /* exit handler relinks via _reprepare */ }
+      }
+    }, 30000);
+    if (this._watchdogTimer.unref) this._watchdogTimer.unref();
   }
 
   _cleanupLocal() {
@@ -330,6 +350,7 @@ class SshJoin {
     this._stopped = true;
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     if (this._stableTimer) clearTimeout(this._stableTimer);
+    if (this._watchdogTimer) clearInterval(this._watchdogTimer);
     if (this.child) { try { this.child.kill(); } catch { /* ignore */ } this.child = null; }
     this._cleanupLocal();
     if (this._remoteStaticName) {
