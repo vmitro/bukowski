@@ -733,7 +733,18 @@ class FederationHub extends EventEmitter {
     const r = this.peerRegistry;
 
     const onAppeared = (peer) => this._maybeDial(peer);
-    const onUpdated = (peer) => this._maybeDial(peer);
+    const onUpdated = (peer) => {
+      // A static peer whose sessionId changed = the remote hub restarted (new
+      // pid/session behind the same forwarded socket). The stale connection is
+      // still in this.peers, so _maybeDial would bail ("already connected") and
+      // never re-dial the live hub. Drop the stale peer first so the dial below
+      // reconnects to the restarted session.
+      const existing = this.peers.get(peer.host);
+      if (existing && existing.sessionId && peer.sessionId && existing.sessionId !== peer.sessionId) {
+        this._teardownPeer(existing, 'peer_session_changed');
+      }
+      this._maybeDial(peer);
+    };
     const onGone = (peer) => {
       const existing = this.peers.get(peer.host);
       if (existing) this._teardownPeer(existing, 'peer_gone');
