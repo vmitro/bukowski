@@ -54,6 +54,12 @@ HASH_CACHE = os.path.expanduser("~/.bukowski/ops/hash-cache.json")
 # File extensions from process cmdlines worth pinning (models, configs).
 ARTIFACT_EXT = (".gguf", ".bin", ".yaml", ".yml", ".json", ".safetensors")
 
+# Ports whose ownership identifies the live fleet generation. A graded run
+# must assert the broker port is held by the intended generation's pid —
+# a stale worker keeping a client connection to the live broker can still
+# receive dispatches, so pid identity here is a grading precondition.
+SERVICE_PORTS = [5555, 8080, 8082, 9109, 9154]
+
 
 def read_file(path):
     try:
@@ -226,6 +232,32 @@ def repo_states(procs):
     return states
 
 
+def port_owners():
+    """Map each SERVICE_PORT to the pid/process listening on it (via ss)."""
+    try:
+        out = subprocess.run(
+            ["ss", "-tlnpH"], capture_output=True, text=True, timeout=10,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    owners = {}
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) < 4:
+            continue
+        port_m = re.search(r":(\d+)$", cols[3])
+        pid_m = re.search(r"pid=(\d+)", line)
+        if not port_m:
+            continue
+        port = int(port_m.group(1))
+        if port in SERVICE_PORTS:
+            owners[str(port)] = {
+                "pid": int(pid_m.group(1)) if pid_m else None,
+                "addr": cols[3],
+            }
+    return owners
+
+
 def env_snapshot():
     snap = {"ts": int(time.time())}
     try:
@@ -269,11 +301,12 @@ def main():
         "processes": procs,
         "repos": repo_states(procs),
         "artifacts": artifacts_from(procs, not args.no_hash),
+        "ports": port_owners(),
         "env": env_snapshot(),
     }
     # Stable identity: everything except env and capture time.
     identity = json.dumps(
-        {k: manifest[k] for k in ("host", "processes", "repos", "artifacts")},
+        {k: manifest[k] for k in ("host", "processes", "repos", "artifacts", "ports")},
         sort_keys=True,
     )
     manifest["manifest_id"] = hashlib.sha256(identity.encode()).hexdigest()[:16]
