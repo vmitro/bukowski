@@ -312,6 +312,10 @@ def main():
     procs = proc_processes()
     manifest = {
         "kind": "azra-quality-loop-run-manifest",
+        # Bump on any change to what feeds the identity hash (schema or
+        # semantics). Ids only compare within one schema version; the field
+        # makes a cross-version mismatch self-explaining instead of a mystery.
+        "schema": 3,
         "host": os.uname().nodename,
         "captured_at": int(time.time()),
         "processes": procs,
@@ -327,6 +331,7 @@ def main():
     # section; head/dirty stay in the manifest as observability context.
     identity = json.dumps(
         {
+            "schema": manifest["schema"],
             "host": manifest["host"],
             "processes": manifest["processes"],
             "running": {r["repo"]: r["running_shas"] for r in manifest["repos"]},
