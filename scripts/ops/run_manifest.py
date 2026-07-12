@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""Capture a read-only run-manifest for the azra quality loop.
+
+Pins the identity of every running service the demo pipeline depends on
+(process start time, config, model files, repo state) so a graded run can
+prove "same binary, same model, same config" across iterations. A silent
+model swap or service restart between two "consecutive clean runs" makes
+stability claims fiction; this manifest is the guard.
+
+Read-only by design: no service is touched, no config mutated. Safe under
+feature freeze.
+
+Usage:
+    run_manifest.py [--out FILE] [--no-hash]
+
+  --out FILE   also write the manifest JSON to FILE
+  --no-hash    skip content hashing of model/config files (fast mode;
+               identity falls back to path+size+mtime)
+
+The manifest_id is a sha256 over the stable identity fields (processes,
+repos, artifacts) — env metrics are captured but excluded from the id, so
+two captures of an unchanged deployment yield the same id.
+"""
+
+import argparse
+import glob
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+# cmdline regex -> service label. Extend when the fleet grows.
+SERVICE_PATTERNS = [
+    (r"medd up", "meddaemon-worker"),
+    (r"llama-server", "llm-inference"),
+    (r"whisper-server", "asr-inference"),
+    (r"azra_exporter", "azra-metrics-exporter"),
+    (r"drive_metrics_exporter", "drive-metrics-exporter"),
+]
+
+# Repos whose working-tree state feeds the running services.
+REPOS = [
+    os.path.expanduser("~/projects/azra"),
+    os.path.expanduser("~/projects/azra-agent"),
+    os.path.expanduser("~/projects/meddaemon"),
+]
+
+HASH_CACHE = os.path.expanduser("~/.bukowski/ops/hash-cache.json")
+
+# File extensions from process cmdlines worth pinning (models, configs).
+ARTIFACT_EXT = (".gguf", ".bin", ".yaml", ".yml", ".json", ".safetensors")
+
+
+def read_file(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def proc_processes():
+    procs = []
+    for stat_path in glob.glob("/proc/[0-9]*/cmdline"):
+        raw = read_file(stat_path)
+        if not raw:
+            continue
+        cmdline = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        for pattern, label in SERVICE_PATTERNS:
+            if re.search(pattern, cmdline):
+                pid = int(stat_path.split("/")[2])
+                procs.append({
+                    "label": label,
+                    "pid": pid,
+                    "cmdline": cmdline,
+                    "start_time": proc_start_time(pid),
+                })
+                break
+    procs.sort(key=lambda p: (p["label"], p["start_time"] or 0, p["pid"]))
+    return procs
+
+
+def proc_start_time(pid):
+    # /proc/<pid>/stat field 22 is starttime in clock ticks since boot.
+    raw = read_file(f"/proc/{pid}/stat")
+    if not raw:
+        return None
+    try:
+        ticks = int(raw.rsplit(b")", 1)[1].split()[19])
+        hertz = os.sysconf("SC_CLK_TCK")
+        with open("/proc/uptime") as f:
+            uptime = float(f.read().split()[0])
+        return int(time.time() - uptime + ticks / hertz)
+    except (ValueError, IndexError, OSError):
+        return None
+
+
+def load_hash_cache():
+    try:
+        with open(HASH_CACHE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_hash_cache(cache):
+    try:
+        os.makedirs(os.path.dirname(HASH_CACHE), exist_ok=True)
+        with open(HASH_CACHE, "w") as f:
+            json.dump(cache, f)
+    except OSError:
+        pass
+
+
+def sha256_file(path, cache):
+    st = os.stat(path)
+    key = f"{path}:{st.st_size}:{int(st.st_mtime)}"
+    if key in cache:
+        return cache[key]
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    cache[key] = digest
+    return digest
+
+
+def artifacts_from(procs, do_hash):
+    cache = load_hash_cache()
+    seen, artifacts = set(), []
+    for proc in procs:
+        for tok in shlex.split(proc["cmdline"]):
+            if not tok.startswith("/") or not tok.lower().endswith(ARTIFACT_EXT):
+                continue
+            path = os.path.realpath(tok)
+            if path in seen or not os.path.isfile(path):
+                continue
+            seen.add(path)
+            st = os.stat(path)
+            entry = {
+                "path": path,
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+                "used_by": proc["label"],
+            }
+            if do_hash:
+                try:
+                    entry["sha256"] = sha256_file(path, cache)
+                except OSError as e:
+                    entry["hash_error"] = str(e)
+            artifacts.append(entry)
+    if do_hash:
+        save_hash_cache(cache)
+    artifacts.sort(key=lambda a: a["path"])
+    return artifacts
+
+
+def git(repo, *args):
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo, *args],
+            capture_output=True, text=True, timeout=10,
+        )
+        return out.stdout.strip() if out.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def repo_states(procs):
+    states = []
+    for repo in REPOS:
+        if not os.path.isdir(os.path.join(repo, ".git")):
+            continue
+        head = git(repo, "rev-parse", "HEAD")
+        if not head:
+            continue
+        head_ts = git(repo, "show", "-s", "--format=%ct", "HEAD")
+        dirty = git(repo, "status", "--porcelain")
+        head_ts = int(head_ts) if head_ts and head_ts.isdigit() else None
+        # A service started before the current HEAD commit may be running
+        # code that predates it (the stale-deploy failure mode).
+        stale = [
+            {"label": p["label"], "pid": p["pid"]}
+            for p in procs
+            if head_ts and p["start_time"] and repo in p["cmdline"]
+            and p["start_time"] < head_ts
+        ]
+        states.append({
+            "repo": repo,
+            "head": head,
+            "head_commit_ts": head_ts,
+            "dirty_files": len(dirty.splitlines()) if dirty else 0,
+            "possibly_stale_processes": stale,
+        })
+    return states
+
+
+def env_snapshot():
+    snap = {"ts": int(time.time())}
+    try:
+        with open("/proc/meminfo") as f:
+            mem = dict(
+                line.split(":", 1) for line in f.read().splitlines() if ":" in line
+            )
+        snap["mem_available_kb"] = int(mem["MemAvailable"].split()[0])
+        snap["swap_used_kb"] = (
+            int(mem["SwapTotal"].split()[0]) - int(mem["SwapFree"].split()[0])
+        )
+    except (OSError, KeyError, ValueError):
+        pass
+    try:
+        with open("/proc/loadavg") as f:
+            snap["loadavg_1m"] = float(f.read().split()[0])
+    except (OSError, ValueError):
+        pass
+    lid = subprocess.run(
+        ["busctl", "get-property", "org.freedesktop.login1",
+         "/org/freedesktop/login1", "org.freedesktop.login1.Manager",
+         "HandleLidSwitch"],
+        capture_output=True, text=True,
+    )
+    if lid.returncode == 0:
+        snap["handle_lid_switch"] = lid.stdout.split('"')[1] if '"' in lid.stdout else lid.stdout.strip()
+    return snap
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out")
+    ap.add_argument("--no-hash", action="store_true")
+    args = ap.parse_args()
+
+    procs = proc_processes()
+    manifest = {
+        "kind": "azra-quality-loop-run-manifest",
+        "host": os.uname().nodename,
+        "captured_at": int(time.time()),
+        "processes": procs,
+        "repos": repo_states(procs),
+        "artifacts": artifacts_from(procs, not args.no_hash),
+        "env": env_snapshot(),
+    }
+    # Stable identity: everything except env and capture time.
+    identity = json.dumps(
+        {k: manifest[k] for k in ("host", "processes", "repos", "artifacts")},
+        sort_keys=True,
+    )
+    manifest["manifest_id"] = hashlib.sha256(identity.encode()).hexdigest()[:16]
+
+    out = json.dumps(manifest, indent=2)
+    print(out)
+    if args.out:
+        with open(args.out, "w") as f:
+            f.write(out + "\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
