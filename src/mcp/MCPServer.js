@@ -659,11 +659,14 @@ class MCPServer extends EventEmitter {
         return this._sendFipaMessage('refuse', callerAgentId, args.to, payload('reason'), args.conversationId);
 
       case 'list_agents': {
-        // Local session agents.
+        // Local session agents. `federatedId` is the name remote peers know
+        // this agent by (claude-hub-1 for local claude-1) — without it an
+        // agent can't recognize itself in messages addressed from other boxes.
         const sessionAgents = this.session.getAllAgents().map(a => ({
           id: a.id,
           name: a.name,
           type: a.type,
+          federatedId: this.federationHub?.federatedIdFor?.(a.id) || null,
           source: 'session'
         }));
 
