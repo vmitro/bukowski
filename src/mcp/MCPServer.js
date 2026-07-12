@@ -500,6 +500,11 @@ class MCPServer extends EventEmitter {
             // now that the busy gate is clear, so an idle recipient gets the
             // live <channel> block instead of waiting for an unrelated turn.
             this._flushPendingPushes(tId);
+            // Same for coordination events: a wake that fired mid-turn was
+            // suppressed by notifyNewEvent's busy gate, and EventBus only
+            // re-wakes on a fresh publish — a quiet topic would leave the
+            // queue silent. Re-nudge now that the busy gate is clear.
+            this._flushPendingEventNudges(tId);
           }
         }
         this._sendResult(socket, id, { ok: true, busy: tId ? this.busyAgents.has(tId) : false });
@@ -534,6 +539,20 @@ class MCPServer extends EventEmitter {
           };
         });
         this._sendResult(socket, id, { count: visible.length, previews });
+        break;
+      }
+
+      case 'bukowski/peek_events': {
+        // Non-consuming event-queue peek for the Stop hook. Events NEVER block
+        // a stop on their own (load-bearing contract, see EventBus header) —
+        // the hook only appends this count to a reason when a FIPA block is
+        // already firing, so the agent learns about pending events for free.
+        const targetId = params?.agentId || clientState.agentId;
+        const fedId = this.federationHub?.federatedIdFor?.(targetId) || targetId;
+        const q = this.eventBus?.queues?.get(fedId);
+        const events = q?.events || [];
+        const topics = [...new Set(events.map((e) => e.topic))].slice(0, 5);
+        this._sendResult(socket, id, { count: events.length, topics });
         break;
       }
 
@@ -1401,6 +1420,22 @@ class MCPServer extends EventEmitter {
    * transition, so a burst is one nudge, re-armed after event_poll.
    * @private
    */
+  /**
+   * Event-side sibling of _flushPendingPushes: called on busy→idle. If the
+   * agent's event queue is non-empty, re-fire the courtesy nudge that the
+   * busy gate suppressed. The EventBus queue is keyed by FEDERATED id while
+   * turn_state reports the LOCAL id, so map forward; fall back to the id
+   * as-given for agents outside the local roster.
+   * @private
+   */
+  _flushPendingEventNudges(agentId) {
+    const fedId = this.federationHub?.federatedIdFor?.(agentId) || agentId;
+    const q = this.eventBus?.queues?.get(fedId);
+    if (!q || q.events.length === 0) return;
+    const lastTopic = q.events[q.events.length - 1].topic;
+    this.notifyNewEvent(fedId, lastTopic);
+  }
+
   notifyNewEvent(agentId, topic) {
     // `agentId` arrives FEDERATED (claude-<host>-N) — the EventBus keys
     // subscriptions/queues by federated id (see event_subscribe). Socket,

@@ -105,6 +105,14 @@ function doPeek(stopActive) {
 
       const peek = await rpc('bukowski/peek_messages', { agentId });
       const count = peek?.count || 0;
+      // Events never block a stop on their own (consume-at-leisure contract);
+      // we only piggyback their count onto a FIPA block that fires anyway.
+      // The events-only case is covered by the busy→idle nudge flush in
+      // MCPServer (turn_state idle → _flushPendingEventNudges).
+      let evPeek = null;
+      if (count > 0) {
+        evPeek = await rpc('bukowski/peek_events', { agentId }).catch(() => null);
+      }
 
       if (count <= 0) {
         // Turn ending with an empty inbox: go idle and allow the stop.
@@ -127,10 +135,15 @@ function doPeek(stopActive) {
         return `  - [${perf}] from ${sender}: ${excerpt}`;
       }).join('\n');
 
+      const eventLine = (evPeek && evPeek.count > 0)
+        ? `Also ${evPeek.count} coordination event(s) pending${evPeek.topics?.length ? ` (${evPeek.topics.join(', ')})` : ''} — drain with mcp__bukowski__event_poll while you're at it.`
+        : '';
+
       const reason = [
         `${count} FIPA message(s) pending in your bukowski inbox.`,
         'Call mcp__bukowski__get_pending_messages to retrieve and process them before stopping.',
-        previews
+        previews,
+        eventLine
       ].filter(Boolean).join('\n');
 
       process.stdout.write(JSON.stringify({ decision: 'block', reason }));
