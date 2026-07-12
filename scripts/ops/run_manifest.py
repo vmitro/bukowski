@@ -304,9 +304,19 @@ def main():
         "ports": port_owners(),
         "env": env_snapshot(),
     }
-    # Stable identity: everything except env and capture time.
+    # Stable identity: what is RUNNING, not what the repos look like.
+    # Repo HEAD and dirty counts churn whenever any agent commits or edits —
+    # two captures seconds apart would mint different ids for an unchanged
+    # deployment. Identity therefore keeps only running_shas from the repo
+    # section; head/dirty stay in the manifest as observability context.
     identity = json.dumps(
-        {k: manifest[k] for k in ("host", "processes", "repos", "artifacts", "ports")},
+        {
+            "host": manifest["host"],
+            "processes": manifest["processes"],
+            "running": {r["repo"]: r["running_shas"] for r in manifest["repos"]},
+            "artifacts": manifest["artifacts"],
+            "ports": manifest["ports"],
+        },
         sort_keys=True,
     )
     manifest["manifest_id"] = hashlib.sha256(identity.encode()).hexdigest()[:16]
