@@ -44,7 +44,7 @@ SERVICE_PATTERNS = [
 
 # Repos whose working-tree state feeds the running services.
 REPOS = [
-    os.path.expanduser("~/projects/azra"),
+    os.path.expanduser("~/projects/azra/azra"),
     os.path.expanduser("~/projects/azra-agent"),
     os.path.expanduser("~/projects/meddaemon"),
 ]
@@ -171,6 +171,23 @@ def git(repo, *args):
         return None
 
 
+def head_at(repo, ts):
+    """The commit that was HEAD at unix time ts, from the reflog.
+
+    This is the SHA a service started at ts is actually running (modulo
+    uncommitted files), as opposed to the current HEAD. Returns None when
+    the reflog doesn't reach back that far.
+    """
+    log = git(repo, "reflog", "--date=unix", "--format=%H %gd")
+    if not log:
+        return None
+    for line in log.splitlines():
+        m = re.match(r"([0-9a-f]{40}) HEAD@\{(\d+)\}", line)
+        if m and int(m.group(2)) <= ts:
+            return m.group(1)
+    return None
+
+
 def repo_states(procs):
     states = []
     for repo in REPOS:
@@ -182,19 +199,28 @@ def repo_states(procs):
         head_ts = git(repo, "show", "-s", "--format=%ct", "HEAD")
         dirty = git(repo, "status", "--porcelain")
         head_ts = int(head_ts) if head_ts and head_ts.isdigit() else None
+        mine = [p for p in procs if repo in p["cmdline"] and p["start_time"]]
         # A service started before the current HEAD commit may be running
         # code that predates it (the stale-deploy failure mode).
         stale = [
             {"label": p["label"], "pid": p["pid"]}
-            for p in procs
-            if head_ts and p["start_time"] and repo in p["cmdline"]
-            and p["start_time"] < head_ts
+            for p in mine
+            if head_ts and p["start_time"] < head_ts
         ]
+        # The SHA(s) the still-running services booted on — grades must
+        # stamp THESE, not the current HEAD. More than one entry means
+        # mixed generations are serving simultaneously (attribution hazard).
+        running = {}
+        for p in mine:
+            sha = head_at(repo, p["start_time"])
+            if sha:
+                running.setdefault(sha, []).append(p["pid"])
         states.append({
             "repo": repo,
             "head": head,
             "head_commit_ts": head_ts,
             "dirty_files": len(dirty.splitlines()) if dirty else 0,
+            "running_shas": running,
             "possibly_stale_processes": stale,
         })
     return states
