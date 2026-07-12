@@ -34,7 +34,15 @@ import sys
 import time
 
 # cmdline regex -> service label. Extend when the fleet grows.
+# Order matters: first match wins. The secret-keeper runs the same `medd up`
+# binary as the clinical fleet but is a DIFFERENT service (always-on, serves
+# OPENAI_API_KEY, survives bounces by design, relaunched from a dead pidfile
+# by run-laptop.sh). Labeling it separately keeps it out of the clinical
+# fleet's single-generation assertion — an old SHA on the keeper is expected
+# after a bounce, not a mixed-generation grading hazard (learned 2026-07-12:
+# it was nearly reaped twice as a "straggler").
 SERVICE_PATTERNS = [
+    (r"medd up .*secrets-expanded", "meddaemon-secret-keeper"),
     (r"medd up", "meddaemon-worker"),
     (r"llama-server", "llm-inference"),
     (r"whisper-server", "asr-inference"),
@@ -205,7 +213,15 @@ def repo_states(procs):
         head_ts = git(repo, "show", "-s", "--format=%ct", "HEAD")
         dirty = git(repo, "status", "--porcelain")
         head_ts = int(head_ts) if head_ts and head_ts.isdigit() else None
-        mine = [p for p in procs if repo in p["cmdline"] and p["start_time"]]
+        # Bounce-independent services (the secret-keeper) are excluded from
+        # generation tracking: they outlive clinical-fleet bounces by design,
+        # so their older boot SHA is expected, not a mixed-generation hazard.
+        # Their pid+start still pin them in the identity via the process list.
+        mine = [
+            p for p in procs
+            if repo in p["cmdline"] and p["start_time"]
+            and p["label"] != "meddaemon-secret-keeper"
+        ]
         # A service started before the current HEAD commit may be running
         # code that predates it (the stale-deploy failure mode).
         stale = [
