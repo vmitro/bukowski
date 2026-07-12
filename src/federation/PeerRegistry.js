@@ -89,8 +89,14 @@ class PeerRegistry extends EventEmitter {
     // safe inside 'exit'. _exitHandler is detached in stop() so it
     // doesn't fire twice.
     this._exitHandler = () => {
-      if (this.peerFile && !this._stopped) {
+      if (this._stopped) return;
+      if (this.peerFile) {
         try { fs.unlinkSync(this.peerFile); } catch { /* ignore */ }
+      }
+      // Release the base-host claim so a future launch can reclaim the bare
+      // name instead of being pushed to a suffix forever.
+      if (this._hostLockPath) {
+        try { fs.unlinkSync(this._hostLockPath); } catch { /* ignore */ }
       }
     };
     process.on('exit', this._exitHandler);
@@ -121,6 +127,10 @@ class PeerRegistry extends EventEmitter {
     }
     if (this.peerFile) {
       try { fs.unlinkSync(this.peerFile); } catch { /* ignore */ }
+    }
+    if (this._hostLockPath) {
+      try { fs.unlinkSync(this._hostLockPath); } catch { /* ignore */ }
+      this._hostLockPath = null;
     }
     if (this._exitHandler) {
       try { process.removeListener('exit', this._exitHandler); } catch { /* ignore */ }
@@ -208,24 +218,51 @@ class PeerRegistry extends EventEmitter {
   }
 
   _resolveHost() {
-    const liveHosts = new Set();
-    let entries;
-    try { entries = fs.readdirSync(this.peersDir); }
-    catch { entries = []; }
+    // Elect the owner of the bare base host through an atomic exclusive-create
+    // lock, NOT a readdir scan. The scan alone races: _resolveHost runs before
+    // _writeOwnFile (see start()), so two bukowskis launched in the same instant
+    // each see an empty peers dir, both keep the bare base host, and both mint
+    // identical federated ids (claude-<host>-N) — that is exactly what lands one
+    // session's FIPA/event traffic in the other's queue and corrupts sender
+    // attribution. An atomic O_EXCL create has no such window: whoever wins owns
+    // <base>; every other live instance falls back to a pid-suffixed host that
+    // is unique to it. resolvedHost is captured once by callers (multi.js), so
+    // this MUST settle synchronously here — hence a lock, not a later reconcile.
+    if (this._claimBaseHost(this._baseHost)) return this._baseHost;
+    return `${this._baseHost}-${shortHash(this.pid)}`;
+  }
 
-    for (const file of entries) {
-      const pid = parseInt(file.replace(/\.json$/, ''), 10);
-      if (!Number.isInteger(pid) || pid === this.pid) continue;
-      if (!isPidAlive(pid)) continue;
-      const { info } = this._readPeerFile(file);
-      if (info?.host) liveHosts.add(info.host);
+  /**
+   * Atomically claim ownership of the bare base host. Returns true if we own it.
+   * The owner writes its pid into a lock file created with the 'wx' (O_CREAT|
+   * O_EXCL) flag, so exactly one concurrent creator succeeds. If the lock is
+   * already held we reclaim it only when the recorded owner is us or is dead
+   * (unclean shutdown left a stale lock); a live foreign owner means we suffix.
+   * @private
+   */
+  _claimBaseHost(base) {
+    const lockPath = path.join(this.peersDir, `.host-${base}.owner`);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const fd = fs.openSync(lockPath, 'wx'); // atomic create-or-fail
+        try { fs.writeSync(fd, String(this.pid)); } finally { fs.closeSync(fd); }
+        this._hostLockPath = lockPath;
+        return true;
+      } catch (err) {
+        if (err.code !== 'EEXIST') return false; // unexpected fs error → suffix, stay safe
+        let ownerPid = null;
+        try { ownerPid = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10); }
+        catch { /* unreadable/racing writer */ }
+        if (ownerPid === this.pid) { this._hostLockPath = lockPath; return true; }
+        if (!Number.isInteger(ownerPid) || !isPidAlive(ownerPid)) {
+          // Stale lock from a dead owner — drop it and retry the create.
+          try { fs.unlinkSync(lockPath); } catch { /* another instance beat us to it */ }
+          continue;
+        }
+        return false; // live foreign owner holds the base host → we suffix
+      }
     }
-
-    let host = this._baseHost;
-    if (liveHosts.has(host)) {
-      host = `${host}-${shortHash(this.pid)}`;
-    }
-    return host;
+    return false;
   }
 
   _scan() {
