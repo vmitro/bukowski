@@ -62,6 +62,16 @@ HASH_CACHE = os.path.expanduser("~/.bukowski/ops/hash-cache.json")
 # File extensions from process cmdlines worth pinning (models, configs).
 ARTIFACT_EXT = (".gguf", ".bin", ".yaml", ".yml", ".json", ".safetensors")
 
+# Graded model artifacts that never appear on a cmdline: the router head
+# weights are loaded by path from worker config, so a head retrain (the
+# exact change iter-7 grades) would be invisible to cmdline-derived
+# artifacts. Globbed and pinned like any other artifact; which one the
+# router actually serves is asserted by the router lane, but a changed or
+# new head file changes the manifest id — that's the guard.
+EXTRA_ARTIFACT_GLOBS = [
+    os.path.expanduser("~/projects/azra-agent/storage/nlu/router_head_*.npz"),
+]
+
 # Ports whose ownership identifies the live fleet generation. A graded run
 # must assert the broker port is held by the intended generation's pid —
 # a stale worker keeping a client connection to the live broker can still
@@ -147,27 +157,33 @@ def sha256_file(path, cache):
 def artifacts_from(procs, do_hash):
     cache = load_hash_cache()
     seen, artifacts = set(), []
+
+    def add(path, used_by):
+        path = os.path.realpath(path)
+        if path in seen or not os.path.isfile(path):
+            return
+        seen.add(path)
+        st = os.stat(path)
+        entry = {
+            "path": path,
+            "size": st.st_size,
+            "mtime": int(st.st_mtime),
+            "used_by": used_by,
+        }
+        if do_hash:
+            try:
+                entry["sha256"] = sha256_file(path, cache)
+            except OSError as e:
+                entry["hash_error"] = str(e)
+        artifacts.append(entry)
+
     for proc in procs:
         for tok in shlex.split(proc["cmdline"]):
-            if not tok.startswith("/") or not tok.lower().endswith(ARTIFACT_EXT):
-                continue
-            path = os.path.realpath(tok)
-            if path in seen or not os.path.isfile(path):
-                continue
-            seen.add(path)
-            st = os.stat(path)
-            entry = {
-                "path": path,
-                "size": st.st_size,
-                "mtime": int(st.st_mtime),
-                "used_by": proc["label"],
-            }
-            if do_hash:
-                try:
-                    entry["sha256"] = sha256_file(path, cache)
-                except OSError as e:
-                    entry["hash_error"] = str(e)
-            artifacts.append(entry)
+            if tok.startswith("/") and tok.lower().endswith(ARTIFACT_EXT):
+                add(tok, proc["label"])
+    for pattern in EXTRA_ARTIFACT_GLOBS:
+        for path in sorted(glob.glob(pattern)):
+            add(path, "config-loaded")
     if do_hash:
         save_hash_cache(cache)
     artifacts.sort(key=lambda a: a["path"])
@@ -315,7 +331,7 @@ def main():
         # Bump on any change to what feeds the identity hash (schema or
         # semantics). Ids only compare within one schema version; the field
         # makes a cross-version mismatch self-explaining instead of a mystery.
-        "schema": 3,
+        "schema": 4,
         "host": os.uname().nodename,
         "captured_at": int(time.time()),
         "processes": procs,
