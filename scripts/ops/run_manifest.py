@@ -55,7 +55,18 @@ REPOS = [
     os.path.expanduser("~/projects/azra/azra"),
     os.path.expanduser("~/projects/azra-agent"),
     os.path.expanduser("~/projects/meddaemon"),
+    os.path.expanduser("~/projects/orbis-to-fhir"),
 ]
+
+# Editable-installed repos never show up in a consumer's cmdline (the venv
+# imports them from the checkout at worker LAUNCH), so process→repo matching
+# by cmdline substring misses them. Map repo → service-label regex of its
+# consumers; head_at(process start) then gives the SAME running-code
+# semantic as for cmdline-matched repos (SAPMAN: tool_id→HTTP construction
+# lives in orbis-to-fhir; its grading table pins that repo's HEAD).
+EDITABLE_CONSUMERS = {
+    os.path.expanduser("~/projects/orbis-to-fhir"): r"^meddaemon-worker$",
+}
 
 HASH_CACHE = os.path.expanduser("~/.bukowski/ops/hash-cache.json")
 
@@ -233,10 +244,13 @@ def repo_states(procs):
         # generation tracking: they outlive clinical-fleet bounces by design,
         # so their older boot SHA is expected, not a mixed-generation hazard.
         # Their pid+start still pin them in the identity via the process list.
+        consumer_re = EDITABLE_CONSUMERS.get(repo)
         mine = [
             p for p in procs
-            if repo in p["cmdline"] and p["start_time"]
+            if p["start_time"]
             and p["label"] != "meddaemon-secret-keeper"
+            and (repo in p["cmdline"]
+                 or (consumer_re and re.match(consumer_re, p["label"])))
         ]
         # A service started before the current HEAD commit may be running
         # code that predates it (the stale-deploy failure mode).
@@ -331,7 +345,7 @@ def main():
         # Bump on any change to what feeds the identity hash (schema or
         # semantics). Ids only compare within one schema version; the field
         # makes a cross-version mismatch self-explaining instead of a mystery.
-        "schema": 4,
+        "schema": 5,
         "host": os.uname().nodename,
         "captured_at": int(time.time()),
         "processes": procs,
