@@ -304,6 +304,59 @@ def port_owners():
     return owners
 
 
+def router_coupling(procs, artifacts):
+    """Pin (classifier head, oos band) as the COUPLED pair they are.
+
+    tau_oos is calibrated against one specific head's confidence
+    distribution (meddaemon-2, seq 292: v20's 0.35 band is net-negative on
+    v21) — a head swap silently invalidates the band unless both travel in
+    the identity together. Values resolve env-override-first, then the medd
+    config yaml, mirroring worker startup precedence.
+    """
+    worker = next((p for p in procs if p["label"] == "meddaemon-worker"), None)
+    coupling = {}
+    env = {}
+    if worker:
+        raw = read_file(f"/proc/{worker['pid']}/environ")
+        if raw:
+            for tok in raw.split(b"\0"):
+                if b"=" in tok:
+                    k, v = tok.split(b"=", 1)
+                    env[k.decode("utf-8", "replace")] = v.decode("utf-8", "replace")
+        cfg_text = ""
+        for tok in shlex.split(worker["cmdline"]):
+            if tok.lower().endswith((".yaml", ".yml")) and os.path.isfile(tok):
+                raw_cfg = read_file(tok)
+                cfg_text = raw_cfg.decode("utf-8", "replace") if raw_cfg else ""
+                break
+
+        def resolve(env_key, cfg_key):
+            if env.get(env_key):
+                return env[env_key], "env"
+            m = re.search(rf"^\s*{cfg_key}\s*:\s*(\S+)", cfg_text, re.M)
+            return (m.group(1), "config") if m else (None, None)
+
+        band, band_src = resolve("ROUTER_OOS_BAND", "oos_confidence_band")
+        head, head_src = resolve("ROUTER_CLASSIFIER_HEAD_PATH", "classifier_head_path")
+        coupling = {"oos_band": band, "oos_band_source": band_src,
+                    "head_path": head, "head_path_source": head_src}
+        # Resolve the configured head to its pinned artifact hash so the
+        # coupled pair is (head CONTENT, band), not (path string, band).
+        if head:
+            head = os.path.expanduser(head)
+            if not os.path.isabs(head):
+                # Relative head paths resolve against the WORKER's cwd
+                # (where the config is interpreted), not this script's.
+                try:
+                    head = os.path.join(os.readlink(f"/proc/{worker['pid']}/cwd"), head)
+                except OSError:
+                    pass
+            head_real = os.path.realpath(head)
+            hit = next((a for a in artifacts if a["path"] == head_real), None)
+            coupling["head_sha256"] = hit.get("sha256") if hit else None
+    return coupling
+
+
 def env_snapshot():
     snap = {"ts": int(time.time())}
     try:
@@ -340,17 +393,19 @@ def main():
     args = ap.parse_args()
 
     procs = proc_processes()
+    artifacts = artifacts_from(procs, not args.no_hash)
     manifest = {
         "kind": "azra-quality-loop-run-manifest",
         # Bump on any change to what feeds the identity hash (schema or
         # semantics). Ids only compare within one schema version; the field
         # makes a cross-version mismatch self-explaining instead of a mystery.
-        "schema": 5,
+        "schema": 6,
         "host": os.uname().nodename,
         "captured_at": int(time.time()),
         "processes": procs,
         "repos": repo_states(procs),
-        "artifacts": artifacts_from(procs, not args.no_hash),
+        "artifacts": artifacts,
+        "router_coupling": router_coupling(procs, artifacts),
         "ports": port_owners(),
         "env": env_snapshot(),
     }
@@ -366,6 +421,7 @@ def main():
             "processes": manifest["processes"],
             "running": {r["repo"]: r["running_shas"] for r in manifest["repos"]},
             "artifacts": manifest["artifacts"],
+            "router_coupling": manifest["router_coupling"],
             "ports": manifest["ports"],
         },
         sort_keys=True,
