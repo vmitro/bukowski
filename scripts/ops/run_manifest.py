@@ -357,6 +357,28 @@ def router_coupling(procs, artifacts):
     return coupling
 
 
+def fleet_stability(procs):
+    """Age of the youngest clinical process — the freeze-verifier number.
+
+    A scored run wants "no respawn in the last N minutes"; the youngest
+    start time among dispatch-path services answers it in one capture
+    (manifest_id stability across captures proves it over an interval, since
+    pids are in the identity). Excludes exporters and the bounce-independent
+    keeper: their churn is not fleet churn.
+    """
+    watched = {"meddaemon-worker", "llm-inference", "asr-inference"}
+    starts = [p["start_time"] for p in procs
+              if p["label"] in watched and p["start_time"]]
+    if not starts:
+        return {}
+    newest = max(starts)
+    return {
+        "newest_clinical_start": newest,
+        "min_clinical_age_s": int(time.time()) - newest,
+        "clinical_proc_count": len(starts),
+    }
+
+
 def env_snapshot():
     snap = {"ts": int(time.time())}
     try:
@@ -407,6 +429,9 @@ def main():
         "artifacts": artifacts,
         "router_coupling": router_coupling(procs, artifacts),
         "ports": port_owners(),
+        # Volatile by construction (ages against wall clock) — reported for
+        # freeze-verification, deliberately NOT part of the identity.
+        "fleet_stability": fleet_stability(procs),
         "env": env_snapshot(),
     }
     # Stable identity: what is RUNNING, not what the repos look like.
