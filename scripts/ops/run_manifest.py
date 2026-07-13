@@ -98,7 +98,26 @@ def read_file(path):
         return None
 
 
+KEEPER_PIDFILE = "/tmp/meddaemon/azra-secret-keeper.pid"
+
+
+def keeper_pid():
+    """The registered secret-keeper pid, or None."""
+    raw = read_file(KEEPER_PIDFILE)
+    try:
+        return int(raw.strip()) if raw else None
+    except ValueError:
+        return None
+
+
 def proc_processes():
+    # Belt-and-braces keeper identity: the config-signature pattern covers
+    # today's deployment, but the pidfile is the REGISTERED identity — a
+    # future keeper reusing a different config (or a fleet config reusing
+    # the secrets profile) would fool the signature, not the pidfile. The
+    # keeper and its direct children are labeled by pid regardless of
+    # cmdline (nearly reaped three times on signature-adjacent readings).
+    kpid = keeper_pid()
     procs = []
     for stat_path in glob.glob("/proc/[0-9]*/cmdline"):
         raw = read_file(stat_path)
@@ -108,6 +127,8 @@ def proc_processes():
         for pattern, label in SERVICE_PATTERNS:
             if re.search(pattern, cmdline):
                 pid = int(stat_path.split("/")[2])
+                if kpid and (pid == kpid or proc_ppid(pid) == kpid):
+                    label = "meddaemon-secret-keeper"
                 procs.append({
                     "label": label,
                     "pid": pid,
@@ -117,6 +138,14 @@ def proc_processes():
                 break
     procs.sort(key=lambda p: (p["label"], p["start_time"] or 0, p["pid"]))
     return procs
+
+
+def proc_ppid(pid):
+    raw = read_file(f"/proc/{pid}/stat")
+    try:
+        return int(raw.rsplit(b")", 1)[1].split()[1]) if raw else None
+    except (ValueError, IndexError):
+        return None
 
 
 def proc_start_time(pid):
