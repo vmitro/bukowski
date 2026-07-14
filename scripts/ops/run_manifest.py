@@ -43,6 +43,13 @@ import time
 # it was nearly reaped twice as a "straggler").
 SERVICE_PATTERNS = [
     (r"medd up .*secrets-expanded", "meddaemon-secret-keeper"),
+    # The finetune pipeline is its own long-lived deployment (own config,
+    # own lifecycle, no graded ports) — clinical bounces don't touch it.
+    # Without the label it (a) false-positives the single-generation check
+    # after every clinical bounce and (b) can sort first among workers and
+    # feed router_coupling a config with no router keys (empty coupling on
+    # the iter7b bounce, 2026-07-14).
+    (r"medd up .*finetune", "meddaemon-finetune"),
     (r"medd up", "meddaemon-worker"),
     (r"llama-server", "llm-inference"),
     (r"whisper-server", "asr-inference"),
@@ -277,7 +284,7 @@ def repo_states(procs):
         mine = [
             p for p in procs
             if p["start_time"]
-            and p["label"] != "meddaemon-secret-keeper"
+            and p["label"] not in ("meddaemon-secret-keeper", "meddaemon-finetune")
             and (repo in p["cmdline"]
                  or (consumer_re and re.match(consumer_re, p["label"])))
         ]
@@ -450,7 +457,7 @@ def main():
         # Bump on any change to what feeds the identity hash (schema or
         # semantics). Ids only compare within one schema version; the field
         # makes a cross-version mismatch self-explaining instead of a mystery.
-        "schema": 6,
+        "schema": 7,
         "host": os.uname().nodename,
         "captured_at": int(time.time()),
         "processes": procs,
