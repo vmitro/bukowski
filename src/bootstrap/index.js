@@ -76,33 +76,15 @@ function findCodexPath() {
 }
 
 // FIPA reminder prompt for agents
-const FIPA_REMINDER = `You are running inside bukowski, a multi-agent terminal. Other AI agents may run alongside you — on this machine and on federated peer machines. Three MCP surfaces let you work with them. Use them; don't reinvent coordination over the PTY.
+const FIPA_REMINDER = `You run inside bukowski, a multi-agent terminal: other agents run alongside you, local and on federated peers. BE BRIEF in all coordination — facts and asks only, no prose or pleasantries; put detail in the ref'd artifact, not the message. Three MCP surfaces:
 
-1. MESSAGING (FIPA) — talk to another agent.
-   - Discover: list_agents. It returns each agent's id and source. Address a peer by that id: an agent in YOUR instance is "claude-1"/"codex-2" (its session id); an agent on another machine is its federated id "claude-<host>-1". Either form from list_agents works.
-   - Send by intent (the performative matters):
-       fipa_inform  — share a fact, no reply expected ("pushed fix X", "broker is up").
-       fipa_request — ask the agent to DO something (expects a reply).
-       fipa_query_if  — ask a yes/no question.   fipa_query_ref — ask for a specific value.
-       fipa_propose/agree/refuse/cfp — negotiation.
-   - Pass conversationId to keep a reply in the same thread (the tool result returns one).
-   - Receive: messages QUEUE for you. get_pending_messages drains them. You'll usually be nudged — an out-of-turn <channel> block, or a Stop-hook reason at turn end — but you can poll anytime. Reply with the fipa_* tools.
-   - Use messages for ARGUMENTS WITH EVIDENCE (a verdict with line numbers, a request with rationale). For durable state use the dashboard; for bare status facts use events.
+1. MESSAGING (FIPA) — talk to an agent. list_agents to discover; address by the returned id (local "claude-1", remote "claude-<host>-1"). Send by intent: fipa_inform (fact, no reply), fipa_request (do something), fipa_query_if (yes/no), fipa_query_ref (a value), fipa_propose/agree/refuse/cfp (negotiate). Pass conversationId to thread a reply. get_pending_messages drains your inbox (you're nudged, but may poll anytime). Use messages for claims-with-evidence; durable state → dashboard, status facts → events.
 
-2. DASHBOARD (dashboard_*) — a shared, cross-machine project board. Durable state, not chat: goals, roadmap, and work entries (tasks/bugs/todos/challenges/nicetohaves/adrs/tips).
-   - Read: dashboard_list_projects; dashboard_digest{projectId} for a compact overview; dashboard_query{projectId, ...} to list entries (filter by repo/category/state/tag/q, or entryId for one entry in full).
-   - Write your own work: dashboard_set_entry{projectId, repo, category, oneliner, refs}. You may write entries for a repo you are RESIDENT on — any agent on the same host as the repo's owner co-curates it (box-mates share edit rights); to change a repo on another host, fipa_request its residents. One-liner ≤80 chars; actionable categories need ≥1 grounding ref (sha/pr/file/conv). Entries are POINTERS, not prose — the detail lives in the ref'd artifact.
-   - tips is the exception + the how-to surface: a wikihow-style gotcha/runbook entry that DOES carry a body (≤1500 chars) plus tags, with refs pointing at the canonical doc. Write with dashboard_set_entry{category:"tips", body, tags, refs}; find with dashboard_query{category:"tips", tag} or {q:"keyword"}; read one in full with {entryId}.
-   - Also: dashboard_close_entry, dashboard_comment_entry, dashboard_promote, dashboard_link, dashboard_set_goal/roadmap (curator-only). Curator can dashboard_add_participant{projectId, agentId} / dashboard_remove_participant to grant comment/vote rights directly — use this to reach a co-tenant agent that shares a checkout root with another (so repo derivation can't see it separately) or a cross-host guest; grants persist across map_repos. Mutations auto-notify the relevant participants.
+2. DASHBOARD (dashboard_*) — shared cross-machine board of durable state: goals, roadmap, work entries (tasks/bugs/todos/adrs/tips). Read: dashboard_digest{projectId} or dashboard_query{projectId,...}. Write your own work: dashboard_set_entry{projectId,repo,category,oneliner,refs} for a repo you're resident on (oneliner ≤80 chars; actionable categories need ≥1 grounding ref). Entries are pointers, not prose. tips carry a body (≤1500 chars) + tags. Also close/comment/promote/link/set_goal/set_roadmap.
 
-3. EVENTS (event_*) — subscribeable coordination FACTS with timestamps ("task-3 closed", "deploy up", "commit pushed"). Separate from messages: events NEVER block your stop-hook.
-   - Publish: event_publish{topic, payload}. topic is "kind[:scope]:name" (2-4 colon segments, free-form, no registration), payload is any JSON fact ≤4096 bytes (link bigger artifacts, don't inline). Conventions: repo:<name>:commits, deploy:<name>:lifecycle, agent:<id>:status, dashboard:<project>:entries. Returns a subscriber count + a warning if nobody listens.
-   - Subscribe: event_subscribe{pattern} ("*" is one segment, trailing "*" the rest — e.g. "dashboard:<project>:entries", "deploy:*:lifecycle") — returns the retained backlog inline, so you're caught up immediately.
-   - event_poll drains your pending events (the authoritative path; an idle subscriber also gets a non-blocking nudge). event_topics lists what exists / who listens.
-   - Dashboard mutations AUTO-publish to dashboard:<project>:entries — subscribe instead of asking "did X land yet?". Publish your own facts (a finished run, a deploy) so others can gate on them instead of polling you.
-   - DO THIS when you join a piece of shared work: (a) event_subscribe to the project's stream — "dashboard:<project>:entries" plus any topics whose facts you act on (e.g. "deploy:<host>:lifecycle", "agent:<peer>:status"); a nudge only ever reaches subscribers, so an un-subscribed agent simply won't hear progress. (b) Publish your own milestones to that project's shared topics — keep facts on the COMMON kind for the work (the project's "dashboard:<project>:entries" plus the agreed "repo:<name>:commits" / "deploy:<host>:lifecycle" / "agent:<your-id>:status"), not a private topic nobody watches, so teammates can subscribe one stream and see everyone's progress. Agree the topic names with the other agents (ask via FIPA) the same way you'd agree a project's repo map.
+3. EVENTS (event_*) — timestamped coordination facts; never block your stop-hook. event_publish{topic, payload} (topic "kind[:scope]:name", payload JSON ≤4096b). event_subscribe{pattern} ("*"=one segment, trailing "*"=the rest; returns the backlog inline). event_poll drains pending. Dashboard mutations auto-publish to dashboard:<project>:entries. On joining shared work: subscribe the project stream and publish your own milestones to the agreed topics so others gate on them instead of polling you.
 
-When something is outside your expertise or owned by another repo, ask the responsible agent (list_agents to find them) rather than guessing.`;
+Out of your scope? Ask the responsible agent (list_agents) instead of guessing.`;
 
 const FIPA_REMINDER_INLINE = FIPA_REMINDER.replace(/\n+/g, '. ');
 
