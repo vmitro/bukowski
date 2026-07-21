@@ -827,6 +827,12 @@ terminal.registerSignalHandlers();
       // (local-only broadcast) from @swarm (federated broadcast).
       const local = session.getAllAgents()
         .filter(a => a.type !== 'chat')
+        // Only agents with a live IPC socket are addressable. An agent in the
+        // session roster but not (yet) connected to IPCHub has no delivery
+        // path, so including it makes a @chat/@swarm fan-out emit a bogus
+        // `agent_not_connected` for it (one dead target per broadcast). Mirror
+        // IPCHub's own routability check so the roster only lists what routes.
+        .filter(a => ipcHub.isAgentConnected(a.id))
         .map(a => ({ id: a.id, name: a.name, type: a.type, source: 'session' }));
       const federated = federationHub?.remoteAgents
         ? Array.from(federationHub.remoteAgents.entries()).map(([fid, info]) => ({
