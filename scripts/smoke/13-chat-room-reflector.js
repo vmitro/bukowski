@@ -47,8 +47,11 @@ session.addAgent(new ChatAgent('11111111-2222-3333-4444-555555555555', fipaHub.c
 
 // Stub federation roster (two remote peers) + isFederatable / reflector, copied
 // verbatim from multi.js so this exercises the same logic.
+const REMOTE_ROOM = 'chat-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const federationHub = { remoteAgents: new Map([
-  ['claude-1blu-1', {}], ['claude-netcup-1', {}],
+  ['claude-1blu-1', { type: 'claude' }],
+  ['claude-netcup-1', { type: 'claude' }],
+  [REMOTE_ROOM, { type: 'chat' }],
 ]) };
 const mcpServer = { getExternalAgents: () => [{ id: 'codex-bukowski-1', type: 'codex' }] };
 const isFederatable = (agent) => !!agent && agent.type !== 'chat' && !!agent.pty;
@@ -64,7 +67,9 @@ function reflectRoomMessage(fipaMessage) {
   const targets = new Set();
   for (const a of session.getAllAgents()) if (isFederatable(a)) targets.add(a.id);
   for (const a of (mcpServer.getExternalAgents?.() || [])) targets.add(a.id);
-  for (const fid of federationHub.remoteAgents.keys()) targets.add(fid);
+  for (const [fid, info] of federationHub.remoteAgents) {
+    if (info?.type !== 'chat') targets.add(fid);
+  }
   targets.delete(sender); targets.delete(rm); targets.delete('user'); targets.delete(undefined);
   for (const to of targets) { try { fipaHub.inform(sender, to, content); } catch { /* per-target */ } }
 }
@@ -90,6 +95,7 @@ assert(fanTo.includes('codex-bukowski-1'), 'external bridge fanned');
 assert(fanTo.includes('claude-netcup-1'), 'other remote peer fanned (federated id)');
 assert(!fanTo.includes('claude-1blu-1'), 'sender excluded');
 assert(!fanTo.some(t => t.startsWith('chat-')), 'no rooms in fan-out (no re-fan)');
+assert(!fanTo.includes(REMOTE_ROOM), 'remote room excluded (prevents room-to-room amplification)');
 assert(!fanTo.includes('user'), 'human excluded from fan-out (already saw original)');
 console.log('room fan-out →', JSON.stringify(fanTo));
 

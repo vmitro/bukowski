@@ -1029,7 +1029,12 @@ terminal.registerSignalHandlers();
           if (isFederatable(a)) targets.add(a.id);
         }
         for (const a of (mcpServer.getExternalAgents?.() || [])) targets.add(a.id);
-        for (const fid of federationHub.remoteAgents.keys()) targets.add(fid);
+        // Remote chat rooms are routing endpoints, not broadcast recipients.
+        // Reflecting room A into room B makes B reflect the same content back
+        // into A (and every other room), minting fresh FIPA ids forever.
+        for (const [fid, info] of federationHub.remoteAgents) {
+          if (info?.type !== 'chat') targets.add(fid);
+        }
         targets.delete(sender);
         targets.delete(room);
         targets.delete('user');
