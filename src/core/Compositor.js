@@ -544,7 +544,18 @@ class Compositor {
     if (pane) {
       const agent = this.session.getAgent(pane.agentId);
       if (agent) {
-        this.stableContentHeights.set(paneId, agent.getContentHeight());
+        const contentHeight = agent.getContentHeight();
+        this.stableContentHeights.set(paneId, contentHeight);
+        // Re-snap to tail: auto-scroll (scheduleDraw) was frozen for this pane
+        // throughout the reflow, so scrollOffsets is stale — below the grown
+        // content. draw() below renders at the stored offset and does NOT run
+        // followTail, so without this the freshly-added tail lines stay below
+        // the fold until the next PTY burst triggers scheduleDraw. Honor the
+        // same followTail/scrollLocks guards as updateFollowTailScrolls().
+        if (this.followTail.get(paneId) !== false
+          && this.scrollLocks.get(paneId) !== true) {
+          this.scrollOffsets.set(paneId, Math.max(0, contentHeight - pane.bounds.height));
+        }
       }
     }
 
