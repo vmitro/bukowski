@@ -40,6 +40,7 @@ const RETAIN_N = 50;          // retained events per topic (late-joiner catchup)
 const MAX_TOPICS = 500;       // LRU-evicted by last publish time
 const QUEUE_CAP = 200;        // per-subscriber pending events (drop-oldest)
 const MAX_PAYLOAD = 4096;     // bytes, JSON-stringified
+const WAKE_COOLDOWN_MS = 60_000; // re-wake a stuck non-empty queue at most this often
 // kind[:scope]:name — 2..4 colon segments, free-form lowercase-ish tokens.
 const TOPIC_RE = /^[a-z0-9_.-]+(:[a-z0-9_.\/-]+){1,3}$/i;
 // patterns additionally allow '*' as a full segment wildcard
@@ -68,6 +69,7 @@ class EventBus extends EventEmitter {
     this.retainN = opts.retainN || RETAIN_N;
     this.maxTopics = opts.maxTopics || MAX_TOPICS;
     this.queueCap = opts.queueCap || QUEUE_CAP;
+    this.wakeCooldownMs = opts.wakeCooldownMs ?? WAKE_COOLDOWN_MS;
     this.seq = 0;
     this.topics = new Map(); // topic -> { retained: [], lastTs, published }
     this.subs = new Map();   // agentId -> Set<pattern>
@@ -128,17 +130,23 @@ class EventBus extends EventEmitter {
       let hit = false;
       for (const p of patterns) { if (patternMatches(p, topic)) { hit = true; break; } }
       if (!hit) continue;
-      const q = this.queues.get(agentId) || { events: [], dropped: 0 };
-      // Coalesce wake-ups: only the empty→non-empty transition is worth a push.
-      // A burst of events to a subscriber who hasn't polled yet produces ONE
+      const q = this.queues.get(agentId) || { events: [], dropped: 0, lastWakeTs: 0 };
+      // Coalesce wake-ups: the empty→non-empty transition is always worth a
+      // push, and a burst to a subscriber who hasn't polled yet produces ONE
       // wake, not one per event (lesson #5: don't flood). The queue re-arms
-      // after poll() drains it, so the next event wakes them again.
+      // after poll() drains it. BUT a wake is fire-and-forget — if the one
+      // nudge is lost (agent busy at the time, dead socket), a non-empty
+      // queue would otherwise stay silent forever. So a fresh publish may
+      // also re-wake a stuck queue, rate-limited by wakeCooldownMs.
       const wasEmpty = q.events.length === 0;
       q.events.push(ev);
       if (q.events.length > this.queueCap) { q.events.shift(); q.dropped += 1; }
       this.queues.set(agentId, q);
       delivered += 1;
-      if (wasEmpty) toWake.push(agentId);
+      if (wasEmpty || (ev.ts - (q.lastWakeTs || 0)) > this.wakeCooldownMs) {
+        q.lastWakeTs = ev.ts;
+        toWake.push(agentId);
+      }
     }
     // 'wake' is a COURTESY push signal (the host turns it into a non-blocking
     // channel nudge → the agent calls event_poll). It is NOT delivery: events
