@@ -162,6 +162,25 @@ function enableFileLogging() {
 // Activate file logging so console.log/error go to bukowski.log instead of stderr
 enableFileLogging();
 
+// Boot attribution: append who launched this compositor (parent chain, tty, host,
+// argv) to a stable shared log, so a mystery relaunch — e.g. a tmux-resurrect
+// restore replaying a saved `--resume` command — can be traced to its trigger.
+try {
+  let pcomm = '?';
+  try { pcomm = fs.readFileSync(`/proc/${process.ppid}/comm`, 'utf8').trim(); } catch { /* non-linux/no-proc */ }
+  const bootLine = [
+    new Date().toISOString(),
+    `pid=${process.pid}`,
+    `ppid=${process.ppid}`,
+    `pcomm=${pcomm}`,
+    `pane=${process.env.TMUX_PANE || '-'}`,
+    `host=${process.env.BUKOWSKI_HOST || '-'}`,
+    `cwd=${process.cwd()}`,
+    `argv=${process.argv.slice(1).join(' ')}`,
+  ].join(' ');
+  fs.appendFileSync(path.join(os.homedir(), '.bukowski', 'boot.log'), `${bootLine}\n`);
+} catch { /* boot log best-effort */ }
+
 // Diagnostic: tap EVERY byte written to the real terminal (frames AND non-frame
 // writes like OSC 52, terminal-query forwarding, bells) with timing, so the
 // exact last bytes before a client (ConnectBot) drops are captured — the frame
@@ -2182,6 +2201,43 @@ terminal.registerSignalHandlers();
         }
 
         if (result.action === 'dashboard_close') {
+          overlayManager.hide(overlay.id);
+          compositor.draw();
+          return;
+        }
+
+        // ACL overlay cancel (ESC) — hide it. Without this the overlay's
+        // acl_cancel fell through to the catch-all redraw below and the modal
+        // could never be dismissed (the working acl_cancel handler lives in the
+        // dispatcher path, which is unreachable while an overlay is active).
+        if (result.action === 'acl_cancel') {
+          overlayManager.hide(overlay.id);
+          compositor.draw();
+          return;
+        }
+
+        // ACL overlay send (Enter with a target selected) — dispatch via FIPAHub
+        // using the overlay's own state, then hide. Mirrors aclHandlers.acl_send.
+        if (result.action === 'acl_send') {
+          const { performative, from, to, content } = result;
+          if (to && content && content.trim()) {
+            const fromId = from || null;
+            switch (performative) {
+              case 'request':   fipaHub.request(fromId, to, content); break;
+              case 'query-if':  fipaHub.queryIf(fromId, to, content); break;
+              case 'query-ref': fipaHub.queryRef(fromId, to, content); break;
+              case 'subscribe': fipaHub.subscribe(fromId, to, { topic: content }); break;
+              case 'cfp': {
+                const others = session.getAllAgents()
+                  .filter(a => a.id !== fromId)
+                  .map(a => a.id);
+                fipaHub.cfp(fromId, others, { task: content });
+                break;
+              }
+              case 'inform':    fipaHub.inform(fromId, to, content); break;
+              default:          fipaHub.inform(fromId, to, { [performative]: content });
+            }
+          }
           overlayManager.hide(overlay.id);
           compositor.draw();
           return;
