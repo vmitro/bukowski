@@ -514,38 +514,81 @@ terminal.registerSignalHandlers();
       return;
     }
 
-    // Find and close the pane for this agent
+    // Clean exit (code 0). Find the pane for this agent.
     const pane = layoutManager.findPaneByAgent(agent.id);
     if (pane) {
-      // Focus this pane first so closePane() closes the right one
-      layoutManager.focusPane(pane.id);
-
       const allPanes = layoutManager.getAllPanes();
+      const isVirtual = agent.type === 'chat' || agent.type === 'dashboard';
+
       if (allPanes.length === 1) {
-        // Last pane - quit entirely
+        // Last pane, clean exit - quit entirely (unchanged).
+        layoutManager.focusPane(pane.id);
         terminal.cleanup();
         if (ipcHub) ipcHub.stop();
         session.destroy();
         process.exit(exitCode);
-      } else {
-        // Close just this pane
+      } else if (isVirtual) {
+        // Virtual panes (chat/dashboard) have no session to relaunch - close as before.
+        layoutManager.focusPane(pane.id);
         const paneId = pane.id;
         layoutManager.closePane();
-        compositor.cleanupPane(paneId);  // Clear reflow timers and state
-
-        // Announce agent departure in chat (skip virtual panes)
-        if (agent.type !== 'chat' && agent.type !== 'dashboard') {
-          broadcastSystemMessage(`${agent.name} (${agent.id}) left the session`);
-        }
-        // Stop the dashboard's auto-refresh timer when its pane closes.
+        compositor.cleanupPane(paneId);
         if (agent.type === 'dashboard' && typeof agent.destroy === 'function') {
           agent.destroy();
         }
-
         session.removeAgent(agent.id);
         handleResize();
+      } else {
+        // PARK the pane instead of destroying it. A clean agent exit is often
+        // accidental (e.g. Escape in claude's own session list quits claude with
+        // code 0), and silently closing the pane loses its layout slot with no
+        // undo. Keep it open like the crash branch does; the user relaunches the
+        // resumed session with 'r' or closes the pane with 'q' (see the
+        // parked-pane key handler in the stdin path).
+        agent.status = 'exited';
+        agent._parked = true;
+        agent._reportedExit = true;
+        agent.terminal?.write(`\r\n\x1b[33m[${agent.name} exited — r: relaunch (resume) · q: close pane]\x1b[0m\r\n`);
+        compositor.scheduleDraw();
       }
     }
+  }
+
+  // Relaunch a parked agent in place, re-running its original (resume) command.
+  function relaunchParkedAgent(agent) {
+    const pane = layoutManager.findPaneByAgent(agent.id);
+    if (!pane) return false;
+    agent._parked = false;
+    agent._reportedExit = false;
+    agent._retriedWithoutResume = false;
+    agent.exitCode = null;
+    agent.status = 'stopped';
+    agent.spawn(pane.bounds.width, pane.bounds.height);
+    setupAgentHandlers(agent);
+    compositor.cleanupPane(pane.id);
+    compositor.scheduleDraw();
+    return true;
+  }
+
+  // Close a parked pane for good (the deferred version of the old clean-exit path).
+  function closeParkedPane(agent) {
+    const pane = layoutManager.findPaneByAgent(agent.id);
+    if (!pane) return;
+    layoutManager.focusPane(pane.id);
+    if (layoutManager.getAllPanes().length === 1) {
+      terminal.cleanup();
+      if (ipcHub) ipcHub.stop();
+      session.destroy();
+      process.exit(0);
+    }
+    const paneId = pane.id;
+    layoutManager.closePane();
+    compositor.cleanupPane(paneId);
+    if (agent.type !== 'chat' && agent.type !== 'dashboard') {
+      broadcastSystemMessage(`${agent.name} (${agent.id}) left the session`);
+    }
+    session.removeAgent(agent.id);
+    handleResize();
   }
 
   const stderrWrite = process.stderr.write.bind(process.stderr);
@@ -2246,6 +2289,18 @@ terminal.registerSignalHandlers();
         // Other overlay actions just redraw (e.g. dashboard navigation)
         compositor.draw();
         return;
+      }
+    }
+
+    // Parked pane (agent exited cleanly, kept open): 'r' relaunches the resumed
+    // session, 'q' closes the pane. Other keys fall through so Ctrl+Space prefix /
+    // pane navigation still work while parked (they no-op against the dead PTY).
+    {
+      const fp = layoutManager.findPane(layoutManager.focusedPaneId);
+      const fa = fp && session.getAgent(fp.agentId);
+      if (fa && fa._parked) {
+        if (str === 'r' || str === 'R') { relaunchParkedAgent(fa); return; }
+        if (str === 'q' || str === 'Q') { closeParkedPane(fa); return; }
       }
     }
 
