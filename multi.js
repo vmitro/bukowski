@@ -611,7 +611,14 @@ terminal.registerSignalHandlers();
   if (process.env.BUKOWSKI_NO_DASHBOARD !== '1') {
     try {
       const useTatr = cliArgs.withTatr || process.env.BUKOWSKI_WITH_TATR === '1';
-      if (useTatr) {
+      const bridge = cliArgs.tatrBridge || process.env.BUKOWSKI_TATR_MODE === 'bridge';
+      if (useTatr && bridge) {
+        // Phase-3 bridged: shared legacy dashboard (interop with legacy peers)
+        // + per-entry git mirror. See docs/adr/0001.
+        const { BridgedTatrStore } = require('./src/dashboard/TatrStore');
+        dashboardStore = new BridgedTatrStore();
+        console.error('[dashboard] backend: tatr-bridge (shared legacy + git mirror)');
+      } else if (useTatr) {
         // Per-session opt-in: tatr-style per-entry git-backed store (spike,
         // isolated mode). See docs/adr/0001-tatr-backed-dashboard-store.md.
         const { TatrStore } = require('./src/dashboard/TatrStore');

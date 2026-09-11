@@ -251,6 +251,7 @@ function parseArgs() {
     join: null,
     ugly: false,
     withTatr: false,
+    tatrBridge: false,
     agentArgs: []
   };
 
@@ -289,6 +290,12 @@ function parseArgs() {
       // Use the tatr-style per-entry git-backed dashboard store for THIS session
       // (isolated spike; see docs/adr/0001). Same as BUKOWSKI_WITH_TATR=1.
       result.withTatr = true;
+    } else if (arg === '--with-tatr-bridge') {
+      // Phase-3 bridged mode: operate the SHARED legacy dashboard (interop with
+      // legacy peers) plus a per-entry git mirror. Same as BUKOWSKI_WITH_TATR=1
+      // BUKOWSKI_TATR_MODE=bridge.
+      result.withTatr = true;
+      result.tatrBridge = true;
     } else if (arg === '--help' || arg === '-h') {
       console.log(`bukowski - multi-agent terminal
 
@@ -305,8 +312,10 @@ Options:
                            terminals (ConnectBot) don't crash on astral/ZWJ
                            emoji. Same as BUKOWSKI_BMP_ONLY=1.
       --with-tatr          Use the tatr-style per-entry git-backed dashboard
-                           store for this session (spike). Same as
+                           store for this session (isolated). Same as
                            BUKOWSKI_WITH_TATR=1.
+      --with-tatr-bridge   Bridged: shared legacy dashboard (interop with legacy
+                           peers) plus a per-entry git mirror.
   -h, --help               Show this help
 
 Session Commands (in normal mode, type :):

@@ -190,4 +190,37 @@ class TatrStore extends DashboardStore {
   }
 }
 
-module.exports = { TatrStore, _internals: { serializeTask, parseTask } };
+// ─── Bridged store (Phase 3: interop with legacy peers) ─────────────────────
+//
+// The primary store is the SHARED legacy dashboard (~/.bukowski/dashboard) — so
+// same-box legacy (JsonMarkdown) peers see this session's writes natively via
+// the shared filesystem + per-op re-read, and this session sees theirs. On top,
+// every mutation is mirrored to an isolated per-entry git-backed TatrStore at
+// ~/.bukowski/dashboard-tatr, so the git history / future-federation form is
+// maintained alongside. Ownership is advisory here too, so a bridged session
+// can write an owner-offline entry (todo-50) INTO the shared store that legacy
+// peers then read — the deadlock fix reaches the shared board, not just tatr.
+//
+// This is the migration bridge: interop now, tatr-primary later (Phase 4).
+class BridgedTatrStore extends DashboardStore {
+  constructor(opts = {}) {
+    super(opts); // root defaults to the SHARED ~/.bukowski/dashboard (interop bus)
+    // Private write-only mirror in the isolated tatr root.
+    this._mirror = new TatrStore({ root: opts.mirrorRoot });
+  }
+
+  // Advisory ownership on the shared store: no host-residency write-gate, so an
+  // owner-offline entry can be curated and legacy peers just read the result.
+  _sameResidency() { return true; }
+
+  _persistProject(p) {
+    super._persistProject(p); // shared legacy dir → legacy peers interop
+    try {
+      // Mirror the same project state into the isolated per-entry git store.
+      this._mirror.projects.set(p.id, p);
+      this._mirror._persistProject(p);
+    } catch { /* mirror is best-effort; never block the primary write */ }
+  }
+}
+
+module.exports = { TatrStore, BridgedTatrStore, _internals: { serializeTask, parseTask } };
