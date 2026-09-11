@@ -210,7 +210,7 @@ function parseRoadmap(text) {
 class DashboardStore {
   /** @param {object} [opts] - { root } override (tests); defaults to ~/.bukowski/dashboard */
   constructor(opts = {}) {
-    this.root = opts.root || path.join(os.homedir(), '.bukowski', 'dashboard');
+    this.root = opts.root || process.env.BUKOWSKI_DASHBOARD_ROOT || path.join(os.homedir(), '.bukowski', 'dashboard');
     this.curator = opts.curator || process.env.BUKOWSKI_DASHBOARD_CURATOR_ID || DEFAULT_CURATOR;
     this.projects = new Map(); // id -> Project
     fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
