@@ -610,8 +610,17 @@ terminal.registerSignalHandlers();
   let dashboardStore = null;
   if (process.env.BUKOWSKI_NO_DASHBOARD !== '1') {
     try {
-      const { DashboardStore } = require('./src/dashboard/DashboardStore');
-      dashboardStore = new DashboardStore();
+      const useTatr = cliArgs.withTatr || process.env.BUKOWSKI_WITH_TATR === '1';
+      if (useTatr) {
+        // Per-session opt-in: tatr-style per-entry git-backed store (spike,
+        // isolated mode). See docs/adr/0001-tatr-backed-dashboard-store.md.
+        const { TatrStore } = require('./src/dashboard/TatrStore');
+        dashboardStore = new TatrStore();
+        console.error('[dashboard] backend: tatr (per-entry, git-backed)');
+      } else {
+        const { DashboardStore } = require('./src/dashboard/DashboardStore');
+        dashboardStore = new DashboardStore();
+      }
     } catch (err) {
       console.error('[dashboard] disabled:', err.message);
     }

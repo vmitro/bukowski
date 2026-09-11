@@ -250,6 +250,7 @@ function parseArgs() {
     single: false,
     join: null,
     ugly: false,
+    withTatr: false,
     agentArgs: []
   };
 
@@ -284,6 +285,10 @@ function parseArgs() {
       // placeholders so old emulators (ConnectBot on Android) don't crash their
       // VT parser on Claude's astral/ZWJ emoji. Same as BUKOWSKI_BMP_ONLY=1.
       result.ugly = true;
+    } else if (arg === '--with-tatr') {
+      // Use the tatr-style per-entry git-backed dashboard store for THIS session
+      // (isolated spike; see docs/adr/0001). Same as BUKOWSKI_WITH_TATR=1.
+      result.withTatr = true;
     } else if (arg === '--help' || arg === '-h') {
       console.log(`bukowski - multi-agent terminal
 
@@ -299,6 +304,9 @@ Options:
       --ugly               BMP-safe rendering: collapse emoji to "··" so old
                            terminals (ConnectBot) don't crash on astral/ZWJ
                            emoji. Same as BUKOWSKI_BMP_ONLY=1.
+      --with-tatr          Use the tatr-style per-entry git-backed dashboard
+                           store for this session (spike). Same as
+                           BUKOWSKI_WITH_TATR=1.
   -h, --help               Show this help
 
 Session Commands (in normal mode, type :):
