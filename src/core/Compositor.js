@@ -323,9 +323,15 @@ class Compositor {
         this.followTail.set(paneId, true);
       } else {
         // Was scrolled up → preserve position (clamped to valid range)
-        const newScrollY = Math.min(cached.scrollY, newMaxScroll);
-        this.scrollOffsets.set(paneId, Math.max(0, newScrollY));
-        this.followTail.set(paneId, false);
+        const newScrollY = Math.max(0, Math.min(cached.scrollY, newMaxScroll));
+        this.scrollOffsets.set(paneId, newScrollY);
+        // followTail must agree with where we ACTUALLY landed, not with the intent
+        // we cached. When a pane GROWS (toggle zoom, or focus_next/prev while
+        // zoomed — focusHandlers calls onHandleResize) maxScroll shrinks, so this
+        // clamp can drop us exactly at the new bottom. Forcing false there left the
+        // pane reading BOT/100% while new output never scrolled into view.
+        // maxScroll === 0 (content fits) also counts as "at the tail".
+        this.followTail.set(paneId, newScrollY >= newMaxScroll);
       }
     }
 
