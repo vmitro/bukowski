@@ -1,5 +1,6 @@
 // src/core/Agent.js - Agent class with PTY and terminal
 
+const fs = require('fs');
 const pty = require('node-pty');
 const { Terminal } = require('@xterm/headless');
 const { SerializeAddon } = require('@xterm/addon-serialize');
@@ -7,11 +8,18 @@ const { SerializeAddon } = require('@xterm/addon-serialize');
 const UUID_RE = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
 // Patterns agents print when they display their own resume command — most reliable
 // source of session ID, beats filesystem mtime guessing.
+// NOTE: deliberately NO `codex` entry. Codex never prints a per-session resume id
+// ("run codex resume, then select" — an interactive picker), so a scrape cannot tell
+// WHICH session is this agent's. A loose /\bresume.*UUID/ latched onto whatever UUID
+// was nearby, which in a multi-pane fleet was ANOTHER pane's session id — every codex
+// agent then saved the same id and restored onto someone else's conversation.
+// Codex is resolved authoritatively from /proc instead: see resolveCodexSessionId().
 const SESSION_ID_PATTERNS = {
   claude: new RegExp(`--resume[^0-9a-f]*${UUID_RE}`, 'i'),
-  codex: new RegExp(`\\bresume[^0-9a-f]*${UUID_RE}`, 'i'),
   gemini: new RegExp(`-r[^0-9a-f]*${UUID_RE}`, 'i')
 };
+// codex writes its transcript to ~/.codex/sessions/**/rollout-<ISO-ts>-<uuid>.jsonl
+const ROLLOUT_RE = new RegExp(`rollout-(\\d{4}-\\d{2}-\\d{2}T[\\d-]+)-${UUID_RE}\\.jsonl$`, 'i');
 const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
 
 class Agent {
@@ -132,6 +140,49 @@ class Agent {
       this.agentSessionId = match[1];
       this.sessionIdCaptured = true;
     }
+  }
+
+  // Authoritative per-agent session id for codex. The live codex process keeps its
+  // own rollout jsonl open, so the kernel already knows which session is whose —
+  // read it out of /proc/<pid>/fd rather than guessing from output or mtime.
+  // Walks the pty's descendants because the rollout handle lives on the native
+  // codex binary, not the node wrapper that the pty spawns.
+  // Linux-only; returns null anywhere else (caller keeps whatever it had).
+  resolveCodexSessionId() {
+    if (this.type !== 'codex') return null;
+    const rootPid = this.pty && this.pty.pid;
+    if (!rootPid) return null;
+
+    const pids = [];
+    const seen = new Set();
+    const walk = (pid, depth) => {
+      if (depth > 6 || seen.has(pid)) return;
+      seen.add(pid);
+      pids.push(pid);
+      let kids = '';
+      try {
+        for (const tid of fs.readdirSync(`/proc/${pid}/task`)) {
+          kids += ' ' + fs.readFileSync(`/proc/${pid}/task/${tid}/children`, 'utf-8');
+        }
+      } catch { return; }
+      for (const k of kids.split(/\s+/).filter(Boolean)) walk(Number(k), depth + 1);
+    };
+    walk(rootPid, 0);
+
+    // One process can hold several rollout handles (stale ones from earlier
+    // sessions). The live session is the newest by the timestamp in the filename.
+    let best = null;
+    for (const pid of pids) {
+      let fds;
+      try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { continue; }
+      for (const fd of fds) {
+        let target;
+        try { target = fs.readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { continue; }
+        const m = target.match(ROLLOUT_RE);
+        if (m && (!best || m[1] > best.ts)) best = { ts: m[1], uuid: m[2] };
+      }
+    }
+    return best ? best.uuid : null;
   }
 
   resize(cols, rows) {

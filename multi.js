@@ -1715,6 +1715,18 @@ terminal.registerSignalHandlers();
     const agents = session.getAllAgents().sort((a, b) => (a.spawnedAt || 0) - (b.spawnedAt || 0));
 
     for (const agent of agents) {
+      // Codex can't be scraped (it prints no per-session resume id) and must not be
+      // mtime-guessed either — with several codex panes, both land on the same
+      // session and one agent restores onto the other's conversation. Ask the kernel
+      // which rollout file THIS agent's process holds open.
+      if (agent.type === 'codex' && typeof agent.resolveCodexSessionId === 'function') {
+        const codexId = agent.resolveCodexSessionId();
+        if (codexId && !assignedIds.has(codexId)) {
+          agent.agentSessionId = codexId;
+          agent.sessionIdCaptured = true;
+        }
+      }
+
       // PTY-scraped IDs (from "claude --resume <UUID>" printed at exit) are authoritative
       if (agent.sessionIdCaptured && agent.agentSessionId) {
         assignedIds.add(agent.agentSessionId);
