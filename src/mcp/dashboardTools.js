@@ -65,6 +65,11 @@ const DASHBOARD_TOOLS = [
     inputSchema: { type: 'object', required: ['projectId', 'to'], properties: { projectId: { type: 'string' }, to: { type: 'string', description: 'new curator (lead) agent id' } } },
   },
   {
+    name: 'dashboard_transfer_entry',
+    description: 'Hand an entry to another repo, and with it its owner. An entry\'s owner is derived from its repo when created and cannot be changed by dashboard_set_entry. Callable by agents resident on the CURRENT owner\'s host (giving it away), by the project curator, or by the user — the curator route is the exit when the owner\'s seat is offline.',
+    inputSchema: { type: 'object', required: ['projectId', 'entryId', 'toRepo'], properties: { projectId: { type: 'string' }, entryId: { type: 'string' }, toRepo: { type: 'string', description: 'repo to move the entry to; must be mapped into the project. Its owner becomes the entry\'s owner' } } },
+  },
+  {
     name: 'dashboard_open_election',
     description: 'Open a curator election when the current curator is OFFLINE (unreachable in the federation roster) and no authority is around to transfer the lead. Candidates = currently-online participants. Rejected if the curator is reachable (transfer instead).',
     inputSchema: { type: 'object', required: ['projectId'], properties: { projectId: { type: 'string' } } },

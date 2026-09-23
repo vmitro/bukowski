@@ -837,6 +837,16 @@ class MCPServer extends EventEmitter {
         this._signalDashboardChange(r.projectId, { op: 'transfer-curator', rev: r.rev, by: callerAgentId });
         return r;
       }
+      case 'dashboard_transfer_entry': {
+        requireString('projectId'); requireString('entryId'); requireString('toRepo');
+        const r = this._dash().transferEntry(callerAgentId, args, { ts: Date.now() });
+        // A no-op transfer persisted nothing and bumped no rev; signalling it
+        // would wake every stakeholder to report that nothing happened.
+        if (!r.unchanged) {
+          this._signalDashboardChange(r.projectId, { op: 'transfer-entry', entryId: r.entryId, rev: r.rev, by: callerAgentId });
+        }
+        return r;
+      }
       case 'dashboard_open_election': {
         requireString('projectId');
         const m = this._dash().meta(args.projectId);
@@ -1039,7 +1049,8 @@ class MCPServer extends EventEmitter {
       // claude-meddaemon-1 closed bug-1 (rev 7)".
       const VERBS = {
         create: 'added', update: 'updated', close: 'closed', comment: 'commented on',
-        promote: 'promoted', link: 'linked', 'create-project': 'created project',
+        promote: 'promoted', link: 'linked', 'transfer-entry': 'reassigned',
+        'create-project': 'created project',
         'set-goal': 'set the goal of', 'map-repos': 'remapped',
         'set-roadmap': 'updated the roadmap of', 'transfer-curator': 'transferred the lead of',
         'open-election': 'opened a curator election for', vote: 'voted in the election for',

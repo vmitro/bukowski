@@ -763,6 +763,49 @@ class DashboardStore {
     return { ok: true, op: 'promote', projectId: p.id, entryId: entry.id, from: oldId, rev: p.rev };
   }
 
+  /**
+   * Reassign an entry to another repo, and with it the owner. An entry's owner
+   * is DERIVED from its repo at create time and was previously unreachable
+   * afterwards — no argument set it, and the setEntry update branch never
+   * wrote owner or repo. Work that moved between boxes therefore kept
+   * notifying, and gating against, whoever happened to own the repo it was
+   * filed under. This is the missing transfer path.
+   *
+   * Authorized by the GIVING side (residents of the current owner's host), or
+   * by the project curator, or the user. The curator route matters: when the
+   * owner's seat is offline nobody on its host can hand the entry over, which
+   * is the owner-offline deadlock (tip-7) with no clean exit.
+   */
+  transferEntry(caller, args, ctx = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    const { entry, category } = this._findEntry(p, args.entryId);
+    const toRepo = String(args.toRepo || '').trim();
+    if (!toRepo) throw derr('BAD_KEY', 'toRepo required');
+    const newOwner = this._ownerForRepo(p, toRepo); // validates the repo is mapped
+    if (!this._sameResidency(caller, entry.owner) && caller !== p.curator && caller !== 'user') {
+      throw derr('NOT_RESPONSIBLE',
+        `only agents resident on ${entry.owner}'s host, the curator (${p.curator}), or the user may transfer ${entry.id}`,
+        { caller, owner: entry.owner });
+    }
+    // A transfer that changes nothing must not bump rev or broadcast — that is
+    // the remove-participant failure mode (bug-13), where a no-op woke every
+    // participant with a notice naming no subject.
+    if (entry.repo === toRepo && entry.owner === newOwner) {
+      return { ok: true, op: 'transfer-entry', projectId: p.id, entryId: entry.id,
+        repo: entry.repo, owner: entry.owner, unchanged: true, rev: p.rev };
+    }
+    const before = `${entry.repo}/${entry.owner}`;
+    entry.repo = toRepo;
+    entry.owner = newOwner;
+    const ts = ctx.ts || Date.now();
+    entry.ts = ts;
+    this._mutate(p, { ts, actor: caller, op: 'transfer-entry', category, entry_id: entry.id,
+      before, after: `${toRepo}/${newOwner}` }, ctx);
+    return { ok: true, op: 'transfer-entry', projectId: p.id, entryId: entry.id,
+      repo: toRepo, owner: newOwner, unchanged: false, rev: p.rev };
+  }
+
   linkBlockedOn(caller, args, ctx = {}) {
     caller = this._federate(caller);
     const p = this._project(args.projectId);
