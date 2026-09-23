@@ -646,9 +646,22 @@ class DashboardStore {
     const tags = args.tags == null ? undefined
       : (Array.isArray(args.tags) ? args.tags : String(args.tags).split(','))
         .map((t) => String(t).trim().toLowerCase()).filter(Boolean);
-    const owner = this._ownerForRepo(p, args.repo);
+    // Authorize against the ENTRY being written, never against the repo the
+    // caller named. On an update those differ, and trusting args.repo inverted
+    // the gate outright: declaring a repo you own let you rewrite a stranger's
+    // entry, while declaring the entry's true repo got you refused. close/
+    // promote/link have always keyed off entry.owner; this is setEntry catching
+    // up. On a create there is no entry yet, so the named repo IS the subject.
+    const owner = entry ? entry.owner : this._ownerForRepo(p, args.repo);
     if (!this._sameResidency(caller, owner) && caller !== 'user') {
-      throw derr('NOT_RESPONSIBLE', `only agents resident on ${owner}'s host (owner of ${args.repo}) may write this entry; FIPA them a request instead`, { caller, owner });
+      const subject = entry ? `${entry.id} (owned by ${owner} on repo ${entry.repo})` : `this entry`;
+      throw derr('NOT_RESPONSIBLE', `only agents resident on ${owner}'s host may write ${subject}; FIPA them a request instead`, { caller, owner });
+    }
+    // A repo that disagrees with the stored one is a mistake, not a re-filing:
+    // an update never moved the entry, so the mismatch used to pass silently
+    // and authorize against the wrong host. Refusing it names the real route.
+    if (entry && args.repo && args.repo !== entry.repo) {
+      throw derr('NOT_RESPONSIBLE', `${entry.id} lives on repo ${entry.repo}, not ${args.repo}; pass its own repo, or hand it over with dashboard_transfer_entry`, { caller, owner, repo: entry.repo });
     }
     if (entry && args.ifRev != null && Number(args.ifRev) !== p.rev) {
       throw derr('CONFLICT', `stale write: ifRev=${args.ifRev} but project rev=${p.rev}`);

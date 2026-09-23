@@ -14,6 +14,7 @@ scripts=(
   "$here/03-federation.js"
   "$here/09-external-agent-federation.js"
   "$here/05-channels.js"
+  "$here/15-dashboard-entry-ownership.js"
   "$here/06-dashboard-store.js"
   "$here/07-dashboard.js"
   "$here/08-dashboard-pane.js"
