@@ -48,6 +48,7 @@ function serializeTask(e, category) {
   if (e.causal_parent) fm.push(`causal_parent: ${e.causal_parent}`);
   if (e.tags && e.tags.length) fm.push(`tags: ${e.tags.join(', ')}`);
   fm.push(`ts: ${e.ts}`);
+  if (e.rev) fm.push(`rev: ${e.rev}`);
   let s = `---\n${fm.join('\n')}\n---\n\n# ${e.oneliner}\n`;
   if (e.body) s += `\n${e.body}\n`;
   return s;
@@ -84,6 +85,7 @@ function parseTask(text) {
     tags: list(fm.tags),
     body,
     ts: fm.ts ? Number(fm.ts) : Date.now(),
+    rev: fm.rev ? Number(fm.rev) : 0,
     owner: fm.owner || null,
     priority: fm.priority != null ? Number(fm.priority) : 0,
   };

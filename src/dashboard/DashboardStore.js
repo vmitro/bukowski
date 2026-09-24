@@ -82,6 +82,7 @@ function serializeEntry(e) {
   if (e.repo) s += `  ::repo ${e.repo}`;
   if (e.tags && e.tags.length) s += `  ::tags ${e.tags.join(',')}`;
   s += `  ::ts ${e.ts}`;
+  if (e.rev) s += `  ::rev ${e.rev}`;
   s += `  ::owner ${e.owner}`;
   if (e.body) {
     for (const line of String(e.body).split('\n')) s += `\n${BODY_INDENT}${line}`;
@@ -97,7 +98,7 @@ function parseEntryLine(line) {
   if (!m) return null;
   const e = {
     id: m[1], status: m[2], oneliner: m[3].trim(),
-    refs: [], links: [], causal_parent: null, repo: null, tags: [], body: null, ts: null, owner: null,
+    refs: [], links: [], causal_parent: null, repo: null, tags: [], body: null, ts: null, rev: 0, owner: null,
   };
   for (const seg of segPart.split('  ::').map((s) => s.trim()).filter(Boolean)) {
     const sp = seg.indexOf(' ');
@@ -109,6 +110,7 @@ function parseEntryLine(line) {
     else if (key === 'repo') e.repo = val || null;
     else if (key === 'tags') e.tags = val.split(',').map((x) => x.trim()).filter(Boolean);
     else if (key === 'ts') e.ts = Number(val);
+    else if (key === 'rev') e.rev = Number(val) || 0;
     else if (key === 'owner') e.owner = val || null;
   }
   return e;
@@ -507,6 +509,16 @@ class DashboardStore {
 
   _mutate(p, rec, ctx) {
     p.rev += 1;
+    // Stamp the rev this change landed at onto the entry itself. digest's
+    // sinceRev delta needs a rev to compare against and had none, so it
+    // compared entry.ts — a ms epoch — against a rev int, which no plausible
+    // rev ever exceeds, and the "delta" was silently the whole board. Every
+    // change notice suggests sinceRev, so that miss was fleet-wide.
+    // Category is the entry's home AFTER the op (promote passes its target).
+    if (rec.entry_id && rec.category) {
+      const moved = (p.categories[rec.category] || []).find((e) => e.id === rec.entry_id);
+      if (moved) moved.rev = p.rev;
+    }
     this._persistProject(p);
     this._appendAudit(p, {
       ts: rec.ts,
@@ -1041,7 +1053,7 @@ class DashboardStore {
       lines.push('', '## roadmap', serializeRoadmap(p.name, p.roadmap).split('\n').slice(2).join('\n').trimEnd());
     }
     for (const cat of cats) {
-      const entries = (p.categories[cat] || []).filter((e) => !sinceRev || (e.ts || 0) > sinceRev);
+      const entries = (p.categories[cat] || []).filter((e) => !sinceRev || (e.rev || 0) > sinceRev);
       if (!entries.length) continue;
       lines.push('', `## ${cat}`);
       for (const e of entries) {
