@@ -824,6 +824,7 @@ class ChatAgent extends EventEmitter {
     //   @swarm — local + every federated peer agent
     const isLocalBroadcast = this.targetAgent === '@chat';
     const isSwarmBroadcast = this.targetAgent === '@swarm';
+    const isBroadcast = isLocalBroadcast || isSwarmBroadcast;
     let targets;
     if (isLocalBroadcast) {
       targets = this._getAvailableAgents()
@@ -835,7 +836,15 @@ class ChatAgent extends EventEmitter {
       targets = [this.targetAgent];
     }
 
-    if (targets.length === 0) return;
+    // A broadcast with nobody to broadcast TO used to return silently, so the
+    // send rendered as if it had gone out. Say so instead: this is exactly what
+    // a stale roster looks like from the chat pane.
+    if (targets.length === 0) {
+      this.addErrorMessage(isBroadcast
+        ? `no reachable agents for ${this.targetAgent} — nothing sent`
+        : `${this.targetAgent} is not reachable — nothing sent`);
+      return;
+    }
 
     // For broadcasts (@chat / @swarm) issue ONE multi-receiver FIPA
     // message instead of N separate ones. That way the chat pane shows
@@ -843,7 +852,6 @@ class ChatAgent extends EventEmitter {
     // of the same body. Each receiver still gets its own IPC delivery
     // and PTY nudge via FIPAHub.send's multi-recipient path. For
     // single-recipient sends `dest` is just the id string.
-    const isBroadcast = isLocalBroadcast || isSwarmBroadcast;
     const dest = isBroadcast ? targets : targets[0];
     // Iterate exactly once per send call. The previous code looped over
     // every target even for broadcasts; with array-receiver support

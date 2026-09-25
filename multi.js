@@ -912,13 +912,21 @@ terminal.registerSignalHandlers();
         // IPCHub's own routability check so the roster only lists what routes.
         .filter(a => ipcHub.isAgentConnected(a.id))
         .map(a => ({ id: a.id, name: a.name, type: a.type, source: 'session' }));
+      // Same liveness rule as the local half above, which had it and this
+      // half did not: an entry stays in remoteAgents until a delta or a link
+      // teardown removes it, so a peer that went away leaves ids that render
+      // as addressable and silently swallow every @swarm broadcast.
       const federated = federationHub?.remoteAgents
-        ? Array.from(federationHub.remoteAgents.entries()).map(([fid, info]) => ({
-            id: fid,
-            name: fid,
-            type: info.type,
-            source: 'federated'
-          }))
+        ? Array.from(federationHub.remoteAgents.entries())
+            .filter(([fid]) => (typeof federationHub.isRemoteReachable === 'function'
+              ? federationHub.isRemoteReachable(fid)
+              : true))
+            .map(([fid, info]) => ({
+              id: fid,
+              name: fid,
+              type: info.type,
+              source: 'federated'
+            }))
         : [];
       return [...local, ...federated];
     }

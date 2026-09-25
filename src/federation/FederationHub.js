@@ -809,6 +809,14 @@ class FederationHub extends EventEmitter {
   _ingestPeerRoster(peerHost, agents, peerMachineHost) {
     if (!Array.isArray(agents)) return;
     const origin = { host: peerHost, machineHost: peerMachineHost || peerHost };
+    // A hello snapshot is the peer's CURRENT roster, so it is authoritative
+    // about that peer's own agents — not merely additive, which is all this
+    // used to be. Without the reconcile below, an agent the peer no longer
+    // runs survived every reconnect: the link never tore down (so
+    // _purgePeerRoster never ran) and nothing else could evict it. That is the
+    // orphaned-id half of the stale-roster bug — @swarm kept fanning out to
+    // ids that had not existed for hours.
+    this._reconcilePeerOwnRoster(peerHost, agents, origin);
     for (const entry of agents) {
       if (!entry || !entry.federatedId || !entry.localId) continue;
       const changed = this._recordRemote(entry.federatedId, {
@@ -849,6 +857,39 @@ class FederationHub extends EventEmitter {
     if (existing && oldLen <= newLen) return false;
     this.remoteAgents.set(federatedId, entry);
     return true;
+  }
+
+  /**
+   * Drop agents we attribute to a direct peer's OWN roster that its latest
+   * hello no longer lists, and propagate the removals. Scoped to `info.via ===
+   * info.peerHost === peerHost`: agents merely RELAYED by this peer (learned
+   * as roster deltas, origin elsewhere) are not in its hello snapshot and must
+   * survive — only the peer's own locals are being restated here.
+   */
+  _reconcilePeerOwnRoster(peerHost, agents, origin) {
+    const live = new Set(agents.map((e) => e && e.federatedId).filter(Boolean));
+    for (const [fid, info] of Array.from(this.remoteAgents.entries())) {
+      if (info.via !== peerHost || info.peerHost !== peerHost) continue;
+      if (live.has(fid)) continue;
+      this.remoteAgents.delete(fid);
+      this._fanRosterDelta({
+        op: 'remove',
+        agent: { federatedId: fid, localId: info.localTargetId, type: info.type },
+        origin,
+        path: [this.host],
+      }, peerHost);
+    }
+  }
+
+  /**
+   * Is a federated id still routable? An entry is only as live as the
+   * neighbour we reach it through, and remoteAgents outlives that link by
+   * design (deltas are async). Callers that ADDRESS agents — roster snapshots,
+   * broadcast fan-out — must check; callers that merely route may not.
+   */
+  isRemoteReachable(federatedId) {
+    const info = this.remoteAgents.get(federatedId);
+    return !!info && this.peers.has(info.via);
   }
 
   // A neighbour link dropped: purge everything we learned THROUGH it (keyed by

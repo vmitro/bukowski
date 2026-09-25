@@ -13,6 +13,7 @@ scripts=(
   "$here/17-tab-keys.js"
   "$here/10-local-alias-fipa.js"
   "$here/11-events.js"
+  "$here/19-stale-federated-roster.js"
   "$here/03-federation.js"
   "$here/09-external-agent-federation.js"
   "$here/05-channels.js"
