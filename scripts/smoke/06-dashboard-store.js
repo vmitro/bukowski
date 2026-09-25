@@ -386,10 +386,27 @@ assert(storeG.projects.get(PPID).participants.includes('codex-azra-agent-1'), 'g
 const rm = store.removeParticipant('claude-meddaemon-1', { projectId: PPID, agentId: 'codex-azra-agent-1' }, { ts: ts++ });
 assert(rm.ok && rm.stillParticipantViaRepo === false, 'remove revokes the grant; codex not derived');
 expectErr('NOT_RESPONSIBLE', () => store.commentEntry('codex-azra-agent-1', { projectId: PPID, entryId: aEntry.entryId, text: 'after remove' }, { ts: ts++ }));
-// precedence: removing a DERIVED owner via remove_participant does NOT drop it
-const rmDerived = store.removeParticipant('claude-meddaemon-1', { projectId: PPID, agentId: 'claude-azra-agent-1' }, { ts: ts++ });
-assert(rmDerived.stillParticipantViaRepo === true, 'remove_participant cannot drop a repo-derived participant (use map_repos)');
-assert(store.projects.get(PPID).participants.includes('claude-azra-agent-1'), 'derived owner remains a participant after a no-op direct remove');
+// precedence: removing a DERIVED owner via remove_participant does NOT drop it.
+// It used to report success, bump the rev and broadcast while changing nothing
+// (bug-13); it is now refused, naming map_repos as the route that works.
+const revBeforeRm = store.projects.get(PPID).rev;
+expectErr('DERIVED_PARTICIPANT', () => store.removeParticipant('claude-meddaemon-1', { projectId: PPID, agentId: 'claude-azra-agent-1' }, { ts: ts++ }));
+assert(store.projects.get(PPID).participants.includes('claude-azra-agent-1'), 'derived owner remains a participant after a refused direct remove');
+assert(store.projects.get(PPID).rev === revBeforeRm, 'a refused remove does not bump the rev');
+// removing someone who is neither granted nor derived is a silent no-op
+const rmNone = store.removeParticipant('claude-meddaemon-1', { projectId: PPID, agentId: 'claude-nowhere-1' }, { ts: ts++ });
+assert(rmNone.ok && rmNone.unchanged === true, 'removing a non-participant reports unchanged');
+assert(store.projects.get(PPID).rev === revBeforeRm, 'a no-op remove does not bump the rev');
+// re-granting an existing grant is likewise a no-op
+store.addParticipant('claude-meddaemon-1', { projectId: PPID, agentId: 'codex-azra-agent-1' }, { ts: ts++ });
+const revAfterGrant = store.projects.get(PPID).rev;
+const reAdd = store.addParticipant('claude-meddaemon-1', { projectId: PPID, agentId: 'codex-azra-agent-1' }, { ts: ts++ });
+assert(reAdd.unchanged === true, 're-granting an existing grant reports unchanged');
+assert(store.projects.get(PPID).rev === revAfterGrant, 'a no-op grant does not bump the rev');
+// handing the lead to the agent that already holds it is a no-op too
+const curNow = store.projects.get(PPID).curator;
+const reCur = store.transferCurator(curNow, { projectId: PPID, to: curNow }, { ts: ts++ });
+assert(reCur.unchanged === true && store.projects.get(PPID).rev === revAfterGrant, 'a self-transfer of the lead changes nothing');
 console.log('OK: direct participant grants — unblock co-tenant, survive remap+reload, remove revokes, derived owners protected');
 
 console.log('OK: dashboard-store smoke passed');

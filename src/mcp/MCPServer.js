@@ -816,13 +816,17 @@ class MCPServer extends EventEmitter {
       case 'dashboard_add_participant': {
         requireString('projectId'); requireString('agentId');
         const r = this._dash().addParticipant(callerAgentId, args, { ts: Date.now() });
-        this._signalDashboardChange(r.projectId, { op: 'add-participant', rev: r.rev, by: callerAgentId });
+        if (!r.unchanged) {
+          this._signalDashboardChange(r.projectId, { op: 'add-participant', subject: r.agentId, rev: r.rev, by: callerAgentId });
+        }
         return r;
       }
       case 'dashboard_remove_participant': {
         requireString('projectId'); requireString('agentId');
         const r = this._dash().removeParticipant(callerAgentId, args, { ts: Date.now() });
-        this._signalDashboardChange(r.projectId, { op: 'remove-participant', rev: r.rev, by: callerAgentId });
+        if (!r.unchanged) {
+          this._signalDashboardChange(r.projectId, { op: 'remove-participant', subject: r.agentId, rev: r.rev, by: callerAgentId });
+        }
         return r;
       }
       case 'dashboard_set_roadmap': {
@@ -834,7 +838,9 @@ class MCPServer extends EventEmitter {
       case 'dashboard_transfer_curator': {
         requireString('projectId'); requireString('to');
         const r = this._dash().transferCurator(callerAgentId, args, { ts: Date.now() });
-        this._signalDashboardChange(r.projectId, { op: 'transfer-curator', rev: r.rev, by: callerAgentId });
+        if (!r.unchanged) {
+          this._signalDashboardChange(r.projectId, { op: 'transfer-curator', subject: r.curator, rev: r.rev, by: callerAgentId });
+        }
         return r;
       }
       case 'dashboard_transfer_entry': {
@@ -1031,7 +1037,7 @@ class MCPServer extends EventEmitter {
     // the inform, and vice-versa.
     try {
       this.eventBus?.publish(`dashboard:${projectId}:entries`, {
-        op: info.op, entryId: info.entryId || null, rev: info.rev || null,
+        op: info.op, entryId: info.entryId || null, subject: info.subject || null, rev: info.rev || null,
       }, { actor: info.by, ts: Date.now() });
     } catch { /* advisory */ }
     try {
@@ -1055,15 +1061,22 @@ class MCPServer extends EventEmitter {
         'set-roadmap': 'updated the roadmap of', 'transfer-curator': 'transferred the lead of',
         'open-election': 'opened a curator election for', vote: 'voted in the election for',
         'elect-curator': 'elected the new curator of',
+        'add-participant': 'granted dashboard access to', 'remove-participant': 'revoked dashboard access from',
       };
       const verb = VERBS[info.op] || info.op;
-      const target = info.entryId || projectId;
+      // Participant and curator ops act ON an agent, and the line named only
+      // the project — "claude-a revoked dashboard access from bukowski" never
+      // said from whom. The store has always recorded the subject in the audit;
+      // the notice simply never carried it.
+      const SUBJECT_AS_TARGET = new Set(['add-participant', 'remove-participant']);
+      const target = (SUBJECT_AS_TARGET.has(info.op) && info.subject) || info.entryId || projectId;
+      const to = info.op === 'transfer-curator' && info.subject ? ` to ${info.subject}` : '';
       const since = Math.max(0, (info.rev || 1) - 1);
       // Attribute to the FEDERATED id (claude-<host>-N), not the local session
       // id (claude-1) — every agent is "claude-1" locally, so the raw caller is
       // ambiguous in a cross-agent feed.
       const by = (this.dashboardStore.federate ? this.dashboardStore.federate(info.by) : info.by) || info.by;
-      const summary = `[dashboard:${projectId}] ${by} ${verb} ${target} (rev ${info.rev}) — `
+      const summary = `[dashboard:${projectId}] ${by} ${verb} ${target}${to} (rev ${info.rev}) — `
         + `dashboard_digest{projectId:"${projectId}",sinceRev:${since}} for details`;
       this.fipaHub.inform(info.by || p.curator, recipients, summary, { ontology: 'bukowski-dashboard' });
     } catch { /* signal is advisory; delivery is guaranteed by the next pull */ }

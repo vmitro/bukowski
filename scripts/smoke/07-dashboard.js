@@ -197,6 +197,53 @@ buko.on('data', (d) => { bukoBuf += d.toString(); });
   if (!denied) fail('bob was allowed to write alice\'s repo (should be NOT_RESPONSIBLE)');
   console.log('governance: bob denied write to alice\'s repo (NOT_RESPONSIBLE)');
 
+  // 8b. Participant notices name the AGENT they act on, not just the project,
+  // and a grant that changes nothing sends nothing at all (bug-13).
+  const beforeGrant = bob.messages.length;
+  await call(alice, 'dashboard_add_participant', { projectId: 'judge-bench', agentId: 'claude-carol-1' });
+  const grantPing = await waitFor(
+    bob,
+    (m) => m.slice(beforeGrant).find((x) => x.method === 'notifications/claude/channel'
+      && (x.params?.content || '').includes('[dashboard:judge-bench]')
+      && (x.params?.content || '').includes('granted dashboard access to')),
+    4000,
+    'add-participant change-feed line on bob',
+  );
+  if (!(grantPing.params.content || '').includes('claude-carol-1')) {
+    fail('participant notice omits the agent it acted on', grantPing.params.content);
+  }
+  console.log('bob\'s grant line names the subject:', JSON.stringify((grantPing.params.content || '').split('\n').find((l) => l.includes('[dashboard:'))));
+
+  const beforeNoop = bob.messages.length;
+  const reGrant = await call(alice, 'dashboard_add_participant', { projectId: 'judge-bench', agentId: 'claude-carol-1' });
+  if (reGrant.unchanged !== true) fail('re-granting an existing grant should report unchanged', JSON.stringify(reGrant));
+  await sleep(600);
+  if (bob.messages.slice(beforeNoop).some((x) => (x.params?.content || '').includes('granted dashboard access to'))) {
+    fail('a no-op grant still broadcast a change-feed line');
+  }
+  console.log('no-op grant: unchanged:true, no rev bump, nothing broadcast');
+
+  const beforeRevoke = bob.messages.length;
+  await call(alice, 'dashboard_remove_participant', { projectId: 'judge-bench', agentId: 'claude-carol-1' });
+  const revokePing = await waitFor(
+    bob,
+    (m) => m.slice(beforeRevoke).find((x) => x.method === 'notifications/claude/channel'
+      && (x.params?.content || '').includes('revoked dashboard access from claude-carol-1')),
+    4000,
+    'remove-participant change-feed line on bob',
+  );
+  if (!revokePing) fail('revoke notice missing');
+  console.log('revoke line names the subject too');
+
+  // A repo-derived participant cannot be dropped this way; it used to succeed
+  // silently, bump the rev and broadcast.
+  let derivedRefused = false;
+  try {
+    await call(alice, 'dashboard_remove_participant', { projectId: 'judge-bench', agentId: 'claude-bob-1' });
+  } catch (e) { derivedRefused = e.code === 'DERIVED_PARTICIPANT'; }
+  if (!derivedRefused) fail('removing a repo-derived participant should be refused with DERIVED_PARTICIPANT');
+  console.log('derived participant: remove refused, names map_repos');
+
   // 9. On-disk Markdown is cat-able: one-liner + refs only, no bodies, <=80.
   const tasksMd = fs.readFileSync(path.join(FAKE_HOME, '.bukowski', 'dashboard', 'judge-bench', 'tasks.md'), 'utf-8');
   if (!tasksMd.includes('subscribeAwaitAck') || !tasksMd.includes('bob://sha/b57d25f')) {

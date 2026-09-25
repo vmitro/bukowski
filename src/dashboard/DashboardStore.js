@@ -447,10 +447,20 @@ class DashboardStore {
     if (!agentId) throw derr('BAD_KEY', 'agentId required');
     if (!p.grants) p.grants = [];
     const already = p.participants.includes(agentId);
-    if (!p.grants.includes(agentId)) p.grants.push(agentId);
+    // Keyed on the GRANT, not on participation: someone who participates only
+    // because they own a mapped repo still gains something from a direct grant
+    // — it survives a remap that drops the repo. Re-granting an existing grant
+    // changes nothing, and a write that changes nothing must not bump the rev
+    // or wake every participant to announce it.
+    if (p.grants.includes(agentId)) {
+      return { ok: true, op: 'add-participant', projectId: p.id, agentId,
+        alreadyParticipant: already, unchanged: true, rev: p.rev };
+    }
+    p.grants.push(agentId);
     this._recomputeParticipants(p);
     this._mutate(p, { ts: ctx.ts || Date.now(), actor: caller, op: 'add-participant', after: agentId }, ctx);
-    return { ok: true, op: 'add-participant', projectId: p.id, agentId, alreadyParticipant: already, rev: p.rev };
+    return { ok: true, op: 'add-participant', projectId: p.id, agentId,
+      alreadyParticipant: already, unchanged: false, rev: p.rev };
   }
 
   removeParticipant(caller, args, ctx = {}) {
@@ -460,13 +470,26 @@ class DashboardStore {
     const agentId = this._federate(String(args.agentId || '').trim());
     if (!agentId) throw derr('BAD_KEY', 'agentId required');
     if (!p.grants) p.grants = [];
+    // remove revokes the DIRECT grant only; a repo-owner-derived participant
+    // stays. That used to happen SILENTLY, with a rev bump and a broadcast, so
+    // the curator saw a successful removal and the agent kept every notice.
+    // Refuse instead and name the route that actually works.
+    const derived = this._deriveParticipants(p).includes(agentId);
+    if (!p.grants.includes(agentId)) {
+      if (derived) {
+        throw derr('DERIVED_PARTICIPANT',
+          `${agentId} participates by owning a mapped repo, not by a grant; remap the repo with dashboard_map_repos to drop them`,
+          { caller, agentId });
+      }
+      // Not a participant at all: nothing to revoke, nothing to announce.
+      return { ok: true, op: 'remove-participant', projectId: p.id, agentId,
+        stillParticipantViaRepo: false, unchanged: true, rev: p.rev };
+    }
     p.grants = p.grants.filter((g) => g !== agentId);
     this._recomputeParticipants(p);
-    // remove revokes the DIRECT grant only; a repo-owner-derived participant
-    // stays (drop it via map_repos, not here). Surface which case happened.
-    const stillDerived = this._deriveParticipants(p).includes(agentId);
     this._mutate(p, { ts: ctx.ts || Date.now(), actor: caller, op: 'remove-participant', after: agentId }, ctx);
-    return { ok: true, op: 'remove-participant', projectId: p.id, agentId, stillParticipantViaRepo: stillDerived, rev: p.rev };
+    return { ok: true, op: 'remove-participant', projectId: p.id, agentId,
+      stillParticipantViaRepo: derived, unchanged: false, rev: p.rev };
   }
 
   _requireCurator(caller, p) {
@@ -867,9 +890,14 @@ class DashboardStore {
     const to = this._federate(String(args.to || '').trim());
     if (!to) throw derr('BAD_PROJECT', 'transfer target (to) required');
     const before = p.curator;
+    // Handing the lead to whoever already holds it is not a handover; it used
+    // to bump the rev and tell every participant the lead had changed.
+    if (to === before) {
+      return { ok: true, op: 'transfer-curator', projectId: p.id, curator: to, unchanged: true, rev: p.rev };
+    }
     p.curator = to;
     this._mutate(p, { ts: ctx.ts || Date.now(), actor: caller, op: 'transfer-curator', before, after: to }, ctx);
-    return { ok: true, op: 'transfer-curator', projectId: p.id, curator: to, rev: p.rev };
+    return { ok: true, op: 'transfer-curator', projectId: p.id, curator: to, unchanged: false, rev: p.rev };
   }
 
   // ── curator election (self-heal when the curator is offline) ──────────────
@@ -978,6 +1006,9 @@ class DashboardStore {
 
     if (!info.entryId || PROJECT_OPS.has(info.op)) {
       for (const a of p.participants) recip.add(a);
+      // A revoked agent has just left p.participants, so the one notice they
+      // most need — that their access is gone — was the one they never got.
+      if (info.op === 'remove-participant' && info.subject) recip.add(info.subject);
     } else {
       const X = allEntries.find((e) => e.id === info.entryId);
       if (!X) {
