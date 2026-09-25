@@ -216,10 +216,11 @@ class InputRouter {
       case 'H':
         return { action: 'show_help' };
 
-      // Session management
-      case 'S':
-        return { action: 'save_session' };
-
+      // Session management. 'S' is NOT free: the ACL send pair above claims
+      // s/S, and this switch takes the first match, so this case had been
+      // unreachable ever since — <C-Space>S has always sent an ACL request,
+      // never saved. Saving lives at :w (see the bootstrap help); rebinding it
+      // here would silently take a key users' fingers already know.
       case 'L':
         return { action: 'load_session' };
 
