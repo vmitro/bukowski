@@ -9,6 +9,7 @@ scripts=(
   "$here/01-require.sh"
   "$here/02-boot.js"
   "$here/14-scroll-follow-after-resize.js"
+  "$here/17-tab-keys.js"
   "$here/10-local-alias-fipa.js"
   "$here/11-events.js"
   "$here/03-federation.js"

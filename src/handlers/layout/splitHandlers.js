@@ -109,19 +109,19 @@ const splitHandlers = {
     ctx.onHandleResize();
   },
 
+  // Tab keys act on the TAB BAR, which lists agents — not on panes. Indexing
+  // panes made <C-Space>N a no-op for every agent past the pane count, and
+  // made ] / [ walk panes while the bar's highlight followed agents.
   switch_tab(ctx, result) {
-    const panes = ctx.layoutManager.getAllPanes();
-    if (result.index < panes.length) {
-      ctx.layoutManager.focusPane(panes[result.index].id);
-    }
+    if (ctx.layoutManager.showAgentAt(result.index) && ctx.layoutManager.isZoomed()) ctx.onHandleResize();
   },
 
   prev_tab(ctx, _result) {
-    ctx.layoutManager.cycleFocus(false);
+    if (ctx.layoutManager.cycleAgent(false) && ctx.layoutManager.isZoomed()) ctx.onHandleResize();
   },
 
   next_tab(ctx, _result) {
-    ctx.layoutManager.cycleFocus(true);
+    if (ctx.layoutManager.cycleAgent(true) && ctx.layoutManager.isZoomed()) ctx.onHandleResize();
   }
 };
 

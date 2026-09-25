@@ -406,12 +406,14 @@ class LayoutManager {
     const panes = this.zoomedPaneId && this.savedLayout
       ? this._getAllPanesUncached(this.savedLayout)
       : this.getAllPanes();
-    if (panes.length < 2) return;
+    // Reports whether it actually moved focus, so a caller with nowhere to
+    // cycle can do something else instead of leaving the key dead.
+    if (panes.length < 2) return false;
 
     const currentIdx = panes.findIndex(p => p.id === this.focusedPaneId);
     if (currentIdx === -1) {
       this.focusedPaneId = panes[0].id;
-      return;
+      return true;
     }
 
     const nextIdx = forward
@@ -424,6 +426,73 @@ class LayoutManager {
     if (this.zoomedPaneId) {
       this._rezoom(nextPane);
     }
+    return true;
+  }
+
+  /**
+   * Agent ids in tab-bar order. The bar renders session.getAllAgents(), so tab
+   * keys have to index the same list — they used to index PANES, which is why
+   * <C-Space>3 did nothing whenever there were more agents than panes, and why
+   * <C-Space>] cycled panes while the bar's highlight tracked agents.
+   */
+  tabAgentIds() {
+    return (this.session.getAllAgents ? this.session.getAllAgents() : []).map((a) => a.id);
+  }
+
+  /**
+   * Every live copy of a pane id. While zoomed, the visible pane is a DETACHED
+   * copy sharing the real pane's id (see _rezoom) and the real one sits in
+   * savedLayout; writing only the copy loses the change on unzoom.
+   */
+  _panesWithId(id) {
+    const out = [];
+    const visible = this.findPane(id);
+    if (visible) out.push(visible);
+    if (this.savedLayout) {
+      const saved = this._getAllPanesUncached(this.savedLayout).find((p) => p.id === id);
+      if (saved && saved !== visible) out.push(saved);
+    }
+    return out;
+  }
+
+  /**
+   * Put an agent on screen: focus the pane that already shows it, else point
+   * the focused pane at it. Returns false only when there is no pane at all.
+   */
+  showAgent(agentId) {
+    if (!agentId) return false;
+    if (this.zoomedPaneId && this.savedLayout) {
+      // Re-zoom onto the real owner rather than retargeting the zoom copy —
+      // otherwise unzooming leaves two panes showing the same agent.
+      const owner = this._getAllPanesUncached(this.savedLayout).find((p) => p.agentId === agentId);
+      if (owner) { this._rezoom(owner); return true; }
+    } else if (this.focusPaneByAgent(agentId)) {
+      return true;
+    }
+    const target = this.getFocusedPane() || this.getAllPanes()[0];
+    if (!target) return false;
+    for (const pane of this._panesWithId(target.id)) pane.agentId = agentId;
+    this.focusedPaneId = target.id;
+    this.invalidateCache(); // the agentId -> pane map just changed
+    return true;
+  }
+
+  /** Show the agent at a tab-bar index. */
+  showAgentAt(index) {
+    const ids = this.tabAgentIds();
+    return index >= 0 && index < ids.length ? this.showAgent(ids[index]) : false;
+  }
+
+  /** Step to the next/previous agent in tab-bar order. */
+  cycleAgent(forward = true) {
+    const ids = this.tabAgentIds();
+    if (ids.length < 2) return false;
+    const current = this.getFocusedPane()?.agentId;
+    const i = ids.indexOf(current);
+    const next = i === -1
+      ? ids[0]
+      : ids[(i + (forward ? 1 : -1) + ids.length) % ids.length];
+    return this.showAgent(next);
   }
 
   /**
