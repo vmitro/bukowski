@@ -489,13 +489,15 @@ const TOOLS = [
   },
   {
     name: 'fipa_agree',
-    description: 'Send an AGREE performative to accept a request',
+    description: 'Send an AGREE performative to accept a request. Pass `content` to say what you are agreeing to do — a bare agree reads as silence.',
     inputSchema: {
       type: 'object',
       required: ['to', 'conversationId'],
       properties: {
         to: { type: 'string', description: 'Target agent ID' },
-        conversationId: { type: 'string', description: 'The conversation ID to agree to' }
+        content: { type: 'string', description: 'What you are agreeing to, in your own words (optional but strongly preferred)' },
+        conversationId: { type: 'string', description: 'The conversation ID to agree to (required: an agree with no thread is an agree to nothing)' },
+        inReplyTo: { type: 'string', description: 'Message id this answers, to link the reply to the exact message' }
       }
     }
   },

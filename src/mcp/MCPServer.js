@@ -190,13 +190,15 @@ class MCPServer extends EventEmitter {
       },
       {
         name: 'fipa_agree',
-        description: 'Send an AGREE performative to accept a request',
+        description: 'Send an AGREE performative to accept a request. Pass `content` to say what you are agreeing to do — a bare agree reads as silence.',
         inputSchema: {
           type: 'object',
           required: ['to', 'conversationId'],
           properties: {
             to: { type: 'string', description: 'Target agent ID' },
-            conversationId: { type: 'string', description: 'The conversation ID to agree to' }
+            content: { type: 'string', description: 'What you are agreeing to, in your own words (optional but strongly preferred)' },
+            conversationId: { type: 'string', description: 'The conversation ID to agree to (required: an agree with no thread is an agree to nothing)' },
+            inReplyTo: { type: 'string', description: 'Message id this answers, to link the reply to the exact message' }
           }
         }
       },
@@ -631,22 +633,40 @@ class MCPServer extends EventEmitter {
       return v;
     };
 
+    // Accept snake_case spellings of the camelCase argument names. The schemas
+    // here are camelCase, but agents and codegen reach for snake_case
+    // constantly, and an unrecognized key was simply dropped in silence. For
+    // conversationId that silence was expensive: a reply passed as
+    // `conversation_id` threaded onto nothing, so _sendFipaMessage minted a
+    // fresh conversation and the answer surfaced to the peer as an unrelated
+    // new thread (claude-meddaemon-1 report, 2026-09-26).
+    const SNAKE_ALIASES = {
+      conversation_id: 'conversationId', in_reply_to: 'inReplyTo',
+      project_id: 'projectId', entry_id: 'entryId', to_repo: 'toRepo',
+      agent_id: 'agentId', to_category: 'toCategory', since_rev: 'sinceRev',
+    };
+    if (args && typeof args === 'object') {
+      for (const [snake, camel] of Object.entries(SNAKE_ALIASES)) {
+        if (args[snake] !== undefined && args[camel] === undefined) args[camel] = args[snake];
+      }
+    }
+
     switch (toolName) {
       case 'fipa_request':
         requireString('to');
-        return this._sendFipaMessage('request', callerAgentId, args.to, payload('action'), args.conversationId);
+        return this._sendFipaMessage('request', callerAgentId, args.to, payload('action'), args.conversationId, args.inReplyTo);
 
       case 'fipa_inform':
         requireString('to');
-        return this._sendFipaMessage('inform', callerAgentId, args.to, payload('content'), args.conversationId);
+        return this._sendFipaMessage('inform', callerAgentId, args.to, payload('content'), args.conversationId, args.inReplyTo);
 
       case 'fipa_query_if':
         requireString('to');
-        return this._sendFipaMessage('query-if', callerAgentId, args.to, payload('proposition'), args.conversationId);
+        return this._sendFipaMessage('query-if', callerAgentId, args.to, payload('proposition'), args.conversationId, args.inReplyTo);
 
       case 'fipa_query_ref':
         requireString('to');
-        return this._sendFipaMessage('query-ref', callerAgentId, args.to, payload('reference'), args.conversationId);
+        return this._sendFipaMessage('query-ref', callerAgentId, args.to, payload('reference'), args.conversationId, args.inReplyTo);
 
       case 'fipa_cfp': {
         const task = payload('task');
@@ -667,15 +687,23 @@ class MCPServer extends EventEmitter {
 
       case 'fipa_propose':
         requireString('to');
-        return this._sendFipaMessage('propose', callerAgentId, args.to, payload('proposal'), args.conversationId);
+        return this._sendFipaMessage('propose', callerAgentId, args.to, payload('proposal'), args.conversationId, args.inReplyTo);
 
       case 'fipa_agree':
         requireString('to');
-        return this._sendFipaMessage('agree', callerAgentId, args.to, null, args.conversationId);
+        // content was hardcoded null here, and the schema declared no content
+        // property at all — an agree could never carry text, so an acceptance
+        // reached its recipient as an empty message indistinguishable from
+        // silence. FIPAHub.agree has always taken optional confirmation
+        // content; only this layer withheld it.
+        requireString('conversationId'); // the schema has always declared it required
+        return this._sendFipaMessage('agree', callerAgentId, args.to,
+          typeof args.content === 'string' && args.content.length ? args.content : null,
+          args.conversationId, args.inReplyTo);
 
       case 'fipa_refuse':
         requireString('to');
-        return this._sendFipaMessage('refuse', callerAgentId, args.to, payload('reason'), args.conversationId);
+        return this._sendFipaMessage('refuse', callerAgentId, args.to, payload('reason'), args.conversationId, args.inReplyTo);
 
       case 'list_agents': {
         // Local session agents. `federatedId` is the name remote peers know
@@ -1086,7 +1114,7 @@ class MCPServer extends EventEmitter {
    * Send a FIPA message via FIPAHub
    * @private
    */
-  _sendFipaMessage(performative, from, to, content, conversationId = null) {
+  _sendFipaMessage(performative, from, to, content, conversationId = null, inReplyTo = null) {
     if (!this.fipaHub) {
       throw new Error('FIPA Hub not available');
     }
@@ -1116,7 +1144,10 @@ class MCPServer extends EventEmitter {
     // promise can't supply the conversationId, so mint one up front and
     // thread it through: the caller needs it to correlate the reply.
     if (!conversationId) conversationId = crypto.randomUUID();
-    const opts = { conversationId };
+    // inReplyTo was accepted by callers and read by nobody: FIPAMessage carries
+    // the field, but this layer never forwarded it, so a reply lost its link to
+    // the exact message it answered even when it landed on the right thread.
+    const opts = inReplyTo ? { conversationId, inReplyTo } : { conversationId };
     let result;
     switch (performative) {
       case 'request':
