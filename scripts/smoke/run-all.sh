@@ -11,6 +11,7 @@ scripts=(
   "$here/14-scroll-follow-after-resize.js"
   "$here/18-keymap.js"
   "$here/17-tab-keys.js"
+  "$here/22-pane-identity.js"
   "$here/21-list-agents-aliases.js"
   "$here/20-fipa-reply-tools.js"
   "$here/10-local-alias-fipa.js"

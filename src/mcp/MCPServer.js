@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { hostFromCwd } = require('../utils/host');
+const { resolvePaneAgent } = require('../utils/procTree');
 
 /**
  * MCPServer
@@ -409,14 +410,22 @@ class MCPServer extends EventEmitter {
         if (params?.agentId) {
           // Explicit session agent ID (from BUKOWSKI_AGENT_ID env)
           assignedId = params.agentId;
-        } else if (params?.ancestorPids?.length) {
-          // Try to match ancestor PIDs to a session agent's PTY PID
-          const ancestorSet = new Set(params.ancestorPids);
-          const sessionAgent = this.session.getAllAgents().find(
-            a => a.pty && ancestorSet.has(a.pty.pid)
-          );
-          if (sessionAgent) {
-            assignedId = sessionAgent.id;
+        } else if (params?.pid || params?.ancestorPids?.length) {
+          // Match this connection to the pane it runs inside. The walk is done
+          // HERE, from /proc, rather than trusting the ancestor list the client
+          // computed: the client's own walk started above its pid, stopped at
+          // the first unreadable entry and capped at depth 10, so it missed
+          // often — and a miss fell through to cwd naming, giving one process a
+          // second unrelated identity (bug-16). Containment is the only
+          // evidence accepted: a shared session or terminal would absorb an
+          // unrelated REPL sitting in the same shell into the pane.
+          const hit = resolvePaneAgent(this.session.getAllAgents(), {
+            pid: params.pid,
+            claimedPids: params.ancestorPids,
+          });
+          if (hit) {
+            assignedId = hit.agent.id;
+            this.emit('agent:pane_matched', { agentId: hit.agent.id, via: hit.via });
           }
         }
 

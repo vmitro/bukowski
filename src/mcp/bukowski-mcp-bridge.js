@@ -12,11 +12,16 @@ const { execSync } = require('child_process');
  * Get ancestor PIDs (for matching to session agent PTY PID)
  * Walks up the process tree up to 10 levels
  */
+// Legacy path: the server now walks /proc itself from the `pid` we send (see
+// src/utils/procTree.js). Kept for older servers, with the two bugs that made
+// it miss fixed — it starts at our OWN pid, because a bridge that exec'd into
+// the pane IS the pane, and it goes deep enough for a real pane's nesting
+// (tmux -> shell -> wrapper -> REPL -> bridge).
 function getAncestorPids() {
   const ancestors = [];
-  let pid = process.ppid;
+  let pid = process.pid;
 
-  for (let i = 0; i < 10 && pid > 1; i++) {
+  for (let i = 0; i < 64 && pid > 1; i++) {
     ancestors.push(pid);
     try {
       // Read parent PID from /proc/[pid]/stat
@@ -305,7 +310,8 @@ function tryConnectToBukowski() {
       params: {
         agentType,
         agentId: sessionAgentId,      // null if external, set if session agent
-        ancestorPids: getAncestorPids(), // For session agent matching
+        pid: process.pid,             // server walks /proc itself (see utils/procTree)
+        ancestorPids: getAncestorPids(), // legacy: servers that predate `pid`
         cwd: process.cwd(),           // For external-agent host naming
         role: CHANNEL_ROLE ? 'channel' : undefined // routes channel pushes here
       }
