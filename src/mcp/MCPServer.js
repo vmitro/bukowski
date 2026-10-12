@@ -217,7 +217,7 @@ class MCPServer extends EventEmitter {
       },
       {
         name: 'list_agents',
-        description: 'List all connected agents in the session',
+        description: 'List every addressable agent: local session agents, external bridge clients, and federated peers. Address an agent by its `id` OR by any name in its `aliases` (a session agent also answers to its federated `claude-<host>-N` form). Anything not listed here is not routable.',
         inputSchema: {
           type: 'object',
           properties: {}
@@ -709,13 +709,28 @@ class MCPServer extends EventEmitter {
         // Local session agents. `federatedId` is the name remote peers know
         // this agent by (claude-hub-1 for local claude-1) — without it an
         // agent can't recognize itself in messages addressed from other boxes.
-        const sessionAgents = this.session.getAllAgents().map(a => ({
-          id: a.id,
-          name: a.name,
-          type: a.type,
-          federatedId: this.federationHub?.federatedIdFor?.(a.id) || null,
-          source: 'session'
-        }));
+        // `aliases` lists every OTHER id that routes to this same agent, so a
+        // caller can tell a routable name from a dead one. A session agent is
+        // addressable both locally (claude-1) and by its federated alias
+        // (claude-<host>-1) — _sendFipaMessage canonicalizes the alias via
+        // resolveLocalAlias — but the alias used to appear only in a
+        // `federatedId` field, never as an id. An agent scanning the id column
+        // for the name a peer had given it found nothing and concluded the
+        // target was gone, while sending to it worked fine (claude-projects-2
+        // report, 2026-10-12).
+        const aliasesFor = (id, federatedId) =>
+          (federatedId && federatedId !== id ? [federatedId] : []);
+        const sessionAgents = this.session.getAllAgents().map(a => {
+          const federatedId = this.federationHub?.federatedIdFor?.(a.id) || null;
+          return {
+            id: a.id,
+            name: a.name,
+            type: a.type,
+            federatedId,
+            aliases: aliasesFor(a.id, federatedId),
+            source: 'session'
+          };
+        });
 
         // External bridge clients (claude/codex/gemini REPLs connected
         // from outside any bukowski's session).
@@ -724,6 +739,9 @@ class MCPServer extends EventEmitter {
           name: a.id,
           type: a.type,
           host: a.host,
+          // A bridge client's assigned id already embeds its host, so it
+          // federates under that same name — there is no second spelling.
+          aliases: [],
           source: 'external'
         }));
 
@@ -745,6 +763,7 @@ class MCPServer extends EventEmitter {
               // next hop). Equals host in a 2-node link; differs once a hub
               // relays a third box's agents (proxy-jump / hub-and-spoke).
               via: info.via || info.peerHost,
+              aliases: [],
               source: 'federated'
             });
           }

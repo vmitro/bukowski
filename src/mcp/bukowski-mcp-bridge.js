@@ -516,7 +516,7 @@ const TOOLS = [
   },
   {
     name: 'list_agents',
-    description: 'List all connected agents in the session',
+    description: 'List every addressable agent: local session agents, external bridge clients, and federated peers. Address an agent by its `id` OR by any name in its `aliases` (a session agent also answers to its federated `claude-<host>-N` form). Anything not listed here is not routable.',
     inputSchema: { type: 'object', properties: {} }
   },
   {
