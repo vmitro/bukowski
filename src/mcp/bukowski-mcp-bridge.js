@@ -44,18 +44,14 @@ function getAncestorPids() {
 // Discovery paths
 const SOCKETS_DIR = path.join(os.homedir(), '.bukowski', 'sockets');
 const LEGACY_SOCKET_FILE = path.join(os.homedir(), '.bukowski-mcp-socket');
+const {
+  isPidRunning,
+  pidFromFileName,
+  readInstanceMeta,
+  isWithin,
+  instancesOwningCwd,
+} = require('./socketDiscovery');
 
-/**
- * Check if a PID is still running
- */
-function isPidRunning(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Prune stale socket files (dead PID or missing socket path)
@@ -65,7 +61,7 @@ function pruneStaleSocketFiles() {
     if (!fs.existsSync(SOCKETS_DIR)) return;
     const files = fs.readdirSync(SOCKETS_DIR);
     for (const file of files) {
-      const pid = parseInt(file, 10);
+      const pid = pidFromFileName(file);
       if (isNaN(pid)) continue;
 
       const filePath = path.join(SOCKETS_DIR, file);
@@ -87,6 +83,7 @@ function pruneStaleSocketFiles() {
       }
 
       if (shouldDelete) {
+        try { fs.unlinkSync(`${filePath}.meta`); } catch { /* may not exist */ }
         try {
           fs.unlinkSync(filePath);
         } catch { /* ignore */ }
@@ -172,7 +169,8 @@ const pendingRequests = new Map();
 
 /**
  * Discover bukowski's MCP socket
- * Priority: env var > ancestor PID match > most recent > legacy file
+ * Priority: env var > owning cwd > ancestor PID match (cwd-checked) >
+ *           most recent > legacy file
  * Called dynamically on each connect attempt (not cached)
  */
 function discoverSocket() {
@@ -187,7 +185,20 @@ function discoverSocket() {
     }
   }
 
-  // 2. Ancestor PID matching (for processes in bukowski's tree)
+  // 2. The instance whose working directory contains ours. Checked BEFORE
+  // ancestry because ancestry can be flatly wrong: codex's app-server-daemon
+  // is machine-global, so a codex session's bridge is spawned under whichever
+  // bukowski first started that daemon, not the one whose pane it belongs to.
+  // That bound pane 8's codex to the azra-agent instance, where it answered as
+  // codex-azra-agent-1 while its real inbox sat unread on the projects
+  // instance. cwd is set from the session's own directory, so it survives the
+  // indirection that ancestry does not.
+  const owners = instancesOwningCwd(process.cwd());
+  if (owners.length) return owners[0].socket;
+
+  // 3. Ancestor PID matching (for processes genuinely in a bukowski's tree),
+  // but only when that instance's cwd could plausibly contain us. Without the
+  // check a shared daemon's ancestry silently outranks the truth.
   try {
     if (fs.existsSync(SOCKETS_DIR)) {
       const files = fs.readdirSync(SOCKETS_DIR);
@@ -195,8 +206,13 @@ function discoverSocket() {
 
       // Check if any socket file's PID is our ancestor
       for (const file of files) {
-        const pid = parseInt(file, 10);
+        const pid = pidFromFileName(file);
         if (!isNaN(pid) && ancestors.has(pid)) {
+          const meta = readInstanceMeta(pid);
+          // A cwd claim that cannot contain us means the ancestry crossed a
+          // daemon boundary. No claim at all = pre-upgrade instance, trusted
+          // as before.
+          if (meta && !isWithin(meta.cwd, process.cwd())) continue;
           const socketPath = fs.readFileSync(path.join(SOCKETS_DIR, file), 'utf-8').trim();
           if (fs.existsSync(socketPath)) {
             return socketPath;
@@ -204,11 +220,11 @@ function discoverSocket() {
         }
       }
 
-      // 3. Most recent active session (fallback for external tools)
+      // 4. Most recent active session (fallback for external tools)
       // Collect active sessions with mtime, sort by most recent first
       const activeSessions = [];
       for (const file of files) {
-        const pid = parseInt(file, 10);
+        const pid = pidFromFileName(file);
         if (!isNaN(pid) && isPidRunning(pid)) {
           const filePath = path.join(SOCKETS_DIR, file);
           try {
@@ -231,7 +247,7 @@ function discoverSocket() {
     }
   } catch { /* ignore */ }
 
-  // 4. Legacy discovery file (backwards compatibility)
+  // 5. Legacy discovery file (backwards compatibility)
   try {
     const socketPath = fs.readFileSync(LEGACY_SOCKET_FILE, 'utf-8').trim();
     if (fs.existsSync(socketPath)) {

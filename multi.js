@@ -8,6 +8,7 @@ const fs = require('fs');
 const {
   SOCKETS_DIR,
   SOCKET_DISCOVERY_FILE,
+  SOCKET_META_FILE,
   LEGACY_SOCKET_FILE,
   FIPA_REMINDER,
   findClaudePath,
@@ -905,6 +906,18 @@ terminal.registerSignalHandlers();
       fs.mkdirSync(SOCKETS_DIR, { recursive: true });
       // Per-PID socket file for ancestor matching
       fs.writeFileSync(SOCKET_DISCOVERY_FILE, socketPath, 'utf-8');
+      // Sidecar metadata so a bridge can bind by WORKING DIRECTORY instead of
+      // process ancestry. Ancestry is not trustworthy: codex runs a machine-
+      // global app-server-daemon, so every codex session's bridge is spawned
+      // as a child of whichever bukowski first started that daemon — pane 8's
+      // codex resolved to the azra-agent instance and answered as
+      // codex-azra-agent-1. cwd survives that indirection because the daemon
+      // spawns the bridge in the session's own directory.
+      try {
+        fs.writeFileSync(SOCKET_META_FILE, JSON.stringify({
+          socket: socketPath, pid: process.pid, cwd: process.cwd(),
+        }), 'utf-8');
+      } catch { /* metadata is optional; discovery still works without it */ }
       // Legacy discovery file for backwards compatibility
       fs.writeFileSync(LEGACY_SOCKET_FILE, socketPath, 'utf-8');
       // Env var for child agents (primary discovery method)

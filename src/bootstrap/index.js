@@ -11,6 +11,9 @@ const os = require('os');
 const SOCKETS_DIR = path.join(os.homedir(), '.bukowski', 'sockets');
 const SOCKET_DISCOVERY_FILE = path.join(SOCKETS_DIR, String(process.pid));
 const LEGACY_SOCKET_FILE = path.join(os.homedir(), '.bukowski-mcp-socket');
+// Sidecar metadata for the per-pid discovery file. Kept SEPARATE so the pid
+// file stays a bare socket path: an older bridge reads it unchanged.
+const SOCKET_META_FILE = `${SOCKET_DISCOVERY_FILE}.meta`;
 
 // Load quotes from quotes.txt
 function loadQuotes(quotesPath) {
@@ -351,6 +354,7 @@ module.exports = {
   // Constants
   SOCKETS_DIR,
   SOCKET_DISCOVERY_FILE,
+  SOCKET_META_FILE,
   LEGACY_SOCKET_FILE,
   FIPA_REMINDER,
   FIPA_REMINDER_INLINE,
