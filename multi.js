@@ -673,6 +673,10 @@ terminal.registerSignalHandlers();
     let fipaEchoTimeoutMs = parseInt(process.env.BUKOWSKI_FIPA_ECHO_TIMEOUT_MS, 10) || 1000; // Max wait for echo
     const fipaQuietMs = parseInt(process.env.BUKOWSKI_FIPA_QUIET_MS, 10) || 250; // Required PTY-quiet window before injecting
     const fipaQuietMaxWaitMs = parseInt(process.env.BUKOWSKI_FIPA_QUIET_MAX_WAIT_MS, 10) || 3000; // Max time to wait for quiet
+    // Second-chance budget: how long to keep waiting for a quiet window after
+    // the short wait above comes up empty. Must comfortably exceed one agent
+    // turn — a streaming codex/gemini turn runs for tens of seconds.
+    const fipaQuietRetryTotalMs = parseInt(process.env.BUKOWSKI_FIPA_QUIET_RETRY_TOTAL_MS, 10) || 600000; // 10 min
     const ANSI_STRIP_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|[\x00-\x08\x0b-\x1f\x7f]/g;
 
     // Per-agent FIFO to prevent overlapping injections from racing.
@@ -711,30 +715,47 @@ terminal.registerSignalHandlers();
       fipaInjectQueues.set(agent.id, next);
     }
 
-    // Inject text into an agent PTY: wait for a quiet window, write the prompt
-    // exactly once, then wait for the echo before sending Enter. On echo
-    // timeout, send Enter anyway — TUIs like Claude Code paint the input box
+    // Inject text into an agent PTY: wait for a quiet window (briefly, then
+    // with a long second-chance budget — a busy TUI means a turn in flight,
+    // not a lost message), write the prompt exactly once, then wait for the
+    // echo before sending Enter. On echo timeout, send Enter anyway — TUIs
+    // like Claude Code paint the input box
     // with cursor moves so the literal prompt rarely lands as a contiguous
     // run in the PTY data stream, but the bytes themselves did get there.
     // Never write the prompt twice (would duplicate text in the input box).
     async function injectFipaWithEcho(agent, prompt) {
       if (!agent?.pty) return;
       tapPtyForFipaQuiet(agent);
-      const quiet = await awaitPtyQuiet(agent, fipaQuietMs, fipaQuietMaxWaitMs);
-      // If the TUI never went quiet (e.g. /compact spinner, animated tool
-      // output), skip injection entirely. The message is already in the MCP
-      // queue; Claude's hooks will surface it on the next turn boundary.
-      // Writing into a busy redraw produces scattered character ghosts in
-      // the input box and corrupts the user's view.
+      let quiet = await awaitPtyQuiet(agent, fipaQuietMs, fipaQuietMaxWaitMs);
       if (!quiet) {
-        console.log(`[fipa-autoinject] skip ${agent.id}: PTY never quiet (${fipaQuietMaxWaitMs}ms); message stays in queue`);
+        // Don't give up here. This used to `return`, which abandoned the
+        // injection outright: the message stayed in the MCP queue with
+        // nothing to retry it, and non-claude agents have no second delivery
+        // path (claude is woken by the channel push, which never touches the
+        // PTY). The 3s budget above was calibrated on Claude's input-box
+        // repaint; a codex/gemini turn streams output for tens of seconds, so
+        // any message arriving mid-turn exhausted it — and that is exactly
+        // when a reply to the agent's own question lands. codex-1 on the
+        // projects box lost 74 messages that way, every one of them silently.
+        // Wait for the turn to finish instead. Staying inside this FIFO slot
+        // keeps ordering intact for the messages queued behind us.
+        console.log(`[fipa-autoinject] ${agent.id}: PTY busy after ${fipaQuietMaxWaitMs}ms; waiting up to ${fipaQuietRetryTotalMs}ms for a quiet window`);
+        quiet = await awaitPtyQuiet(agent, fipaQuietMs, fipaQuietRetryTotalMs);
+      }
+      // The pane can die while we wait out a long turn.
+      if (!agent?.pty) return;
+      if (!quiet) {
+        // Last resort after the full budget: write into the busy TUI rather
+        // than drop the message. The echo-timeout path below already does
+        // this and demonstrably lands (27 times on codex-1 alone); scattered
+        // character ghosts in the input box beat silent loss.
+        console.log(`[fipa-autoinject] ${agent.id}: PTY never quiet (${fipaQuietRetryTotalMs}ms); injecting anyway`);
         try {
           broadcastSystemMessage(
-            `[fipa] PTY inject skipped for ${agent.id} (TUI busy ${fipaQuietMaxWaitMs}ms); message is in queue, ` +
-            `agent will see it via hook at next tool/turn boundary`
+            `[fipa] ${agent.id} TUI busy ${fipaQuietRetryTotalMs}ms; injecting anyway — ` +
+            `input box may show stray characters`
           );
         } catch { /* ignore */ }
-        return;
       }
 
       await new Promise((resolve) => {
