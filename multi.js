@@ -696,7 +696,10 @@ terminal.registerSignalHandlers();
     // Second-chance budget: how long to keep waiting for a quiet window after
     // the short wait above comes up empty. Must comfortably exceed one agent
     // turn — a streaming codex/gemini turn runs for tens of seconds.
-    const fipaQuietRetryTotalMs = parseInt(process.env.BUKOWSKI_FIPA_QUIET_RETRY_TOTAL_MS, 10) || 600000; // 10 min
+    // 60s, not 10 min: the terminal fallback injects anyway, so a long budget
+    // buys nothing and stalls the per-agent FIFO — a backlog of five messages
+    // took the better part of an hour to drain against a busy codex TUI.
+    const fipaQuietRetryTotalMs = parseInt(process.env.BUKOWSKI_FIPA_QUIET_RETRY_TOTAL_MS, 10) || 60000;
     const ANSI_STRIP_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|[\x00-\x08\x0b-\x1f\x7f]/g;
 
     // Per-agent FIFO to prevent overlapping injections from racing.

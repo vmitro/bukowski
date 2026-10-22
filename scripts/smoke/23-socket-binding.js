@@ -25,6 +25,7 @@ const {
   pidFromSocketPath,
   socketIsLive,
   chooseSocket,
+  betterOwnerThan,
 } = require('../../src/mcp/socketDiscovery');
 
 let passed = 0;
@@ -186,6 +187,27 @@ console.log('14. a dead env socket no longer wins the choice');
 const deadEnv = '/tmp/bukowski-mcp-846624.sock';
 ok(chooseSocket({ envPath: deadEnv, envExists: socketIsLive(deadEnv, live), owners: owners(PROJECTS) }).via === 'cwd',
   'dead env socket falls through to cwd ownership instead of being dialled');
+
+console.log('15. a bound bridge re-evaluates ownership (bug-25)');
+// azra's codex bound to ~/projects while its own instance was briefly down,
+// then stayed there for 20 minutes because the link was healthy.
+const azraOwners = owners(AZRA);                  // [azra (deep), projects (shallow)]
+const deepSock = sockets[846624];
+const projSock2 = sockets[3525338];
+ok(azraOwners[0].socket === deepSock, 'the deeper instance ranks first');
+ok(betterOwnerThan(deepSock, azraOwners) === null, 'already on the deepest owner → stay');
+const move = betterOwnerThan(projSock2, azraOwners);
+ok(move && move.socket === deepSock, 'bound to the shallow ancestor → move to the deeper one');
+ok(betterOwnerThan('/tmp/bukowski-mcp-999999.sock', azraOwners).socket === deepSock,
+  'bound to an instance that owns nothing of ours → move');
+ok(betterOwnerThan(null, azraOwners).socket === deepSock, 'unbound → take the best');
+ok(betterOwnerThan(deepSock, []) === null, 'no owners at all → never churn');
+ok(betterOwnerThan(deepSock, null) === null, 'missing owner list is tolerated');
+// Equal depth must not ping-pong: three instances share PROJECTS in this dir.
+const tied2 = owners(PROJECTS).filter((o) => o.cwd === PROJECTS);
+ok(tied2.length >= 2, 'several instances claim the same depth');
+ok(betterOwnerThan(tied2[1].socket, owners(PROJECTS)) === null,
+  'equal-depth owner is not a reason to rebind (no flapping)');
 
 fs.rmSync(dir, { recursive: true, force: true });
 

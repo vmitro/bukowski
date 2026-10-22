@@ -192,6 +192,33 @@ function chooseSocket({ envPath, envExists, owners }) {
   return null;
 }
 
+/**
+ * Should a bridge already bound to `currentSocket` move to a different
+ * instance? Returns the better owner, or null to stay put.
+ *
+ * Binding was a one-shot decision, and that is wrong while instances churn.
+ * If the instance that owns our cwd exactly is momentarily down, the only live
+ * instance CONTAINING our cwd is an ancestor — ~/projects legitimately claims
+ * a bridge whose cwd is ~/projects/azra-agent. The pick is right at that
+ * instant and wrong a second later, and nothing re-evaluated it: azra's codex
+ * sat registered on the projects instance as codex-azra-agent-2 for twenty
+ * minutes, with its own instance running beside it, because the link was
+ * healthy — just to the wrong box.
+ *
+ * Only a STRICTLY deeper owner justifies moving; equal depth is not a reason
+ * to churn.
+ */
+function betterOwnerThan(currentSocket, owners) {
+  if (!owners || owners.length === 0) return null;
+  const best = owners[0];
+  if (!currentSocket) return best;
+  if (best.socket === currentSocket) return null;
+  const current = owners.find((o) => o.socket === currentSocket);
+  // Bound to something that does not own our cwd at all: anything is better.
+  if (!current) return best;
+  return best.cwd.length > current.cwd.length ? best : null;
+}
+
 module.exports = {
   SOCKETS_DIR,
   isPidRunning,
@@ -204,4 +231,5 @@ module.exports = {
   pidFromSocketPath,
   socketIsLive,
   chooseSocket,
+  betterOwnerThan,
 };

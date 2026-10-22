@@ -52,6 +52,7 @@ const {
   instancesOwningCwd,
   socketIsLive,
   chooseSocket,
+  betterOwnerThan,
 } = require('./socketDiscovery');
 
 
@@ -165,6 +166,7 @@ let socket = null;
 let socketBuffer = '';
 let connected = false;
 let connecting = false;
+let boundSocketPath = null;   // which instance we actually attached to
 
 // Pending requests waiting for responses
 const pendingRequests = new Map();
@@ -336,6 +338,7 @@ function tryConnectToBukowski() {
   if (!socketPath) return;
 
   connecting = true;
+  boundSocketPath = socketPath;
   socket = net.createConnection(socketPath);
 
   // Timeout - if not connected in 5 seconds, give up
@@ -407,7 +410,19 @@ function tryConnectToBukowski() {
 // result. unref'd: this must never be the reason the process stays alive.
 const RECONNECT_INTERVAL_MS = parseInt(process.env.BUKOWSKI_BRIDGE_RECONNECT_MS, 10) || 5000;
 setInterval(() => {
-  if (!connected && !connecting) tryConnectToBukowski();
+  if (connecting) return;
+  if (!connected) { tryConnectToBukowski(); return; }
+  // Connected, but maybe to the wrong instance: re-evaluate ownership. Skip
+  // while calls are in flight so a rebind never drops a pending response.
+  if (pendingHandlers > 0) return;
+  const better = betterOwnerThan(boundSocketPath, instancesOwningCwd(process.cwd()));
+  if (better) {
+    console.error(
+      `[bukowski-bridge] ${boundSocketPath} does not own cwd ${process.cwd()} as closely as ` +
+      `${better.socket}; rebinding (see bug-25)`
+    );
+    socket?.destroy();   // close handler clears state; next tick reconnects
+  }
 }, RECONNECT_INTERVAL_MS).unref();
 
 /**
