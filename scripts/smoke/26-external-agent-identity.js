@@ -44,6 +44,27 @@ function newServer() {
   return new MCPServer({ getAllAgents: () => [] }, null, null, null);
 }
 
+/**
+ * An instance with real codex panes, advertised to the mesh under the same
+ * <type>-<host>-N shape that external seats are minted in.
+ */
+function serverWithPanes(panes) {
+  const server = new MCPServer({
+    getAllAgents: () => [],
+    getAgent: (id) => (panes.some((p) => p.localId === id) ? { id } : null),
+  }, null, null, null);
+  server.federationHub = {
+    resolveLocalAlias: (fedId) => {
+      const pane = panes.find((p) => p.federatedId === fedId);
+      if (pane) return pane.localId;
+      // The roster publishes bridge agents with localId === federatedId, so an
+      // external seat resolves to itself. That must not read as a collision.
+      return server.externalAgents.has(fedId) ? fedId : null;
+    },
+  };
+  return server;
+}
+
 /** Drive a bridge handshake exactly as src/mcp/bukowski-mcp-bridge.js does. */
 async function connectBridge(server, { pid, cwd, agentType = 'codex' }) {
   const socket = new FakeSocket();
@@ -132,7 +153,52 @@ async function run() {
   ok(next.id === 'codex-projects-2',
     `a dead bridge's name is not handed to a different process (got ${next.id})`);
 
-  console.log('7. a bridge too old to report its pid is unaffected');
+    console.log('8. a minted name is never one a pane already answers to');
+  // The collision was structural: panes are announced as codex-projects-1,
+  // codex-projects-2 … and the external counter starts at 1. _sendFipa checks
+  // the alias map before externalAgents, so the bridge's mail went to the pane
+  // and its own inbox was unreachable (bug-21).
+  server = serverWithPanes([
+    { localId: 'codex-1', federatedId: 'codex-projects-1' },
+    { localId: 'codex-2', federatedId: 'codex-projects-2' },
+  ]);
+  const daemonBridge = await connectBridge(server, { pid: livePid(), cwd: CWD });
+  ok(daemonBridge.id === 'codex-projects-3',
+    `skips both pane aliases (got ${daemonBridge.id})`);
+  ok(server.federationHub.resolveLocalAlias(daemonBridge.id) === daemonBridge.id,
+    'and resolves to itself, not to a pane — so mail addressed to it arrives');
+  const second = await connectBridge(server, { pid: livePid(), cwd: CWD });
+  ok(second.id === 'codex-projects-4', `the next one carries on from there (got ${second.id})`);
+  ok(daemonBridge.id !== second.id, 'two bridges never share a seat');
+
+  console.log('9. an id a pane literally holds is skipped too');
+  // A pane whose own local id collides (no federation configured at all).
+  const noFed = new MCPServer({
+    getAllAgents: () => [],
+    getAgent: (id) => (id === 'codex-projects-1' ? { id } : null),
+  }, null, null, null);
+  const avoided = await connectBridge(noFed, { pid: livePid(), cwd: CWD });
+  ok(avoided.id === 'codex-projects-2', `steps over the pane's own id (got ${avoided.id})`);
+
+  console.log('10. a name already held is not surrendered to a late alias');
+  // The stable-name path returns before minting, so a bridge keeps its name
+  // even if a pane starts advertising that alias afterwards. Renaming a live
+  // agent mid-session is the failure we are trying to end, and the alias is
+  // the newcomer here.
+  server = serverWithPanes([]);
+  const heldPid = livePid();
+  const held = await connectBridge(server, { pid: heldPid, cwd: CWD });
+  server.federationHub = {
+    resolveLocalAlias: (fedId) => (fedId === held.id ? 'codex-9' : null),
+  };
+  held.socket.close();
+  const stillHeld = await connectBridge(server, { pid: heldPid, cwd: CWD });
+  ok(stillHeld.id === held.id, `the same bridge keeps ${held.id} (got ${stillHeld.id})`);
+  // A DIFFERENT bridge arriving now must respect the alias, though.
+  const newcomer = await connectBridge(server, { pid: livePid(), cwd: CWD });
+  ok(newcomer.id !== held.id, 'a new bridge does not land on the contested name');
+
+  console.log('11. a bridge too old to report its pid is unaffected');
   server = newServer();
   const legacy1 = await connectBridge(server, { pid: undefined, cwd: CWD });
   legacy1.socket.close();

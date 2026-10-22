@@ -1266,11 +1266,20 @@ class MCPServer extends EventEmitter {
     const existing = key ? this.externalAgentKeys.get(key) : null;
 
     const agentId = existing || (() => {
-      // Counter is per <type, host> so each origin directory has its own n.
+      // Counter is per <type, host> so each origin directory has its own n,
+      // and it skips names that are already somebody else's.
       const counterKey = `${agentType}-${host}`;
-      const count = (this.agentCounters.get(counterKey) || 0) + 1;
+      let count = this.agentCounters.get(counterKey) || 0;
+      let candidate;
+      // The loop is bounded only so a pathological roster cannot hang an
+      // initialize; in practice it turns once or twice.
+      for (let guard = 0; guard < 1000; guard++) {
+        count += 1;
+        candidate = `${agentType}-${host}-${count}`;
+        if (!this._externalNameIsTaken(candidate)) break;
+      }
       this.agentCounters.set(counterKey, count);
-      return `${agentType}-${host}-${count}`;
+      return candidate;
     })();
     if (key) this.externalAgentKeys.set(key, agentId);
 
@@ -1299,6 +1308,32 @@ class MCPServer extends EventEmitter {
     this.emit('external_agent:connected', { agentId, agentType, reused: !!existing });
 
     return agentId;
+  }
+
+  /**
+   * Is this id already somebody's — a live external seat, a pane, or the
+   * federated alias a pane is advertised under?
+   *
+   * The last one is the trap. Panes are announced to the mesh as
+   * <type>-<host>-N, external seats are minted as <type>-<host>-N from a
+   * counter that starts at 1, and _sendFipa resolves a local alias BEFORE it
+   * looks at externalAgents — so the first daemon-spawned codex bridge in an
+   * instance that already has codex panes was certain to be handed a name a
+   * pane answers to. Mail for either one then went to the pane, and the bridge
+   * sat on an inbox nobody could reach while its sends came back "success"
+   * (bug-21). Observed from the fleet: a codex reporting as codex-projects-5
+   * whose requests to codex-projects-2 arrived in its own pane.
+   *
+   * An external seat resolves to ITSELF through the alias map (the roster
+   * publishes bridge agents with localId === federatedId), which is not a
+   * collision — only a resolution to a DIFFERENT local id is.
+   * @private
+   */
+  _externalNameIsTaken(id) {
+    if (this.externalAgents.has(id)) return true;
+    if (this.session?.getAgent?.(id)) return true;
+    const alias = this.federationHub?.resolveLocalAlias?.(id) || null;
+    return !!alias && alias !== id;
   }
 
   /**
