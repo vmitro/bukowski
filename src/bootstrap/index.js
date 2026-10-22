@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const { execSync } = require('child_process');
 const os = require('os');
+const crypto = require('crypto');
 
 // Socket discovery paths for MCP bridge
 const SOCKETS_DIR = path.join(os.homedir(), '.bukowski', 'sockets');
@@ -177,6 +178,9 @@ function createAgentTypes(claudePath, codexPath) {
       args: [...claudeArgs, ...claudeHookArgs, ...channelArgs],
       name: 'Claude',
       promptFlag: '--append-system-prompt',
+      // Claude accepts --session-id <uuid>, so bukowski can MINT the id and
+      // know it, instead of guessing afterwards from transcript mtimes.
+      ownsSessionId: true,
       getResumeArgs: (sessionId) => sessionId
         ? ['--resume', sessionId]
         : ['--continue']
@@ -200,6 +204,38 @@ function createAgentTypes(claudePath, codexPath) {
         : ['-r', 'latest']
     }
   };
+}
+
+/**
+ * Args that pin a freshly spawned agent to a session id WE choose, plus that
+ * id so the caller can record it.
+ *
+ * Why this exists: captureAgentSessions used to discover a claude agent's
+ * session by scanning ~/.claude/projects/<cwd>/ for the newest .jsonl, handing
+ * picks out in spawnedAt order with an exclusion set to avoid duplicates. With
+ * two claude panes in one cwd that is not merely unreliable, it is reliably
+ * WRONG: the earliest-spawned agent takes whichever transcript was written
+ * last — usually the OTHER pane's, since that is the one that just spoke — and
+ * the exclusion set then hands the leftover to its sibling. Both agents resume
+ * each other's history on the next restore. The codex branch of that function
+ * already refused mtime guessing for this exact reason and asks the kernel
+ * instead; claude kept guessing.
+ *
+ * Minting the id up front removes the guess.
+ *
+ * Returns no args when the caller already passes a resume/continue flag:
+ * claude will not accept --session-id alongside those, and the id is not ours
+ * to choose in that case.
+ */
+function getFreshSessionArgs(agentTypes, type, existingArgs = []) {
+  const cfg = agentTypes?.[type];
+  if (!cfg?.ownsSessionId) return { args: [], sessionId: null };
+  const CONFLICTING = ['--session-id', '--resume', '-r', '--continue', '-c', '--from-pr'];
+  if ((existingArgs || []).some((a) => CONFLICTING.includes(a))) {
+    return { args: [], sessionId: null };
+  }
+  const sessionId = crypto.randomUUID();
+  return { args: ['--session-id', sessionId], sessionId };
 }
 
 /**
@@ -356,6 +392,7 @@ module.exports = {
   SOCKET_DISCOVERY_FILE,
   SOCKET_META_FILE,
   LEGACY_SOCKET_FILE,
+  getFreshSessionArgs,
   FIPA_REMINDER,
   FIPA_REMINDER_INLINE,
 

@@ -9,6 +9,7 @@ const {
   SOCKETS_DIR,
   SOCKET_DISCOVERY_FILE,
   SOCKET_META_FILE,
+  getFreshSessionArgs,
   LEGACY_SOCKET_FILE,
   FIPA_REMINDER,
   findClaudePath,
@@ -281,14 +282,20 @@ terminal.registerSignalHandlers();
     const claudeConfig = AGENT_TYPES.claude;
     const initialArgs = [...claudeConfig.args, ...cliArgs.agentArgs];
     const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, 'claude', initialArgs);
+    const fresh = getFreshSessionArgs(AGENT_TYPES, 'claude', initialArgs);
     const claude = new Agent({
       id: 'claude-1',
       name: claudeConfig.name,
       type: 'claude',
       command: claudeConfig.command,
-      args: [...initialArgs, ...fipaArgs],
+      args: [...initialArgs, ...fresh.args, ...fipaArgs],
       autostart: true
     });
+    // Authoritative: we chose this id, so capture must never re-guess it.
+    if (fresh.sessionId) {
+      claude.agentSessionId = fresh.sessionId;
+      claude.sessionIdCaptured = true;
+    }
 
     session.addAgent(claude);
     session.layout = new (require('./src/layout/LayoutNode').Pane)(claude.id);
@@ -479,9 +486,14 @@ terminal.registerSignalHandlers();
     const baseArgs = typeConfig.args || [];
     const combinedArgs = [...baseArgs];
     const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, agent.type, combinedArgs);
+    // Mint a new id rather than clearing it. Leaving agentSessionId null sends
+    // the next save back to mtime discovery, which is what crossed two panes'
+    // histories in the first place.
+    const fresh = getFreshSessionArgs(AGENT_TYPES, agent.type, combinedArgs);
     agent.command = typeConfig.command;
-    agent.args = [...combinedArgs, ...fipaArgs];
-    agent.agentSessionId = null;
+    agent.args = [...combinedArgs, ...fresh.args, ...fipaArgs];
+    agent.agentSessionId = fresh.sessionId;
+    agent.sessionIdCaptured = !!fresh.sessionId;
     agent.exitCode = null;
     agent.status = 'stopped';
 
@@ -1845,6 +1857,11 @@ terminal.registerSignalHandlers();
           const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, agent.type, combinedArgs);
           agent.command = typeConfig.command;
           agent.args = [...combinedArgs, ...fipaArgs];
+          // We just told this agent which session to resume, so the id is
+          // known rather than inferred — mark it authoritative so the next
+          // save does not re-derive it from transcript mtimes and hand it to
+          // a sibling pane.
+          if (isValidUuid) agent.sessionIdCaptured = true;
         }
       }
 
@@ -1937,7 +1954,8 @@ terminal.registerSignalHandlers();
     // Inject FIPA reminder if user didn't provide their own prompt
     const baseArgs = [...agentConfig.args, ...extraArgs];
     const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, type, baseArgs);
-    const fullArgs = [...baseArgs, ...fipaArgs];
+    const fresh = getFreshSessionArgs(AGENT_TYPES, type, baseArgs);
+    const fullArgs = [...baseArgs, ...fresh.args, ...fipaArgs];
 
     const newAgent = new Agent({
       id: newId,
@@ -1947,6 +1965,11 @@ terminal.registerSignalHandlers();
       args: fullArgs,
       autostart: true
     });
+    // Authoritative: we chose this id, so capture must never re-guess it.
+    if (fresh.sessionId) {
+      newAgent.agentSessionId = fresh.sessionId;
+      newAgent.sessionIdCaptured = true;
+    }
 
     session.addAgent(newAgent);
 
