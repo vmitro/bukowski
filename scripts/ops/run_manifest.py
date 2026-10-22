@@ -206,6 +206,11 @@ def artifacts_from(procs, do_hash):
     seen, artifacts = set(), []
 
     def add(path, used_by):
+        # Process cmdlines are attacker-influenceable (any local user can launch a
+        # process with an arbitrary argv). Refuse to follow symlinks so a crafted
+        # path can't redirect hashing/processing onto an unintended target file.
+        if os.path.islink(path):
+            return
         path = os.path.realpath(path)
         if path in seen or not os.path.isfile(path):
             return
