@@ -50,6 +50,7 @@ const {
   readInstanceMeta,
   isWithin,
   instancesOwningCwd,
+  socketIsLive,
   chooseSocket,
 } = require('./socketDiscovery');
 
@@ -192,7 +193,9 @@ function discoverSocket() {
   const owners = instancesOwningCwd(process.cwd());
   const choice = chooseSocket({
     envPath,
-    envExists: !!envPath && fs.existsSync(envPath),
+    // Liveness, not existence: a SIGKILLed instance leaves its socket file
+    // behind and a bridge would dial it forever.
+    envExists: socketIsLive(envPath),
     owners,
   });
   if (choice) {
@@ -296,6 +299,34 @@ function detectAgentType() {
 }
 
 /**
+ * Wait briefly for a connection, kicking off an attempt if none is in flight.
+ *
+ * The bridge used to attempt a connection ONLY from `initialize` and
+ * `tools/list`, with no retry anywhere. When an instance restarted, its
+ * bridges went permanently dead: `tools/list` still answered from the static
+ * TOOLS array, so the client happily reported "bukowski: connected (38
+ * tools)" while every `tools/call` fell through to a diagnostics blob. Agents
+ * read that as "the tools are not available to me" and stopped trying.
+ *
+ * Daemon-spawned bridges make this the normal case rather than an edge one:
+ * they are children of a machine-global pool, so they outlive the pane whose
+ * instance they were bound to.
+ */
+function ensureConnected(timeoutMs = 1500) {
+  if (connected) return Promise.resolve(true);
+  tryConnectToBukowski();
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const tick = () => {
+      if (connected) return resolve(true);
+      if (Date.now() - start >= timeoutMs) return resolve(false);
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
+
+/**
  * Try to connect to bukowski (non-blocking, with short timeout)
  */
 function tryConnectToBukowski() {
@@ -368,6 +399,16 @@ function tryConnectToBukowski() {
     socket = null;
   });
 }
+
+// Background reconnect. Without this a bridge only ever retried when the
+// client happened to re-issue initialize/tools/list, so an instance restart
+// stranded it indefinitely — and it kept reporting its static tool list, so
+// nothing looked wrong until a call quietly returned diagnostics instead of a
+// result. unref'd: this must never be the reason the process stays alive.
+const RECONNECT_INTERVAL_MS = parseInt(process.env.BUKOWSKI_BRIDGE_RECONNECT_MS, 10) || 5000;
+setInterval(() => {
+  if (!connected && !connecting) tryConnectToBukowski();
+}, RECONNECT_INTERVAL_MS).unref();
 
 /**
  * Process incoming data from bukowski socket
@@ -662,8 +703,9 @@ async function handleRequest(request) {
       return;
 
     case 'tools/call':
-      // Try to forward to bukowski if connected
-      if (connected) {
+      // Forward to bukowski, reconnecting first if the link dropped (an
+      // instance restart used to strand the bridge for good).
+      if (connected || await ensureConnected()) {
         try {
           const augmentedParams = { ...params };
           if (agentId && augmentedParams.arguments) {

@@ -138,6 +138,35 @@ function instancesOwningCwd(cwd, opts = {}) {
 }
 
 /**
+ * The instance pid encoded in a socket path (bukowski-mcp-<pid>.sock).
+ */
+function pidFromSocketPath(socketPath) {
+  const m = /bukowski-mcp-(\d+)\.sock$/.exec(String(socketPath || ''));
+  return m ? parseInt(m[1], 10) : NaN;
+}
+
+/**
+ * Is this socket backed by a LIVE instance?
+ *
+ * Existence is not enough. `tmux respawn-pane -k` SIGKILLs, so cleanup never
+ * runs and /tmp keeps the dead instance's socket file. A bridge that trusted
+ * mere existence would keep dialling a socket nobody listens on — which is
+ * what left azra-agent's codex with "bukowski: connected (38 tools)" and no
+ * working call after its instance was respawned.
+ *
+ * A path we cannot attribute to a pid is taken at face value rather than
+ * rejected, so custom socket paths keep working.
+ */
+function socketIsLive(socketPath, opts = {}) {
+  const exists = opts.exists || fs.existsSync;
+  const isRunning = opts.isRunning || isPidRunning;
+  if (!socketPath || !exists(socketPath)) return false;
+  const pid = pidFromSocketPath(socketPath);
+  if (isNaN(pid)) return true;
+  return isRunning(pid);
+}
+
+/**
  * Decide which socket to use given an explicit env override and the instances
  * that own our cwd.
  *
@@ -172,5 +201,7 @@ module.exports = {
   instanceCwd,
   instanceSocket,
   instancesOwningCwd,
+  pidFromSocketPath,
+  socketIsLive,
   chooseSocket,
 };

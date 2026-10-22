@@ -22,6 +22,8 @@ const {
   instanceCwd,
   instanceSocket,
   instancesOwningCwd,
+  pidFromSocketPath,
+  socketIsLive,
   chooseSocket,
 } = require('../../src/mcp/socketDiscovery');
 
@@ -163,6 +165,27 @@ ok(decision.socket === owners(PROJECTS)[0].socket,
 ok(decision.overridden === azraSock, 'the rejected env path is reported for the log line');
 ok(chooseSocket({ envPath: azraSock, envExists: true, owners: owners(AZRA) }).via === 'env',
   'the same env is honoured for a bridge genuinely under azra-agent');
+
+console.log('13. a socket file is not proof of a live instance');
+// respawn-pane -k SIGKILLs, so /tmp keeps the dead instance's socket file.
+// Trusting existence alone is what left azra-agent's codex dialling a socket
+// nobody listened on while its client still showed 38 tools.
+ok(pidFromSocketPath('/tmp/bukowski-mcp-846624.sock') === 846624, 'pid parses out of the path');
+ok(isNaN(pidFromSocketPath('/tmp/custom.sock')), 'an unattributable path yields NaN');
+const live = { exists: () => true, isRunning: (pid) => pid === 1246758 };
+ok(socketIsLive('/tmp/bukowski-mcp-1246758.sock', live), 'live instance → usable');
+ok(!socketIsLive('/tmp/bukowski-mcp-846624.sock', live),
+  'leftover file from a dead instance → NOT usable');
+ok(!socketIsLive('/tmp/bukowski-mcp-1246758.sock', { exists: () => false, isRunning: () => true }),
+  'missing file → not usable even if the pid lives');
+ok(socketIsLive('/tmp/custom.sock', live),
+  'a custom path we cannot attribute is taken at face value, not rejected');
+ok(!socketIsLive(null, live) && !socketIsLive('', live), 'empty input is never live');
+
+console.log('14. a dead env socket no longer wins the choice');
+const deadEnv = '/tmp/bukowski-mcp-846624.sock';
+ok(chooseSocket({ envPath: deadEnv, envExists: socketIsLive(deadEnv, live), owners: owners(PROJECTS) }).via === 'cwd',
+  'dead env socket falls through to cwd ownership instead of being dialled');
 
 fs.rmSync(dir, { recursive: true, force: true });
 
