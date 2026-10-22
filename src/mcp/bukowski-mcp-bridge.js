@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execSync } = require('child_process');
+const { bridgeLog, logFilePath } = require('./bridgeLog');
 
 /**
  * Get ancestor PIDs (for matching to session agent PTY PID)
@@ -50,6 +51,7 @@ const {
   readInstanceMeta,
   isWithin,
   instancesOwningCwd,
+  pidFromSocketPath,
   socketIsLive,
   chooseSocket,
   betterOwnerThan,
@@ -136,6 +138,17 @@ function getDiagnostics() {
   const ancestors = getAncestorPids();
   lines.push(`Ancestor PIDs: ${ancestors.slice(0, 5).join(', ')}${ancestors.length > 5 ? '...' : ''}`);
 
+  // What this bridge actually did, not just what the filesystem looks like.
+  // The static tool list means the client still advertises every tool while
+  // disconnected; saying so here is the only honest signal the agent gets.
+  if (boundSocketPath) {
+    lines.push(`Last bound: ${boundSocketPath} (via ${boundVia || 'unknown'})`);
+  }
+  if (lastDisconnect) {
+    lines.push(`Link lost: ${lastDisconnect.reason}${lastDisconnect.detail ? ` (${lastDisconnect.detail})` : ''} at ${lastDisconnect.at}`);
+  }
+  lines.push(`Bridge log: ${logFilePath() || '(disabled)'}`);
+
   lines.push('', 'Start bukowski first, or check socket permissions.');
   return lines.join('\n');
 }
@@ -167,6 +180,13 @@ let socketBuffer = '';
 let connected = false;
 let connecting = false;
 let boundSocketPath = null;   // which instance we actually attached to
+let boundVia = null;          // which discovery stage chose it
+let connectedAt = 0;
+// A down instance is retried every RECONNECT_INTERVAL_MS. Logging each attempt
+// would bury the interesting lines, so a failure streak logs once and stays
+// quiet until the next success.
+let downLogged = false;
+let lastDisconnect = null;    // {reason, detail, at, socket} — quoted in diagnostics
 
 // Pending requests waiting for responses
 const pendingRequests = new Map();
@@ -175,7 +195,10 @@ const pendingRequests = new Map();
  * Discover bukowski's MCP socket
  * Priority: env var (unless contradicted by cwd) > owning cwd >
  *           ancestor PID match (cwd-checked) > most recent > legacy file
- * Called dynamically on each connect attempt (not cached)
+ * Called dynamically on each connect attempt (not cached).
+ * @returns {{socket: string, via: string, instance?: number}|null} — `via`
+ *   names the stage that won, so a wrong binding is one grep away instead of a
+ *   reconstruction from process ancestry.
  */
 function discoverSocket() {
   // Prune stale files first
@@ -202,13 +225,11 @@ function discoverSocket() {
   });
   if (choice) {
     if (choice.via === 'cwd-override') {
-      // stderr, never stdout — stdout carries the MCP JSON-RPC stream.
-      console.error(
-        `[bukowski-bridge] BUKOWSKI_MCP_SOCKET=${choice.overridden} does not own cwd ` +
-        `${process.cwd()}; binding to ${choice.socket} instead (inherited env, see bug-22)`
-      );
+      bridgeLog('env-overridden', {
+        env: choice.overridden, cwd: process.cwd(), socket: choice.socket, bug: 'bug-22',
+      });
     }
-    return choice.socket;
+    return choice;
   }
 
   // 3. Ancestor PID matching (for processes genuinely in a bukowski's tree),
@@ -230,7 +251,7 @@ function discoverSocket() {
           if (meta && !isWithin(meta.cwd, process.cwd())) continue;
           const socketPath = fs.readFileSync(path.join(SOCKETS_DIR, file), 'utf-8').trim();
           if (fs.existsSync(socketPath)) {
-            return socketPath;
+            return { socket: socketPath, via: 'ancestor', instance: pid };
           }
         }
       }
@@ -255,7 +276,7 @@ function discoverSocket() {
         try {
           const socketPath = fs.readFileSync(filePath, 'utf-8').trim();
           if (fs.existsSync(socketPath)) {
-            return socketPath;
+            return { socket: socketPath, via: 'recent' };
           }
         } catch { /* ignore */ }
       }
@@ -266,7 +287,7 @@ function discoverSocket() {
   try {
     const socketPath = fs.readFileSync(LEGACY_SOCKET_FILE, 'utf-8').trim();
     if (fs.existsSync(socketPath)) {
-      return socketPath;
+      return { socket: socketPath, via: 'legacy' };
     }
   } catch { /* ignore */ }
 
@@ -329,21 +350,53 @@ function ensureConnected(timeoutMs = 1500) {
 }
 
 /**
+ * The line that explains a session going quiet mid-flight.
+ *
+ * A dropped link is invisible from inside the agent: `tools/list` keeps
+ * answering from the static array, so the client still shows the full tool set
+ * and only a call reveals anything is wrong. `heldFor` separates the two causes
+ * that look identical afterwards — an instance that was restarted (seconds to
+ * hours of uptime, clean close) from one that never came up at all.
+ */
+function logDisconnect(reason, detail) {
+  lastDisconnect = { reason, detail, at: new Date().toISOString(), socket: boundSocketPath };
+  bridgeLog('disconnect', {
+    reason,
+    detail,
+    socket: boundSocketPath,
+    agent: agentId,
+    heldForMs: connectedAt ? Date.now() - connectedAt : undefined,
+  });
+}
+
+/**
  * Try to connect to bukowski (non-blocking, with short timeout)
  */
 function tryConnectToBukowski() {
   if (connected || connecting) return;
 
-  const socketPath = discoverSocket();
-  if (!socketPath) return;
+  const choice = discoverSocket();
+  if (!choice) {
+    if (!downLogged) {
+      downLogged = true;
+      bridgeLog('no-socket', { cwd: process.cwd(), env: process.env.BUKOWSKI_MCP_SOCKET });
+    }
+    return;
+  }
+  const socketPath = choice.socket;
 
   connecting = true;
   boundSocketPath = socketPath;
+  boundVia = choice.via;
   socket = net.createConnection(socketPath);
 
   // Timeout - if not connected in 5 seconds, give up
   const connectTimeout = setTimeout(() => {
     if (!connected) {
+      if (!downLogged) {
+        downLogged = true;
+        bridgeLog('connect-failed', { socket: socketPath, via: choice.via, reason: 'timeout' });
+      }
       socket?.destroy();
       socket = null;
       connecting = false;
@@ -354,7 +407,16 @@ function tryConnectToBukowski() {
     clearTimeout(connectTimeout);
     connected = true;
     connecting = false;
+    connectedAt = Date.now();
+    downLogged = false;
     agentType = detectAgentType();
+    bridgeLog('connect', {
+      socket: socketPath,
+      via: choice.via,
+      instance: choice.instance ?? (pidFromSocketPath(socketPath) || undefined),
+      agentType,
+      envAgent: process.env.BUKOWSKI_AGENT_ID,
+    });
 
     // Use session agent ID if running inside bukowski, otherwise generate external ID
     const sessionAgentId = process.env.BUKOWSKI_AGENT_ID || null;
@@ -389,14 +451,20 @@ function tryConnectToBukowski() {
     processSocketBuffer();
   });
 
-  socket.on('error', () => {
+  socket.on('error', (err) => {
     clearTimeout(connectTimeout);
+    if (connected) logDisconnect('error', err.message);
+    else if (!downLogged) {
+      downLogged = true;
+      bridgeLog('connect-failed', { socket: socketPath, via: choice.via, reason: err.code || err.message });
+    }
     connected = false;
     connecting = false;
     socket = null;
   });
 
   socket.on('close', () => {
+    if (connected) logDisconnect('close');
     connected = false;
     connecting = false;
     socket = null;
@@ -417,10 +485,9 @@ setInterval(() => {
   if (pendingHandlers > 0) return;
   const better = betterOwnerThan(boundSocketPath, instancesOwningCwd(process.cwd()));
   if (better) {
-    console.error(
-      `[bukowski-bridge] ${boundSocketPath} does not own cwd ${process.cwd()} as closely as ` +
-      `${better.socket}; rebinding (see bug-25)`
-    );
+    bridgeLog('rebind', {
+      from: boundSocketPath, to: better.socket, cwd: process.cwd(), bug: 'bug-25',
+    });
     socket?.destroy();   // close handler clears state; next tick reconnects
   }
 }, RECONNECT_INTERVAL_MS).unref();
@@ -440,7 +507,17 @@ function processSocketBuffer() {
 
       // Check for agentId in init response
       if (response.id === '__init__' && response.result?.assignedAgentId) {
-        agentId = response.result.assignedAgentId;
+        const assigned = response.result.assignedAgentId;
+        // A changed id after a reconnect is not cosmetic: every agent holding
+        // the old one addresses a seat that no longer exists.
+        bridgeLog('identify', {
+          agent: assigned,
+          socket: boundSocketPath,
+          via: boundVia,
+          previous: agentId && agentId !== assigned ? agentId : undefined,
+          changed: agentId && agentId !== assigned ? true : undefined,
+        });
+        agentId = assigned;
         continue;
       }
 
@@ -708,11 +785,22 @@ async function handleRequest(request) {
       // Return static tools immediately (don't wait for bukowski). The
       // channel-only role exposes no tools so it doesn't duplicate the bare
       // server's fipa_* tools under a second namespace.
-      sendToStdout({
-        jsonrpc: '2.0',
-        id,
-        result: { tools: CHANNEL_ROLE ? [] : TOOLS }
-      });
+      {
+        const tools = CHANNEL_ROLE ? [] : TOOLS;
+        sendToStdout({ jsonrpc: '2.0', id, result: { tools } });
+        // The one line that says whether a client ever asked, and what it was
+        // handed. A client that caches this answer for the lifetime of its
+        // conversation — codex does — will not ask twice, so an empty or
+        // stale-looking registry later is explained by this timestamp and
+        // nothing after it (tip-13).
+        bridgeLog('tools-list', {
+          count: tools.length,
+          agent: agentId,
+          connected,
+          socket: boundSocketPath,
+          role: CHANNEL_ROLE ? 'channel' : undefined,
+        });
+      }
       // Try connecting in background
       tryConnectToBukowski();
       return;
@@ -777,6 +865,12 @@ async function handleRequest(request) {
         }
       } else {
         // Not connected to bukowski - show diagnostic info
+        bridgeLog('degraded-call', {
+          tool: params?.name,
+          agent: agentId,
+          socket: boundSocketPath,
+          lastDisconnect: lastDisconnect?.reason,
+        });
         sendToStdout({
           jsonrpc: '2.0',
           id,
@@ -808,6 +902,14 @@ async function handleRequest(request) {
  * Main entry point
  */
 function main() {
+  bridgeLog('start', {
+    cwd: process.cwd(),
+    role: CHANNEL_ROLE ? 'channel' : 'tools',
+    envSocket: process.env.BUKOWSKI_MCP_SOCKET,
+    envAgent: process.env.BUKOWSKI_AGENT_ID,
+    ppid: process.ppid,
+  });
+
   // Set up stdin handling immediately (don't block on bukowski connection)
   process.stdin.setEncoding('utf-8');
   process.stdin.on('data', (data) => {
@@ -824,15 +926,15 @@ function main() {
     process.exit(0);
   });
 
-  process.on('SIGTERM', () => {
-    socket?.destroy();
-    process.exit(0);
-  });
-
-  process.on('SIGINT', () => {
-    socket?.destroy();
-    process.exit(0);
-  });
+  // A bridge that is killed and a link that drops look identical from the
+  // agent's side; only the log can tell them apart afterwards.
+  for (const sig of ['SIGTERM', 'SIGINT']) {
+    process.on(sig, () => {
+      bridgeLog('stop', { signal: sig, agent: agentId, socket: boundSocketPath, connected });
+      socket?.destroy();
+      process.exit(0);
+    });
+  }
 }
 
 main();
