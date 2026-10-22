@@ -124,8 +124,15 @@ process.on('SIGUSR1', () => {
 // `kill -USR2 <pid>` reloads a stale process without a manual pkill+relaunch.
 // A node process can't exec-replace itself, and spawn+exit fights the parent
 // shell for the tty — so we use `tmux respawn-pane -k`, which kills this process
-// and relaunches the exact command in the same pane (fresh code, same args,
-// same cwd). Requires running inside tmux ($TMUX_PANE); logs + no-ops otherwise.
+// and relaunches the exact command in the same pane (fresh code, same args).
+// cwd must be passed explicitly with -c: respawn-pane starts in the PANE's
+// directory, not ours, and losing it is not cosmetic — the host name is derived
+// from cwd, so every instance restarted this way came back as `sheemeh*`
+// instead of azra-agent/meddaemon/projects, changing every agent's federated id
+// and breaking cross-instance addressing fleet-wide. The sidecar then claimed
+// cwd=/home/sheemeh, which contains every project directory, so the instance
+// would capture bridges belonging to all of them.
+// Requires running inside tmux ($TMUX_PANE); logs + no-ops otherwise.
 process.on('SIGUSR2', () => {
   const pane = process.env.TMUX_PANE;
   const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -137,7 +144,7 @@ process.on('SIGUSR2', () => {
   try {
     // Detached so it survives our imminent death; respawn-pane -k does the kill.
     require('child_process')
-      .spawn('tmux', ['respawn-pane', '-k', '-t', pane, relaunch], { detached: true, stdio: 'ignore' })
+      .spawn('tmux', ['respawn-pane', '-k', '-c', process.cwd(), '-t', pane, relaunch], { detached: true, stdio: 'ignore' })
       .unref();
     try { console.log(`[restart] SIGUSR2 respawning pane ${pane}: ${relaunch}`); } catch { /* ignore */ }
   } catch (err) {
