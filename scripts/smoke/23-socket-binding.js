@@ -19,7 +19,10 @@ const {
   pidFromFileName,
   readInstanceMeta,
   isWithin,
+  instanceCwd,
+  instanceSocket,
   instancesOwningCwd,
+  chooseSocket,
 } = require('../../src/mcp/socketDiscovery');
 
 let passed = 0;
@@ -117,6 +120,49 @@ const tied = owners(PROJECTS).filter((o) => o.cwd === PROJECTS);
 ok(tied.length === 3, 'three instances claim the same cwd');
 ok(tied[0].pid < tied[1].pid && tied[1].pid < tied[2].pid,
   'equal-depth candidates are ordered by pid, not by readdir order');
+
+console.log('10. durable cwd: un-upgraded instances still claim their own cwd');
+// An instance with a pid file and socket but NO sidecar — the pre-sidecar
+// fleet. If it could not claim its cwd, the shallower upgraded instance at
+// ~/projects would capture bridges belonging to it.
+const oldPid = 777001;   // distinct from block 1's instances, which have sidecars
+const oldSock = path.join(dir, `s-${oldPid}.sock`);
+fs.writeFileSync(oldSock, '');
+fs.writeFileSync(path.join(dir, String(oldPid)), oldSock);   // no .meta
+// Only the un-upgraded instance needs a kernel cwd; the rest have sidecars.
+const cwdOf = (pid) => (pid === oldPid ? AZRA : null);
+ok(readInstanceMeta(oldPid, dir) === null, 'the un-upgraded instance has no sidecar');
+ok(instanceCwd(oldPid, dir, cwdOf) === AZRA, 'its cwd comes from the kernel instead');
+ok(instanceSocket(oldPid, dir) === oldSock, 'its socket comes from the bare pid file');
+const nested = instancesOwningCwd(AZRA, { dir, isRunning: allRunning, cwdOf });
+ok(nested[0].pid === oldPid,
+  'a bridge in ~/projects/azra-agent prefers the un-upgraded DEEPER instance');
+ok(nested.some((o) => o.cwd === PROJECTS),
+  'the shallower upgraded instance is still a lower-ranked fallback');
+
+console.log('11. chooseSocket: env is kept when it is consistent or unopposed');
+const projSock = sockets[3525338];
+ok(chooseSocket({ envPath: projSock, envExists: true, owners: owners(PROJECTS) }).via === 'env',
+  'env naming an instance that owns our cwd is used as-is');
+ok(chooseSocket({ envPath: projSock, envExists: true, owners: [] }).via === 'env',
+  'env is kept when NO instance owns our cwd (a pane that cd\'d away)');
+ok(chooseSocket({ envPath: '/tmp/gone.sock', envExists: false, owners: owners(PROJECTS) }).via === 'cwd',
+  'a vanished env socket falls through to cwd ownership');
+ok(chooseSocket({ envPath: null, envExists: false, owners: [] }) === null,
+  'nothing to go on returns null so later stages run');
+
+console.log('12. chooseSocket: the bug-22 override');
+// The bg-spare case: env points at azra-agent, our cwd is ~/projects.
+const azraSock = sockets[846624];
+const decision = chooseSocket({
+  envPath: azraSock, envExists: true, owners: owners(PROJECTS),
+});
+ok(decision.via === 'cwd-override', 'inherited env that does not own our cwd is overridden');
+ok(decision.socket === owners(PROJECTS)[0].socket,
+  'and we bind to the best-ranked instance that does own it');
+ok(decision.overridden === azraSock, 'the rejected env path is reported for the log line');
+ok(chooseSocket({ envPath: azraSock, envExists: true, owners: owners(AZRA) }).via === 'env',
+  'the same env is honoured for a bridge genuinely under azra-agent');
 
 fs.rmSync(dir, { recursive: true, force: true });
 

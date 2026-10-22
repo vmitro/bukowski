@@ -50,6 +50,7 @@ const {
   readInstanceMeta,
   isWithin,
   instancesOwningCwd,
+  chooseSocket,
 } = require('./socketDiscovery');
 
 
@@ -169,32 +170,41 @@ const pendingRequests = new Map();
 
 /**
  * Discover bukowski's MCP socket
- * Priority: env var > owning cwd > ancestor PID match (cwd-checked) >
- *           most recent > legacy file
+ * Priority: env var (unless contradicted by cwd) > owning cwd >
+ *           ancestor PID match (cwd-checked) > most recent > legacy file
  * Called dynamically on each connect attempt (not cached)
  */
 function discoverSocket() {
   // Prune stale files first
   pruneStaleSocketFiles();
 
-  // 1. Explicit env var override (set by bukowski for child agents)
-  if (process.env.BUKOWSKI_MCP_SOCKET) {
-    const envPath = process.env.BUKOWSKI_MCP_SOCKET;
-    if (fs.existsSync(envPath)) {
-      return envPath;
-    }
-  }
-
-  // 2. The instance whose working directory contains ours. Checked BEFORE
-  // ancestry because ancestry can be flatly wrong: codex's app-server-daemon
-  // is machine-global, so a codex session's bridge is spawned under whichever
-  // bukowski first started that daemon, not the one whose pane it belongs to.
-  // That bound pane 8's codex to the azra-agent instance, where it answered as
-  // codex-azra-agent-1 while its real inbox sat unread on the projects
-  // instance. cwd is set from the session's own directory, so it survives the
-  // indirection that ancestry does not.
+  // 1-2. Explicit env override and cwd ownership, decided together.
+  //
+  // The env var is normally authoritative — bukowski sets it for its own child
+  // agents. But it is only trustworthy when it was EARNED rather than
+  // INHERITED. Claude Code pre-warms a `bg-spare` pool: a spare created by one
+  // pane keeps that pane's BUKOWSKI_MCP_SOCKET and is later handed to a session
+  // in another workspace, so an agent working in ~/projects bound to the
+  // azra-agent instance and drained azra's claude-2 queue (bug-22). chooseSocket
+  // overrides the env only when it names an instance that does not own our cwd
+  // AND another running instance does.
+  const envPath = process.env.BUKOWSKI_MCP_SOCKET || null;
   const owners = instancesOwningCwd(process.cwd());
-  if (owners.length) return owners[0].socket;
+  const choice = chooseSocket({
+    envPath,
+    envExists: !!envPath && fs.existsSync(envPath),
+    owners,
+  });
+  if (choice) {
+    if (choice.via === 'cwd-override') {
+      // stderr, never stdout — stdout carries the MCP JSON-RPC stream.
+      console.error(
+        `[bukowski-bridge] BUKOWSKI_MCP_SOCKET=${choice.overridden} does not own cwd ` +
+        `${process.cwd()}; binding to ${choice.socket} instead (inherited env, see bug-22)`
+      );
+    }
+    return choice.socket;
+  }
 
   // 3. Ancestor PID matching (for processes genuinely in a bukowski's tree),
   // but only when that instance's cwd could plausibly contain us. Without the

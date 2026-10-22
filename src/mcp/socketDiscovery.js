@@ -72,6 +72,45 @@ function isWithin(base, dir) {
 }
 
 /**
+ * An instance's working directory. Prefers its sidecar, falls back to the
+ * kernel.
+ *
+ * The fallback is what makes this durable: instances written before the
+ * sidecar existed make no cwd claim, and if cwd binding only worked for
+ * upgraded instances then a SHALLOWER upgraded instance could capture a
+ * bridge belonging to a DEEPER un-upgraded one (projects at ~/projects
+ * swallowing azra-agent at ~/projects/azra-agent). /proc knows the cwd of
+ * every running instance regardless of version, so the fleet does not have
+ * to restart in lockstep for the binding to be correct.
+ *
+ * Linux-only; elsewhere the readlink fails and we fall back to the sidecar,
+ * which is the pre-existing behaviour.
+ */
+function instanceCwd(pid, dir = SOCKETS_DIR, cwdOf = null) {
+  const meta = readInstanceMeta(pid, dir);
+  if (meta && meta.cwd) return meta.cwd;
+  try {
+    return (cwdOf || ((q) => fs.readlinkSync(`/proc/${q}/cwd`)))(pid);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * An instance's socket path: sidecar first, then the bare pid file that every
+ * version has always written.
+ */
+function instanceSocket(pid, dir = SOCKETS_DIR) {
+  const meta = readInstanceMeta(pid, dir);
+  if (meta && meta.socket) return meta.socket;
+  try {
+    return fs.readFileSync(path.join(dir, String(pid)), 'utf-8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Running instances that could own a bridge in `cwd`, best match first.
  * "Best" = deepest cwd: with instances in ~/projects and
  * ~/projects/azra-agent, a bridge in the latter belongs to the latter.
@@ -87,14 +126,41 @@ function instancesOwningCwd(cwd, opts = {}) {
     for (const file of fs.readdirSync(dir)) {
       const pid = pidFromFileName(file);
       if (isNaN(pid) || !isRunning(pid)) continue;
-      const meta = readInstanceMeta(pid, dir);
-      if (!meta || !isWithin(meta.cwd, cwd)) continue;
-      if (!exists(meta.socket)) continue;
-      out.push({ pid, socket: meta.socket, cwd: path.resolve(meta.cwd) });
+      const theirCwd = instanceCwd(pid, dir, opts.cwdOf);
+      if (!isWithin(theirCwd, cwd)) continue;
+      const socket = instanceSocket(pid, dir);
+      if (!socket || !exists(socket)) continue;
+      out.push({ pid, socket, cwd: path.resolve(theirCwd) });
     }
   } catch { /* directory may not exist yet */ }
   // Deepest cwd wins; stable by pid so a tie is not arbitrary run to run.
   return out.sort((a, b) => (b.cwd.length - a.cwd.length) || (a.pid - b.pid));
+}
+
+/**
+ * Decide which socket to use given an explicit env override and the instances
+ * that own our cwd.
+ *
+ * BUKOWSKI_MCP_SOCKET used to win on existence alone, which is wrong when the
+ * env is inherited rather than earned. Claude Code pre-warms a `bg-spare`
+ * process pool: a spare created by one pane carries that pane's
+ * BUKOWSKI_MCP_SOCKET/BUKOWSKI_AGENT_ID and is then handed to a session in a
+ * DIFFERENT workspace, so the agent doing projects work bound to the
+ * azra-agent instance and drained azra's claude-2 queue (bug-22).
+ *
+ * Conservative on purpose: env is overridden only when it names an instance
+ * that does NOT own our cwd AND some other running instance does. With no
+ * better candidate the env is kept, so a pane that merely cd'd outside its
+ * instance's tree is unaffected.
+ */
+function chooseSocket({ envPath, envExists, owners }) {
+  if (envPath && envExists) {
+    if (!owners || owners.length === 0) return { socket: envPath, via: 'env' };
+    if (owners.some((o) => o.socket === envPath)) return { socket: envPath, via: 'env' };
+    return { socket: owners[0].socket, via: 'cwd-override', overridden: envPath };
+  }
+  if (owners && owners.length) return { socket: owners[0].socket, via: 'cwd' };
+  return null;
 }
 
 module.exports = {
@@ -103,5 +169,8 @@ module.exports = {
   pidFromFileName,
   readInstanceMeta,
   isWithin,
+  instanceCwd,
+  instanceSocket,
   instancesOwningCwd,
+  chooseSocket,
 };
