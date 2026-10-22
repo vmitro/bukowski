@@ -50,7 +50,9 @@ const {
   pidFromFileName,
   readInstanceMeta,
   isWithin,
+  instanceCwd,
   instancesOwningCwd,
+  instancesWithCwd,
   pidFromSocketPath,
   socketIsLive,
   chooseSocket,
@@ -181,6 +183,10 @@ let connected = false;
 let connecting = false;
 let boundSocketPath = null;   // which instance we actually attached to
 let boundVia = null;          // which discovery stage chose it
+// The directory of the instance we last reached. A restart changes its pid and
+// socket path but never this, so it is how we find the same seat again.
+let boundInstanceCwd = null;
+let everBound = false;
 let connectedAt = 0;
 // A down instance is retried every RECONNECT_INTERVAL_MS. Logging each attempt
 // would bury the interesting lines, so a failure streak logs once and stays
@@ -232,6 +238,18 @@ function discoverSocket() {
     return choice;
   }
 
+  // 2.5. The instance we had before, back under a new pid.
+  //
+  // Reconnecting is the common case, not the exceptional one: the bridge
+  // outlives the instance it serves (codex's app-server-daemon owns the
+  // process) and retries every few seconds. Nothing below this line can tell
+  // "my instance restarted" from "some instance exists", so without this the
+  // first reconnect after a restart could land anywhere on the box.
+  if (boundInstanceCwd) {
+    const home = instancesWithCwd(boundInstanceCwd);
+    if (home.length) return { socket: home[0].socket, via: 'sticky', instance: home[0].pid };
+  }
+
   // 3. Ancestor PID matching (for processes genuinely in a bukowski's tree),
   // but only when that instance's cwd could plausibly contain us. Without the
   // check a shared daemon's ancestry silently outranks the truth.
@@ -256,7 +274,24 @@ function discoverSocket() {
         }
       }
 
-      // 4. Most recent active session (fallback for external tools)
+      // 4. Most recent active session (fallback for external tools).
+      //
+      // This is a guess, and only defensible for a bridge that has never had a
+      // home: a bare REPL in a directory no instance owns is better off on
+      // SOME instance than on none. For a bridge that WAS bound it is wrong by
+      // construction — its instance is merely down, and attaching to an
+      // unrelated one moves the agent onto another project's roster under a
+      // name its correspondents have never seen. Observed in a test: a bridge
+      // whose instance was killed reattached within 300ms to an instance in a
+      // different repository.
+      if (everBound) {
+        if (!downLogged) {
+          downLogged = true;
+          bridgeLog('home-down', { instanceCwd: boundInstanceCwd, cwd: process.cwd() });
+        }
+        return null;
+      }
+
       // Collect active sessions with mtime, sort by most recent first
       const activeSessions = [];
       for (const file of files) {
@@ -409,10 +444,13 @@ function tryConnectToBukowski() {
     connecting = false;
     connectedAt = Date.now();
     downLogged = false;
+    everBound = true;
+    boundInstanceCwd = instanceCwd(pidFromSocketPath(socketPath)) || boundInstanceCwd;
     agentType = detectAgentType();
     bridgeLog('connect', {
       socket: socketPath,
       via: choice.via,
+      instanceCwd: boundInstanceCwd,
       instance: choice.instance ?? (pidFromSocketPath(socketPath) || undefined),
       agentType,
       envAgent: process.env.BUKOWSKI_AGENT_ID,

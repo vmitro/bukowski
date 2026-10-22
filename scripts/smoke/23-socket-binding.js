@@ -22,6 +22,7 @@ const {
   instanceCwd,
   instanceSocket,
   instancesOwningCwd,
+  instancesWithCwd,
   pidFromSocketPath,
   socketIsLive,
   chooseSocket,
@@ -208,6 +209,29 @@ const tied2 = owners(PROJECTS).filter((o) => o.cwd === PROJECTS);
 ok(tied2.length >= 2, 'several instances claim the same depth');
 ok(betterOwnerThan(tied2[1].socket, owners(PROJECTS)) === null,
   'equal-depth owner is not a reason to rebind (no flapping)');
+
+console.log('16. finding the same instance again after it restarts');
+// A restart changes the instance's pid and socket path and keeps its cwd, so
+// the cwd is the only durable handle a reconnecting bridge has on "the seat I
+// had". Without it the fallback is "whichever instance was touched most
+// recently", which quietly relocates the agent to another project's roster.
+const withCwd = (cwd) => instancesWithCwd(cwd, { dir, isRunning: allRunning });
+ok(withCwd(AZRA).length === 1, 'exactly the instance sitting in that directory');
+ok(withCwd(AZRA)[0].pid === 846624, 'identified by pid');
+ok(withCwd(PROJECTS).every((i) => i.cwd === PROJECTS), 'never a parent or a child');
+ok(!withCwd(PROJECTS).some((i) => i.pid === 846624),
+  'the nested instance does NOT answer for its parent directory');
+ok(withCwd(`${AZRA}/`).length === 1, 'a trailing slash is the same directory');
+ok(withCwd('/home/sheemeh/projects/azra-agent-old').length === 0,
+  'a directory with a shared prefix is not it');
+ok(withCwd(null).length === 0 && withCwd('').length === 0, 'no remembered directory → no claim');
+ok(withCwd('/nowhere').length === 0, 'a vanished directory finds nothing, rather than guessing');
+// Replacement: same cwd, new pid, new socket — which is what a restart is.
+instance(3999001, AZRA);
+const afterRestart = withCwd(AZRA);
+ok(afterRestart.length === 2, 'both the old and the new instance answer while both live');
+ok(afterRestart[0].pid === 846624 && afterRestart[1].pid === 3999001,
+  'ordered by pid, so the choice is not arbitrary run to run');
 
 fs.rmSync(dir, { recursive: true, force: true });
 

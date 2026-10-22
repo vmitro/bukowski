@@ -241,7 +241,101 @@ async function live() {
   ok(find('stop')[0].includes('signal=SIGTERM'), 'with the signal that did it');
 }
 
-live().then(() => {
+/**
+ * A bridge that loses its instance must wait for it, not adopt a stranger.
+ *
+ * Discovery's last resort is "the most recently touched instance on the box",
+ * which is a reasonable guess for a REPL that never had a home and plainly
+ * wrong for a bridge whose instance is merely restarting: it moves the agent
+ * onto another project's roster under a name nobody is writing to. This is not
+ * hypothetical — it happened in this very test file before the fix, when the
+ * fake instance died and the bridge attached to a real bukowski on the box
+ * within one reconnect tick.
+ */
+async function live2() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bukowski-bridgehome-'));
+  const socksDir = path.join(home, '.bukowski', 'sockets');
+  fs.mkdirSync(socksDir, { recursive: true });
+  const instanceCwd = path.join(home, 'work');          // where the instance runs
+  const bridgeCwd = path.join(home, 'outside');         // NOT inside it
+  fs.mkdirSync(instanceCwd); fs.mkdirSync(bridgeCwd);
+  const liveLog = path.join(home, 'live2.log');
+
+  const sleepers = [];
+  /** A pid that is really alive: discovery rejects sockets of dead pids. */
+  function sleeper() {
+    const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' });
+    sleepers.push(c);
+    return c.pid;
+  }
+  /** Publish an instance the way bukowski does: pid file, sidecar, socket. */
+  async function publishInstance(cwd, agentId) {
+    const pid = sleeper();
+    const sockPath = path.join(home, `bukowski-mcp-${pid}.sock`);
+    const inst = await fakeInstance(sockPath, agentId);
+    fs.writeFileSync(path.join(socksDir, String(pid)), sockPath);
+    fs.writeFileSync(path.join(socksDir, `${pid}.meta`), JSON.stringify({ socket: sockPath, pid, cwd }));
+    return { pid, sockPath, inst };
+  }
+
+  const ours = await publishInstance(instanceCwd, 'codex-work-1');
+  const stranger = await publishInstance(path.join(home, 'elsewhere'), 'codex-elsewhere-1');
+
+  const bridge = spawn(process.execPath, [BRIDGE], {
+    cwd: bridgeCwd,
+    env: {
+      ...process.env,
+      HOME: home,
+      // Bound by the env, like a bridge whose pane exported it — so our cwd is
+      // not what found the instance, and cannot find it again.
+      BUKOWSKI_MCP_SOCKET: ours.sockPath,
+      BUKOWSKI_BRIDGE_LOG: liveLog,
+      BUKOWSKI_AGENT_ID: '',
+      BUKOWSKI_AGENT_TYPE: 'codex',
+      BUKOWSKI_BRIDGE_RECONNECT_MS: '300',
+    },
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  const send = (o) => bridge.stdin.write(`${JSON.stringify(o)}\n`);
+  const events = () => fs.readFileSync(liveLog, 'utf-8').trim().split('\n');
+  const find = (name) => events().filter((l) => l.includes(` event=${name} `) || l.endsWith(` event=${name}`));
+
+  send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  await sleep(500);
+
+  console.log('13. the instance it reached is remembered by directory');
+  ok(find('connect').length === 1, 'bound once, by the env it was given');
+  ok(find('connect')[0].includes(`instanceCwd=${instanceCwd}`),
+    "the instance's own directory is recorded — the one thing a restart preserves");
+
+  console.log('14. its instance dies while another is live and listening');
+  ours.inst.kill();
+  try { fs.unlinkSync(ours.sockPath); } catch { /* node may have unlinked it */ }
+  await sleep(1500);   // several reconnect ticks
+  ok(find('disconnect').length === 1, 'the drop is recorded');
+  ok(!find('connect').some((l) => l.includes(stranger.sockPath)),
+    'it does NOT attach to the unrelated instance that is up');
+  ok(find('home-down').length === 1, 'it says out loud that its own instance is down');
+  ok(find('home-down')[0].includes(`instanceCwd=${instanceCwd}`), 'naming the instance it is waiting for');
+
+  console.log('15. the instance comes back under a new pid; the bridge comes home');
+  const replacement = await publishInstance(instanceCwd, 'codex-work-1');
+  await sleep(1200);
+  const back = find('connect').filter((l) => l.includes(replacement.sockPath));
+  ok(back.length === 1, 'it reconnects to the replacement');
+  ok(back[0].includes('via=sticky'), 'via the remembered directory, not a guess');
+  ok(back[0].includes(`instance=${replacement.pid}`), 'which is a different process than before');
+  ok(replacement.pid !== ours.pid, '(and really is a different pid)');
+
+  bridge.kill('SIGTERM');
+  await sleep(200);
+  for (const c of sleepers) { try { c.kill('SIGKILL'); } catch { /* gone */ } }
+  stranger.inst.kill();
+  replacement.inst.kill();
+  fs.rmSync(home, { recursive: true, force: true });
+}
+
+live().then(live2).then(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);

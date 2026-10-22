@@ -117,7 +117,7 @@ function instanceSocket(pid, dir = SOCKETS_DIR) {
  * @param {string} cwd
  * @param {object} [opts] - { dir, isRunning } overrides for tests
  */
-function instancesOwningCwd(cwd, opts = {}) {
+function liveInstances(opts = {}) {
   const dir = opts.dir || SOCKETS_DIR;
   const isRunning = opts.isRunning || isPidRunning;
   const exists = opts.exists || fs.existsSync;
@@ -127,14 +127,38 @@ function instancesOwningCwd(cwd, opts = {}) {
       const pid = pidFromFileName(file);
       if (isNaN(pid) || !isRunning(pid)) continue;
       const theirCwd = instanceCwd(pid, dir, opts.cwdOf);
-      if (!isWithin(theirCwd, cwd)) continue;
+      if (!theirCwd) continue;
       const socket = instanceSocket(pid, dir);
       if (!socket || !exists(socket)) continue;
       out.push({ pid, socket, cwd: path.resolve(theirCwd) });
     }
   } catch { /* directory may not exist yet */ }
-  // Deepest cwd wins; stable by pid so a tie is not arbitrary run to run.
-  return out.sort((a, b) => (b.cwd.length - a.cwd.length) || (a.pid - b.pid));
+  return out;
+}
+
+function instancesOwningCwd(cwd, opts = {}) {
+  return liveInstances(opts)
+    .filter((i) => isWithin(i.cwd, cwd))
+    // Deepest cwd wins; stable by pid so a tie is not arbitrary run to run.
+    .sort((a, b) => (b.cwd.length - a.cwd.length) || (a.pid - b.pid));
+}
+
+/**
+ * Live instances sitting in EXACTLY this directory.
+ *
+ * This is how a bridge finds its way home after the instance it was bound to
+ * is replaced. A restart changes the pid and the socket path but not the
+ * directory the instance runs in, so the old instance's cwd is the one durable
+ * handle on "the same seat as before" — and following it beats the alternative,
+ * which was to take whichever instance on the box had been touched most
+ * recently (see chooseSocket's caller).
+ */
+function instancesWithCwd(cwd, opts = {}) {
+  if (!cwd) return [];
+  const want = path.resolve(cwd);
+  return liveInstances(opts)
+    .filter((i) => i.cwd === want)
+    .sort((a, b) => a.pid - b.pid);
 }
 
 /**
@@ -221,6 +245,8 @@ function betterOwnerThan(currentSocket, owners) {
 
 module.exports = {
   SOCKETS_DIR,
+  liveInstances,
+  instancesWithCwd,
   isPidRunning,
   pidFromFileName,
   readInstanceMeta,
