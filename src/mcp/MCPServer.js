@@ -250,7 +250,10 @@ class MCPServer extends EventEmitter {
       },
       {
         name: 'register_agent',
-        description: 'Register this agent with bukowski (called automatically by bridge)',
+        description: 'Report the identity this connection was assigned at its bridge handshake: '
+          + 'the seat id, every name that actually routes to it, and a warning for any name of '
+          + 'yours that resolves to a different agent. Does NOT create an identity — the bridge '
+          + 'is assigned one during initialize, so a connection without one cannot register itself.',
         inputSchema: {
           type: 'object',
           required: ['type'],
@@ -821,12 +824,50 @@ class MCPServer extends EventEmitter {
       }
 
       case 'register_agent': {
-        // Called by bridge to explicitly register
-        // Usually handled in initialize, but can be called manually
-        const agentType = args.type || 'unknown';
-        // Find the socket for this caller (best effort)
-        const agentId = callerAgentId || `${agentType}-ext-${Date.now()}`;
-        return { agentId, registered: true };
+        // Registration happens at the bridge's `initialize`, never here. This
+        // tool only REPORTS the identity that handshake produced.
+        //
+        // It used to answer `{agentId, registered: true}` unconditionally, and
+        // with no caller identity it invented `<type>-ext-<timestamp>` — an id
+        // in no roster and no message queue, handed back as if it had been
+        // registered. An agent that called this to work out who it was got a
+        // confident answer it could not be reached at. That is how ADR-46's
+        // reviewer spent hours believing its seat was codex-projects-2: the
+        // name was real (its bridge had been minted it) but every send to it
+        // resolved to a PANE ALIAS belonging to another agent, and nothing in
+        // this reply said so.
+        //
+        // So: report the seat, every name that actually routes to it, and
+        // whether any of those names is contested. Never mint one.
+        if (!callerAgentId) {
+          return {
+            registered: false,
+            agentId: null,
+            reason: 'This connection has no identity. The bridge is assigned one '
+              + 'during its MCP initialize handshake; a caller cannot register itself. '
+              + 'Check ~/.bukowski/bridge.log for this bridge\'s connect/identify lines.',
+          };
+        }
+        const federatedId = this.federationHub?.federatedIdFor?.(callerAgentId) || null;
+        const routable = [callerAgentId];
+        if (federatedId && federatedId !== callerAgentId) routable.push(federatedId);
+        // A name of ours that resolves to a DIFFERENT local agent is shadowed:
+        // sends to it reach that agent, not this one (bug-21).
+        const shadowed = routable.filter((id) => {
+          const local = this.federationHub?.resolveLocalAlias?.(id) || null;
+          return !!local && local !== id && local !== callerAgentId;
+        });
+        return {
+          registered: true,
+          agentId: callerAgentId,
+          type: args.type || this.externalAgents.get(callerAgentId)?.type || 'unknown',
+          routableAs: routable.filter((id) => !shadowed.includes(id)),
+          ...(shadowed.length ? {
+            shadowed,
+            warning: `${shadowed.join(', ')} resolve(s) to a different agent on this `
+              + 'instance and will not reach you — do not advertise it (bug-21).',
+          } : {}),
+        };
       }
 
       // ── project dashboard ────────────────────────────────────────────────

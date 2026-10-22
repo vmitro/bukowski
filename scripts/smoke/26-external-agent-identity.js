@@ -207,7 +207,50 @@ async function run() {
     'no pid, no reuse — the old behaviour, not a crash');
 }
 
-run().then(() => {
+/**
+ * register_agent must report, not invent.
+ *
+ * It answered {agentId, registered: true} whatever happened, and with no
+ * caller identity it minted <type>-ext-<timestamp>: an id in no roster and no
+ * queue, returned as though it had been registered. ADR-46's reviewer used it
+ * to establish its own seat and was told codex-projects-2 — a real name its
+ * bridge had been minted, which resolved to a PANE ALIAS belonging to another
+ * agent. Every send to it reached that agent instead, for hours, and this
+ * reply gave no hint of it.
+ */
+async function registrationReporting() {
+  console.log('12. register_agent reports the handshake, and never invents one');
+  const panes = [{ localId: 'codex-2', federatedId: 'codex-projects-2' }];
+  const server = serverWithPanes(panes);
+  server.federationHub.federatedIdFor = (localId) =>
+    panes.find((p) => p.localId === localId)?.federatedId || null;
+
+  const anon = await server._handleToolCall('register_agent', { type: 'codex' }, null);
+  ok(anon.registered === false, 'no caller identity -> registered: false, not a cheerful true');
+  ok(anon.agentId === null, 'and no id at all');
+  ok(!JSON.stringify(anon).includes('-ext-'), 'never mints <type>-ext-<timestamp>');
+  ok(/bridge\.log/.test(anon.reason), 'it says where to look instead');
+
+  console.log('13. a pane is told the names that reach it');
+  const pane = await server._handleToolCall('register_agent', { type: 'codex' }, 'codex-2');
+  ok(pane.registered === true && pane.agentId === 'codex-2', 'its own seat');
+  ok(pane.routableAs.includes('codex-2') && pane.routableAs.includes('codex-projects-2'),
+    'both its local id and its federated alias route to it');
+  ok(!pane.shadowed, 'nothing of its own is contested');
+
+  console.log('14. a shadowed seat is warned, not reassured');
+  // The ADR-46 case: an external seat minted with a name a pane answers to.
+  server.externalAgents.set('codex-projects-2', { type: 'codex', host: 'projects' });
+  const shadowedSeat = await server._handleToolCall('register_agent', { type: 'codex' }, 'codex-projects-2');
+  ok(shadowedSeat.registered === true, 'it is registered — the seat is real');
+  ok(shadowedSeat.shadowed?.includes('codex-projects-2'),
+    'but the name is named as shadowed');
+  ok(!shadowedSeat.routableAs.includes('codex-projects-2'),
+    'and is NOT offered as routable');
+  ok(/bug-21/.test(shadowedSeat.warning || ''), 'with the defect to read about');
+}
+
+run().then(registrationReporting).then(() => {
   reapSleepers();
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
