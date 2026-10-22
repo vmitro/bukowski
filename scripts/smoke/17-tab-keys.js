@@ -122,6 +122,33 @@ const shown = (lm) => lm.getFocusedPane().agentId;
     'no pane was duplicated onto the same agent');
 }
 
+// ── zoom must not make the layout look like a single pane ───────────────────
+//
+// handleAgentExit read `getAllPanes().length === 1` as "last pane, quit the
+// instance". While zoomed, this.layout is a detached single-pane view, so that
+// was ALWAYS true: /exit in a zoomed codex pane shut down the whole bukowski
+// instance and took every sibling agent with it. closeParkedPane had the same
+// read, and the chat/dashboard dedupe lookups went blind to background panes.
+{
+  const { lm } = setup(['claude-1', 'claude-2', 'claude-3']);
+  ok(lm.getAllPanes().length === 3, 'three panes unzoomed');
+  ok(lm.getRealPanes().length === 3, 'getRealPanes agrees while unzoomed');
+
+  const target = lm.getAllPanes().find((p) => p.agentId === 'claude-3');
+  lm.focusPane(target.id);
+  lm.toggleZoom();
+
+  ok(lm.getAllPanes().length === 1,
+    'getAllPanes sees only the zoomed pane — this is the trap');
+  ok(lm.getRealPanes().length === 3,
+    'getRealPanes still sees all three; the quit guard must use this');
+  ok(lm.getRealPanes().some((p) => p.agentId === 'claude-1'),
+    'a background agent stays discoverable while zoomed (chat/dashboard dedupe)');
+
+  lm.toggleZoom();
+  ok(lm.getAllPanes().length === 3, 'unzoom restores the real count');
+}
+
 if (failed > 0) {
   console.log(`${failed} assertion(s) failed`);
   process.exit(1);

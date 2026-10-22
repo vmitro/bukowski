@@ -530,7 +530,12 @@ terminal.registerSignalHandlers();
     // Clean exit (code 0). Find the pane for this agent.
     const pane = layoutManager.findPaneByAgent(agent.id);
     if (pane) {
-      const allPanes = layoutManager.getAllPanes();
+      // getRealPanes, NOT getAllPanes: while a pane is zoomed, this.layout is
+      // a detached single-pane view, so getAllPanes() always reports exactly
+      // one pane and this read "last pane, quit entirely". Exiting a zoomed
+      // agent therefore shut down the whole instance — /exit in a zoomed codex
+      // pane killed every sibling agent and left tmux showing a dead pane.
+      const allPanes = layoutManager.getRealPanes();
       const isVirtual = agent.type === 'chat' || agent.type === 'dashboard';
 
       if (allPanes.length === 1) {
@@ -588,7 +593,9 @@ terminal.registerSignalHandlers();
     const pane = layoutManager.findPaneByAgent(agent.id);
     if (!pane) return;
     layoutManager.focusPane(pane.id);
-    if (layoutManager.getAllPanes().length === 1) {
+    // Zoom-safe for the same reason as handleAgentExit: 'q' on a parked pane
+    // must not quit the instance just because the pane happened to be zoomed.
+    if (layoutManager.getRealPanes().length === 1) {
       terminal.cleanup();
       if (ipcHub) ipcHub.stop();
       session.destroy();
@@ -2020,9 +2027,13 @@ terminal.registerSignalHandlers();
   // createChatPane: a virtual, PTY-less pane that tiles like any other.
   function createDashboardPane(splitDir = 'horizontal') {
     // One board is plenty — focus an existing one instead of stacking.
-    const existing = layoutManager.getAllPanes().find(p => p.agentId.startsWith('dashboard-'));
+    // Real panes: a board hidden behind a zoom still counts, otherwise
+    // "one board is plenty" silently stacked a second one.
+    const existing = layoutManager.getRealPanes().find(p => p.agentId.startsWith('dashboard-'));
     if (existing) {
-      layoutManager.focusPane(existing.id);
+      // showAgent re-zooms onto the owning pane when zoomed; focusPane alone
+      // cannot reach a pane that is not in the detached zoom layout.
+      if (!layoutManager.showAgent(existing.agentId)) layoutManager.focusPane(existing.id);
       compositor.draw();
       return session.getAgent(existing.agentId);
     }
@@ -2107,11 +2118,14 @@ terminal.registerSignalHandlers();
     }
 
     // Find existing chat panes
-    const chatPanes = layoutManager.getAllPanes().filter(p => p.agentId.startsWith('chat-'));
+    const chatPanes = layoutManager.getRealPanes().filter(p => p.agentId.startsWith('chat-'));
 
     if (chatPanes.length > 0) {
-      // Focus the most recent chat pane
-      layoutManager.focusPane(chatPanes[chatPanes.length - 1].id);
+      // Focus the most recent chat pane. Real panes, so Ctrl+Space c focuses
+      // the existing chat instead of spawning another one whenever the current
+      // pane is zoomed.
+      const target = chatPanes[chatPanes.length - 1];
+      if (!layoutManager.showAgent(target.agentId)) layoutManager.focusPane(target.id);
       compositor.draw();
     } else {
       // No chat panes - show conversation picker to create one
