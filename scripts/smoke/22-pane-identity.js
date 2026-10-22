@@ -156,6 +156,7 @@ if (!fs.existsSync('/proc/self/stat')) {
       s.session = { getAllAgents: () => [pane], getAgent: (id) => (id === pane.id ? pane : null) };
       s.externalAgents = new Map();
       s.agentCounters = new Map();
+      s.externalAgentKeys = new Map();
       s.channelSockets = new Map();
       s.emit = () => {};
       s._getToolsForAgent = () => [];

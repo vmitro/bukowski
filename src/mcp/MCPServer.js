@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { hostFromCwd } = require('../utils/host');
+const { isPidRunning } = require('./socketDiscovery');
 const { resolvePaneAgent } = require('../utils/procTree');
 
 /**
@@ -80,6 +81,9 @@ class MCPServer extends EventEmitter {
 
     // Counter for generating unique agent IDs
     this.agentCounters = new Map();  // type -> count
+    // Stable identity for external bridges across reconnects: <type,host,bridge
+    // pid> -> the id already assigned to it. See _assignAgentId.
+    this.externalAgentKeys = new Map();
 
     // Federation hub, attached by the host process once it's running.
     // Used so `list_agents` can also surface remote agents reachable
@@ -433,7 +437,7 @@ class MCPServer extends EventEmitter {
           // External agent via bridge - assign a unique ID. Host segment comes
           // from the bridge's cwd basename so a claude REPL in ~/azra shows up
           // as claude-azra-1; legacy bridges with no cwd land as claude-ext-1.
-          assignedId = this._assignAgentId(params.agentType, socket, params.cwd);
+          assignedId = this._assignAgentId(params.agentType, socket, params.cwd, params.pid);
         }
 
         clientState.agentId = assignedId;
@@ -1235,17 +1239,40 @@ class MCPServer extends EventEmitter {
    * @param {string} agentType - Type of agent (claude, codex, gemini, unknown)
    * @param {net.Socket} socket - The socket connection
    * @param {string} [cwd] - Bridge's cwd; basename becomes the host segment
+   * @param {number} [bridgePid] - The bridge's own pid; makes the id stable
+   *   across reconnects of the same bridge process
    * @returns {string} Assigned agent ID
    */
-  _assignAgentId(agentType, socket, cwd) {
+  _assignAgentId(agentType, socket, cwd, bridgePid) {
     const host = hostFromCwd(cwd);
 
-    // Counter is per <type, host> so each origin directory has its own n.
-    const counterKey = `${agentType}-${host}`;
-    const count = (this.agentCounters.get(counterKey) || 0) + 1;
-    this.agentCounters.set(counterKey, count);
+    // An external bridge keeps its name across reconnects.
+    //
+    // This counter used to run forward on every `initialize`, and a bridge
+    // re-identifies far more often than it is created: it survives the
+    // instance it was bound to (codex's app-server-daemon owns the process,
+    // not the pane), and since the reconnect loop landed it re-attaches the
+    // moment an instance comes back. Each of those cost a number. One codex in
+    // ~/projects accumulated codex-projects-1 through -5, with four of those
+    // ids pointing at nothing: whoever still addressed an earlier one was
+    // writing to a seat that had been deleted on close, which is what a
+    // session "losing connectivity mid-session" actually looked like from the
+    // other side — the link was fine, the name was not.
+    //
+    // The bridge process is the stable thing, so key on it. A recycled pid can
+    // inherit an id from a long-dead bridge with the same type and origin
+    // directory, which is the same seat it would have been given anyway.
+    const key = bridgePid ? `${agentType}-${host}-pid${bridgePid}` : null;
+    const existing = key ? this.externalAgentKeys.get(key) : null;
 
-    const agentId = `${agentType}-${host}-${count}`;
+    const agentId = existing || (() => {
+      // Counter is per <type, host> so each origin directory has its own n.
+      const counterKey = `${agentType}-${host}`;
+      const count = (this.agentCounters.get(counterKey) || 0) + 1;
+      this.agentCounters.set(counterKey, count);
+      return `${agentType}-${host}-${count}`;
+    })();
+    if (key) this.externalAgentKeys.set(key, agentId);
 
     // Track the external agent
     this.externalAgents.set(agentId, {
@@ -1257,11 +1284,19 @@ class MCPServer extends EventEmitter {
 
     // Clean up when socket closes
     socket.once('close', () => {
+      // A reconnect can land before the old socket's close is delivered; that
+      // close must not evict the live registration that replaced it.
+      if (this.externalAgents.get(agentId)?.socket !== socket) return;
       this.externalAgents.delete(agentId);
+      // Hold the name only while the bridge that earned it is still alive —
+      // a dropped link is temporary, a dead process is not.
+      if (key && bridgePid && !isPidRunning(bridgePid)) {
+        this.externalAgentKeys.delete(key);
+      }
       this.emit('external_agent:disconnected', agentId);
     });
 
-    this.emit('external_agent:connected', { agentId, agentType });
+    this.emit('external_agent:connected', { agentId, agentType, reused: !!existing });
 
     return agentId;
   }
