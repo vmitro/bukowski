@@ -182,13 +182,35 @@ async function live() {
   const events = () => fs.readFileSync(liveLog, 'utf-8').trim().split('\n');
   const find = (name) => events().filter((l) => l.includes(` event=${name} `) || l.endsWith(` event=${name}`));
 
-  send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  send({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2024-11-05',
+      clientInfo: { name: 'codex', version: '0.164.0', sessionId: 'c0ffee' },
+      capabilities: {},
+    },
+  });
   await sleep(500);
 
   console.log('6. a bridge announces itself before it knows anything');
   ok(find('start').length === 1, 'start is logged once, at boot');
   ok(find('start')[0].includes(`cwd=${tmp}`), 'with the cwd that decides its binding');
   ok(find('start')[0].includes('role=tools'), 'and the role it is serving');
+
+  console.log('6b. what the client said about itself is on the record');
+  // A codex tools seat is renumbered on every daemon bounce because the only
+  // handle for a stable seat is the bridge pid, and the daemon makes a new
+  // bridge each time. A durable id would have to arrive here, so record what
+  // is on offer rather than speculating about it.
+  const ci = find('client-initialize');
+  ok(ci.length === 1, 'the client initialize is logged');
+  ok(ci[0].includes('client=codex') && ci[0].includes('clientVersion=0.164.0'),
+    'with who is asking');
+  ok(ci[0].includes('clientInfoKeys=name,version,sessionId'),
+    'and the KEYS it offered — a session id shows up by name if it exists');
+  ok(!ci[0].includes('c0ffee'), 'keys only: the values are the client\'s business');
 
   console.log('7. the binding is recorded, with the stage that chose it');
   ok(find('connect').length === 1, 'connect is logged');

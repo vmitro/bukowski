@@ -810,6 +810,23 @@ async function handleRequest(request) {
           serverInfo: { name: 'bukowski-mcp-bridge', version: '1.0.0' }
         }
       });
+      // What the CLIENT told us about itself.
+      //
+      // A codex tools seat is renumbered on every daemon bounce because the
+      // only thing we can key a stable seat on is the bridge's pid, and the
+      // daemon spawns a fresh bridge each time. The fix needs a handle that
+      // outlives the process — a codex conversation or session id would do —
+      // and the client's own initialize is the one place such a thing could
+      // arrive. Record what is actually offered instead of guessing: keys
+      // only, plus clientInfo, so a session id shows up by name without
+      // logging whatever else the params carry.
+      bridgeLog('client-initialize', {
+        client: params?.clientInfo?.name,
+        clientVersion: params?.clientInfo?.version,
+        protocol: params?.protocolVersion,
+        paramKeys: params ? Object.keys(params).join(',') : null,
+        clientInfoKeys: params?.clientInfo ? Object.keys(params.clientInfo).join(',') : null,
+      });
       // Try connecting to bukowski in background
       tryConnectToBukowski();
       return;
