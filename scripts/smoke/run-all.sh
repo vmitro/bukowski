@@ -17,6 +17,7 @@ scripts=(
   "$here/24-session-id-ownership.js"
   "$here/25-bridge-log.js"
   "$here/26-external-agent-identity.js"
+  "$here/28-agent-aliases.js"
   "$here/21-list-agents-aliases.js"
   "$here/20-fipa-reply-tools.js"
   "$here/10-local-alias-fipa.js"

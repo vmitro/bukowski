@@ -84,6 +84,10 @@ class MCPServer extends EventEmitter {
     // Stable identity for external bridges across reconnects: <type,host,bridge
     // pid> -> the id already assigned to it. See _assignAgentId.
     this.externalAgentKeys = new Map();
+    // Self-chosen addressable names: alias -> agentId. The only identity on
+    // this box that an agent controls and that survives its seat changing.
+    // See _claimAlias.
+    this.agentAliases = new Map();
 
     // Federation hub, attached by the host process once it's running.
     // Used so `list_agents` can also surface remote agents reachable
@@ -250,15 +254,23 @@ class MCPServer extends EventEmitter {
       },
       {
         name: 'register_agent',
-        description: 'Report the identity this connection was assigned at its bridge handshake: '
-          + 'the seat id, every name that actually routes to it, and a warning for any name of '
-          + 'yours that resolves to a different agent. Does NOT create an identity — the bridge '
-          + 'is assigned one during initialize, so a connection without one cannot register itself.',
+        description: 'Report the identity this connection was assigned at its bridge handshake, '
+          + 'and optionally claim a NAME for yourself. The seat id (codex-projects-4) changes on '
+          + 'every instance restart, daemon bounce and /clear; a claimed alias does not, so '
+          + 'announce the alias and let others address that. Returns the seat, every name that '
+          + 'routes to you, and a warning for any name of yours that resolves to a different '
+          + 'agent. Does NOT create an identity — the bridge is assigned one during initialize.',
         inputSchema: {
           type: 'object',
           required: ['type'],
           properties: {
-            type: { type: 'string', description: 'Agent type (claude, codex, gemini, unknown)' }
+            type: { type: 'string', description: 'Agent type (claude, codex, gemini, unknown)' },
+            alias: {
+              type: 'string',
+              description: 'Claim this name for yourself (2-32 chars, [a-z][a-z0-9_-]*), e.g. '
+                + '"assem". Refused if another live agent holds it, if it is an existing agent id, '
+                + 'or if it looks like a generated id. Re-claiming replaces your previous name.'
+            }
           }
         }
       },
@@ -734,8 +746,12 @@ class MCPServer extends EventEmitter {
         // for the name a peer had given it found nothing and concluded the
         // target was gone, while sending to it worked fine (claude-projects-2
         // report, 2026-10-12).
-        const aliasesFor = (id, federatedId) =>
-          (federatedId && federatedId !== id ? [federatedId] : []);
+        // Self-chosen names come FIRST: they are what a sender should use, and
+        // the generated ones are what they should stop caching.
+        const aliasesFor = (id, federatedId) => [
+          ...this._aliasesOf(id),
+          ...(federatedId && federatedId !== id ? [federatedId] : []),
+        ];
         const sessionAgents = this.session.getAllAgents().map(a => {
           const federatedId = this.federationHub?.federatedIdFor?.(a.id) || null;
           return {
@@ -756,8 +772,9 @@ class MCPServer extends EventEmitter {
           type: a.type,
           host: a.host,
           // A bridge client's assigned id already embeds its host, so it
-          // federates under that same name — there is no second spelling.
-          aliases: [],
+          // federates under that same name — the only other spelling it can
+          // have is a name it chose for itself.
+          aliases: this._aliasesOf(a.id),
           source: 'external'
         }));
 
@@ -848,8 +865,13 @@ class MCPServer extends EventEmitter {
               + 'Check ~/.bukowski/bridge.log for this bridge\'s connect/identify lines.',
           };
         }
+        // Claim a name if one was offered. Reported either way, so a refusal is
+        // visible rather than a silently ignored argument.
+        let aliasResult = null;
+        if (args.alias !== undefined) aliasResult = this._claimAlias(callerAgentId, args.alias);
+
         const federatedId = this.federationHub?.federatedIdFor?.(callerAgentId) || null;
-        const routable = [callerAgentId];
+        const routable = [...this._aliasesOf(callerAgentId), callerAgentId];
         if (federatedId && federatedId !== callerAgentId) routable.push(federatedId);
         // A name of ours that resolves to a DIFFERENT local agent is shadowed:
         // sends to it reach that agent, not this one (bug-21).
@@ -861,7 +883,12 @@ class MCPServer extends EventEmitter {
           registered: true,
           agentId: callerAgentId,
           type: args.type || this.externalAgents.get(callerAgentId)?.type || 'unknown',
+          // The alias leads: it is what others should use, and it is the only
+          // one of these names that survives the seat changing.
           routableAs: routable.filter((id) => !shadowed.includes(id)),
+          ...(aliasResult ? (aliasResult.ok
+            ? { alias: aliasResult.alias }
+            : { aliasRefused: args.alias, aliasError: aliasResult.error }) : {}),
           ...(shadowed.length ? {
             shadowed,
             warning: `${shadowed.join(', ')} resolve(s) to a different agent on this `
@@ -1198,6 +1225,11 @@ class MCPServer extends EventEmitter {
     // peers. Canonicalize to the local id so delivery goes straight to the
     // local queue instead of failing "Unknown agent". Checked before
     // resolveRemote so an alias of our own agent can never be routed out.
+    // A self-chosen name wins first: it is the one identity the agent actually
+    // controls, and the whole point is that senders never touch the seat.
+    const selfNamed = this._resolveAlias(to);
+    if (selfNamed) to = selfNamed;
+
     const localAlias = this.federationHub?.resolveLocalAlias?.(to) || null;
     if (localAlias) to = localAlias;
 
@@ -1349,6 +1381,94 @@ class MCPServer extends EventEmitter {
     this.emit('external_agent:connected', { agentId, agentType, reused: !!existing });
 
     return agentId;
+  }
+
+  /**
+   * A name an agent chose for itself, and the rules it has to pass.
+   *
+   * Generated ids are the wrong thing to address. A pane id (codex-1) reaches
+   * a screen, an external seat (codex-projects-4) reaches a tools inbox, the
+   * seat number changes on every instance restart, daemon bounce and /clear,
+   * and nothing in either name says which agent is doing which job. A fleet
+   * coordinating by role ends up caching numbers and sending review requests
+   * into dead seats — which is exactly how ADR-46 lost a day.
+   *
+   * So an agent says "I am assem" once per seat, and everyone else addresses
+   * `assem` forever. The alias is the durable handle; the seat underneath it is
+   * free to churn.
+   *
+   * Rules, all of them learned from something that went wrong today:
+   *  - a name a live agent already holds is REFUSED, naming the holder, rather
+   *    than silently stolen; an alias that resolves to two agents is worse than
+   *    no alias at all.
+   *  - a name that looks like a generated id is refused, so `codex-projects-2`
+   *    can never mean something different from what the roster says it means.
+   *  - `user` is reserved: the send path treats it as the human.
+   *  - re-claiming frees the claimant's previous name, so an agent owns one.
+   * @private
+   */
+  _claimAlias(agentId, raw) {
+    if (!agentId) {
+      return { ok: false, error: 'this connection has no identity to name' };
+    }
+    const alias = String(raw || '').trim().toLowerCase();
+    if (!/^[a-z][a-z0-9_-]{1,31}$/.test(alias)) {
+      return {
+        ok: false,
+        error: 'alias must be 2-32 chars, start with a letter, and use only a-z 0-9 - _',
+      };
+    }
+    if (alias === 'user' || alias === 'all') {
+      return { ok: false, error: `"${alias}" is reserved` };
+    }
+    // Anything shaped like an id the system mints itself: <type>-<n> or
+    // <type>-<host>-<n>.
+    if (/^(claude|codex|gemini|chat|unknown)(-[a-z0-9_]+)*-\d+$/.test(alias)) {
+      return { ok: false, error: `"${alias}" looks like a generated agent id; pick a name` };
+    }
+    if (this._agentExists(alias) || this.federationHub?.resolveLocalAlias?.(alias)) {
+      return { ok: false, error: `"${alias}" is already an agent id on this instance` };
+    }
+    const holder = this.agentAliases.get(alias);
+    if (holder && holder !== agentId && this._agentExists(holder)) {
+      return { ok: false, error: `"${alias}" is held by ${holder}` };
+    }
+    for (const [name, owner] of this.agentAliases) {
+      if (owner === agentId && name !== alias) this.agentAliases.delete(name);
+    }
+    this.agentAliases.set(alias, agentId);
+    this.emit('agent:alias', { agentId, alias });
+    return { ok: true, alias, agentId };
+  }
+
+  /** Does this id name an agent that exists right now? @private */
+  _agentExists(id) {
+    return !!(this.session?.getAgent?.(id) || this.externalAgents.has(id));
+  }
+
+  /**
+   * The agent an alias points at, or null. Lazily forgets an alias whose owner
+   * is gone: a seat dies with its bridge, and a name must not keep pointing at
+   * a corpse — that is how a ghost seat swallows mail.
+   * @private
+   */
+  _resolveAlias(name) {
+    const target = this.agentAliases.get(String(name || '').toLowerCase());
+    if (!target) return null;
+    if (!this._agentExists(target)) {
+      this.agentAliases.delete(String(name).toLowerCase());
+      return null;
+    }
+    return target;
+  }
+
+  /** Every self-chosen name pointing at this agent. @private */
+  _aliasesOf(agentId) {
+    const out = [];
+    for (const [name, owner] of this.agentAliases) {
+      if (owner === agentId) out.push(name);
+    }
+    return out;
   }
 
   /**

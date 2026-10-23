@@ -40,6 +40,7 @@ function server() {
   s.session = { getAgent: (id) => (id === 'claude-azra-2' ? { id } : null), getAllAgents: () => [] };
   s.externalAgents = new Map();
   s.federationHub = null;
+  s.agentAliases = new Map();
   return s;
 }
 const call = async (s, tool, args) => s._handleToolCall(tool, args, 'claude-meddaemon-1');

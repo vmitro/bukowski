@@ -39,6 +39,7 @@ function setup() {
   s.session = session;
   s.externalAgents = new Map();
   s.agentCounters = new Map();
+  s.agentAliases = new Map();
   s.messageQueues = new Map();
   s.sent = [];
   const rec = () => (from, to) => s.sent.push({ to });
