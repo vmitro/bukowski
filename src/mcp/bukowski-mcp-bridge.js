@@ -620,7 +620,7 @@ const TOOLS = [
       type: 'object',
       required: ['to', 'action'],
       properties: {
-        to: { type: 'string', description: 'Target agent ID. Session agents: "claude-1", "codex-1". External clients use their cwd basename: a claude REPL in ~/azra is "claude-azra-1". Use list_agents to discover.' },
+        to: { type: 'string', description: 'Target agent ID, or a name the agent claimed for itself (register_agent alias) — PREFER the claimed name: a seat id like codex-projects-4 changes on every instance restart, daemon bounce and /clear, a claimed name does not. Session agents are claude-1/codex-1; an external client is named after its cwd, a claude REPL in ~/azra being claude-azra-1. Use list_agents to discover and never cache a seat id.' },
         action: { type: 'string', description: 'The action to request the agent perform' },
         conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }
@@ -633,7 +633,7 @@ const TOOLS = [
       type: 'object',
       required: ['to', 'content'],
       properties: {
-        to: { type: 'string', description: 'Target agent ID' },
+        to: { type: 'string', description: 'Target agent ID, or a name the agent claimed for itself (register_agent alias) — PREFER the claimed name: a seat id like codex-projects-4 changes on every instance restart, daemon bounce and /clear, a claimed name does not. Session agents are claude-1/codex-1; an external client is named after its cwd, a claude REPL in ~/azra being claude-azra-1. Use list_agents to discover and never cache a seat id.' },
         content: { type: 'string', description: 'The information to share' },
         conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }
@@ -646,7 +646,7 @@ const TOOLS = [
       type: 'object',
       required: ['to', 'proposition'],
       properties: {
-        to: { type: 'string', description: 'Target agent ID' },
+        to: { type: 'string', description: 'Target agent ID, or a name the agent claimed for itself (register_agent alias) — PREFER the claimed name: a seat id like codex-projects-4 changes on every instance restart, daemon bounce and /clear, a claimed name does not. Session agents are claude-1/codex-1; an external client is named after its cwd, a claude REPL in ~/azra being claude-azra-1. Use list_agents to discover and never cache a seat id.' },
         proposition: { type: 'string', description: 'The yes/no question to ask. (Named per FIPA, not "content" — but you may pass it as "content" too.)' },
         conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }
@@ -659,7 +659,7 @@ const TOOLS = [
       type: 'object',
       required: ['to', 'reference'],
       properties: {
-        to: { type: 'string', description: 'Target agent ID' },
+        to: { type: 'string', description: 'Target agent ID, or a name the agent claimed for itself (register_agent alias) — PREFER the claimed name: a seat id like codex-projects-4 changes on every instance restart, daemon bounce and /clear, a claimed name does not. Session agents are claude-1/codex-1; an external client is named after its cwd, a claude REPL in ~/azra being claude-azra-1. Use list_agents to discover and never cache a seat id.' },
         reference: { type: 'string', description: 'Description of the information requested. (Named per FIPA, not "content" — but you may pass it as "content" too.)' },
         conversationId: { type: 'string', description: 'Optional conversation ID to reply in existing conversation' }
       }
@@ -684,7 +684,7 @@ const TOOLS = [
       type: 'object',
       required: ['to', 'proposal'],
       properties: {
-        to: { type: 'string', description: 'Target agent ID (usually the CFP sender)' },
+        to: { type: 'string', description: 'Target agent ID, usually the CFP sender; a claimed name works too and is stabler than a seat id' },
         proposal: { type: 'string', description: 'Your proposal details' },
         conversationId: { type: 'string', description: 'The conversation ID from the CFP' }
       }
@@ -697,7 +697,7 @@ const TOOLS = [
       type: 'object',
       required: ['to', 'conversationId'],
       properties: {
-        to: { type: 'string', description: 'Target agent ID' },
+        to: { type: 'string', description: 'Target agent ID, or a name the agent claimed for itself (register_agent alias) — PREFER the claimed name: a seat id like codex-projects-4 changes on every instance restart, daemon bounce and /clear, a claimed name does not. Session agents are claude-1/codex-1; an external client is named after its cwd, a claude REPL in ~/azra being claude-azra-1. Use list_agents to discover and never cache a seat id.' },
         content: { type: 'string', description: 'What you are agreeing to, in your own words (optional but strongly preferred)' },
         conversationId: { type: 'string', description: 'The conversation ID to agree to (required: an agree with no thread is an agree to nothing)' },
         inReplyTo: { type: 'string', description: 'Message id this answers, to link the reply to the exact message' }
@@ -711,7 +711,7 @@ const TOOLS = [
       type: 'object',
       required: ['to', 'reason'],
       properties: {
-        to: { type: 'string', description: 'Target agent ID' },
+        to: { type: 'string', description: 'Target agent ID, or a name the agent claimed for itself (register_agent alias) — PREFER the claimed name: a seat id like codex-projects-4 changes on every instance restart, daemon bounce and /clear, a claimed name does not. Session agents are claude-1/codex-1; an external client is named after its cwd, a claude REPL in ~/azra being claude-azra-1. Use list_agents to discover and never cache a seat id.' },
         reason: { type: 'string', description: 'Reason for refusal' },
         conversationId: { type: 'string', description: 'The conversation ID to refuse' }
       }
@@ -719,7 +719,7 @@ const TOOLS = [
   },
   {
     name: 'list_agents',
-    description: 'List every addressable agent: local session agents, external bridge clients, and federated peers. Address an agent by its `id` OR by any name in its `aliases` (a session agent also answers to its federated `claude-<host>-N` form). Anything not listed here is not routable.',
+    description: 'List every addressable agent: local session agents, external bridge clients, and federated peers. Address an agent by any name in its `aliases` — self-chosen names (register_agent alias) come first and are the stable way to reach it — or by its `id`, which for an external client changes whenever its bridge restarts. A session agent also answers to its federated `claude-<host>-N` form. Anything not listed here is not routable.',
     inputSchema: { type: 'object', properties: {} }
   },
   {
@@ -744,12 +744,23 @@ const TOOLS = [
   },
   {
     name: 'register_agent',
-    description: 'Register this agent with bukowski (called automatically by bridge)',
+    description: 'Report the identity this connection was assigned at its bridge handshake, '
+      + 'and optionally claim a NAME for yourself. The seat id (codex-projects-4) changes on '
+      + 'every instance restart, daemon bounce and /clear; a claimed alias does not, so '
+      + 'announce the alias and let others address that. Returns the seat, every name that '
+      + 'routes to you, and a warning for any name of yours that resolves to a different '
+      + 'agent. Does NOT create an identity — the bridge is assigned one during initialize.',
     inputSchema: {
       type: 'object',
       required: ['type'],
       properties: {
-        type: { type: 'string', description: 'Agent type (claude, codex, gemini, unknown)' }
+        type: { type: 'string', description: 'Agent type (claude, codex, gemini, unknown)' },
+        alias: {
+          type: 'string',
+          description: 'Claim this name for yourself (2-32 chars, [a-z][a-z0-9_-]*), e.g. '
+            + '"assem". Refused if another live agent holds it, if it is an existing agent id, '
+            + 'or if it looks like a generated id. Re-claiming replaces your previous name.'
+        }
       }
     }
   },
@@ -992,4 +1003,13 @@ function main() {
   }
 }
 
-main();
+// Run as a script; exported when required so tests can compare this static
+// table against the server's own tool definitions. The two tables are what
+// clients see in the two possible paths (bridge answers tools/list from TOOLS
+// without asking bukowski), so silent drift between them means a client is
+// told something the server does not implement — exactly how register_agent
+// went on advertising "called automatically by bridge" after it had become an
+// identity report with an alias argument.
+if (require.main === module) main();
+
+module.exports = { TOOLS };

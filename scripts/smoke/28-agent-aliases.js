@@ -131,7 +131,53 @@ async function main() {
   ok(s._resolveAlias('assem') === null, 'a dead seat cannot keep swallowing mail under its name');
 }
 
-main().then(() => {
+/**
+ * The two tool tables must say the same thing.
+ *
+ * A client can learn the tool list from either side: the bridge answers
+ * tools/list from its own static TOOLS array WITHOUT asking bukowski, so that
+ * copy is what codex and Claude Code actually cache. When the server's
+ * definition changes and the bridge's does not, clients are told something the
+ * server no longer implements — register_agent advertised "called
+ * automatically by bridge" for a day after it had become an identity report
+ * with an alias argument, which is why no agent thought to claim a name.
+ */
+function toolTablesAgree() {
+  console.log('10. the bridge advertises what the server implements');
+  const { TOOLS } = require(path.join(ROOT, 'src', 'mcp', 'bukowski-mcp-bridge.js'));
+  const server = newServer();
+  const serverTools = server._defineTools();
+  const byName = (list) => new Map(list.map((t) => [t.name, t]));
+  const bridgeMap = byName(TOOLS);
+  const serverMap = byName(serverTools);
+
+  const shared = [...bridgeMap.keys()].filter((n) => serverMap.has(n));
+  ok(shared.length > 10, `${shared.length} tools defined on both sides`);
+
+  const descDrift = shared.filter((n) => bridgeMap.get(n).description !== serverMap.get(n).description);
+  ok(descDrift.length === 0, `no tool description drifts${descDrift.length ? `: ${descDrift.join(', ')}` : ''}`);
+
+  const paramDrift = [];
+  for (const n of shared) {
+    const b = bridgeMap.get(n).inputSchema?.properties || {};
+    const v = serverMap.get(n).inputSchema?.properties || {};
+    for (const key of new Set([...Object.keys(b), ...Object.keys(v)])) {
+      if (!b[key] || !v[key]) { paramDrift.push(`${n}.${key} (missing on one side)`); continue; }
+      if (b[key].description !== v[key].description) paramDrift.push(`${n}.${key}`);
+    }
+  }
+  ok(paramDrift.length === 0, `no parameter drifts${paramDrift.length ? `: ${paramDrift.join(', ')}` : ''}`);
+
+  // The alias is the point of this suite: both sides must offer it and both
+  // must tell the caller to prefer it over a seat id.
+  ok(!!bridgeMap.get('register_agent')?.inputSchema?.properties?.alias,
+    'the bridge offers register_agent.alias');
+  const toDesc = bridgeMap.get('fipa_inform').inputSchema.properties.to.description;
+  ok(/claimed name/.test(toDesc), 'and every fipa target says a claimed name is addressable');
+  ok(/changes on every instance restart/.test(toDesc), 'and says why a seat id should not be cached');
+}
+
+main().then(toolTablesAgree).then(() => {
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
   console.log('OK: agent alias smoke passed');
