@@ -1900,8 +1900,13 @@ terminal.registerSignalHandlers();
   process.stdin.setRawMode(true);
   process.stdin.resume();
 
-  // Mouse mode
-  process.stdout.write('\x1b[?1000h\x1b[?1006h');
+  // Mouse mode. Via TerminalManager so the state is tracked for C-Space m —
+  // and so BUKOWSKI_NO_MOUSE=1 is finally honoured on this path: the guard
+  // lived only in TerminalManager.setup(), which multi.js never calls (it runs
+  // on SIGCONT), so the escape went out regardless and the clients that
+  // variable exists for got the mouse mode they had opted out of.
+  terminal.setMouseCapture(true);
+  compositor.mouseCaptured = terminal.mouseCaptured;
 
   // Resize handler
   process.stdout.on('resize', handleResize);
@@ -2149,6 +2154,14 @@ terminal.registerSignalHandlers();
   function handleAction(result) {
     if (result && result.action === 'dashboard_overlay') {
       showDashboardOverlay();
+      return;
+    }
+    if (result && result.action === 'mouse_toggle') {
+      const r = terminal.setMouseCapture();
+      compositor.mouseCaptured = terminal.mouseCaptured;
+      compositor.showStatusMessage(r.changed
+        ? (r.captured ? 'mouse captured' : 'mouse released - drag to select, C-Space m to re-take')
+        : `mouse stays off (${r.reason || 'unchanged'})`);
       return;
     }
     // All handlers extracted to:

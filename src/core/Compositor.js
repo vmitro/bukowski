@@ -26,6 +26,9 @@ class Compositor {
     this.cursorBlinkInterval = null;
     this.statusMessage = null; // Temporary status message (errors, info)
     this.statusMessageTimer = null;
+    // Mirrors TerminalManager's mouse capture so the status bar can say when
+    // the terminal's own selection is live (C-Space m). Set from multi.js.
+    this.mouseCaptured = true;
 
     // Resize state machine - single source of truth for resize handling
     // Phases: 'idle' | 'cached' | 'reflowing'
@@ -1116,6 +1119,13 @@ class Compositor {
     // Zoom indicator
     if (this.layoutManager?.isZoomed?.()) {
       left += '[ZOOM] ';
+    }
+
+    // Mouse released: the terminal's own selection is live, ours is not.
+    // Worth a permanent indicator rather than a transient message — it changes
+    // what a drag does, and that is not something to have to remember.
+    if (this.mouseCaptured === false) {
+      left += '[SELECT] ';
     }
 
     // Mode indicator

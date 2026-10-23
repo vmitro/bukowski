@@ -12,6 +12,52 @@ class TerminalManager {
     this.activeSession = null;
     this.activeCompositor = null;
     this.shutdownCallbacks = [];
+    // Mouse capture is two facts, not one: what we WANT (survives a suspend)
+    // and what the terminal is currently doing. SIGCONT re-applies the wish, so
+    // resuming a session where the user had released the mouse does not silently
+    // take it back.
+    this.mouseWanted = true;
+    this.mouseCaptured = false;
+  }
+
+  /**
+   * Is capturing the mouse allowed at all on this client?
+   *
+   * BUKOWSKI_NO_MOUSE=1 is set by people whose client garbles mouse escapes
+   * (ConnectBot on Android). Toggling must never hand them back the thing they
+   * switched off to keep the session usable.
+   */
+  mouseAllowed() {
+    return process.env.BUKOWSKI_NO_MOUSE !== '1';
+  }
+
+  /**
+   * Release or re-take the mouse.
+   *
+   * While bukowski captures the mouse, the terminal's OWN selection is dead:
+   * dragging scrolls a pane instead of selecting text, so there is no way to
+   * copy with the mouse — and `y` only yanks into bukowski's register, not the
+   * system clipboard. Releasing capture hands drag-select and the client's
+   * copy back for as long as it is off. The idea is from frnhr's fork
+   * (frnhr/bukowski, Dec 2025), which bound it to a bare Ctrl+T; this binding
+   * is behind the C-Space prefix instead, because a bare key would be taken
+   * from every wrapped TUI (Claude Code's own Ctrl+T opens its todo panel).
+   *
+   * @param {boolean} [want] - target state; omitted flips the current one
+   * @returns {{captured: boolean, changed: boolean, reason?: string}}
+   */
+  setMouseCapture(want) {
+    const target = want === undefined ? !this.mouseCaptured : !!want;
+    if (target && !this.mouseAllowed()) {
+      return { captured: false, changed: false, reason: 'BUKOWSKI_NO_MOUSE=1' };
+    }
+    this.mouseWanted = target;
+    if (target === this.mouseCaptured) {
+      return { captured: this.mouseCaptured, changed: false };
+    }
+    process.stdout.write(target ? '\x1b[?1000h\x1b[?1006h' : '\x1b[?1000l\x1b[?1006l');
+    this.mouseCaptured = target;
+    return { captured: target, changed: true };
   }
 
   /**
@@ -39,8 +85,14 @@ class TerminalManager {
     // on Android — mishandle mouse-mode escapes badly enough to garble or drop
     // the whole session. BUKOWSKI_NO_MOUSE=1 skips enabling it so those clients
     // stay usable (you lose click/scroll, keyboard nav is unaffected).
-    if (process.env.BUKOWSKI_NO_MOUSE !== '1') {
+    // Re-applies the WISH, not a hardcoded "on": setup() also runs on SIGCONT,
+    // and a session resumed after C-Space m must come back released.
+    if (this.mouseAllowed() && this.mouseWanted) {
       process.stdout.write('\x1b[?1000h\x1b[?1006h'); // Enable mouse (SGR mode)
+      this.mouseCaptured = true;
+    } else {
+      process.stdout.write('\x1b[?1000l\x1b[?1006l');
+      this.mouseCaptured = false;
     }
     process.stdout.write('\x1b[?25l');              // Hide cursor (compositor manages it)
   }
@@ -62,6 +114,7 @@ class TerminalManager {
 
     process.stdout.write('\x1b[?7h');               // Restore autowrap
     process.stdout.write('\x1b[?1000l\x1b[?1006l'); // Disable mouse
+    this.mouseCaptured = false;
     process.stdout.write('\x1b[?25h');              // Show cursor
     process.stdout.write('\x1b[?1049l');            // Exit alt screen
 

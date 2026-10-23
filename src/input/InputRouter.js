@@ -212,6 +212,10 @@ class InputRouter {
         this.mode = 'search';
         return { action: 'search_start', direction: 'backward' };
 
+      // Release/re-take the mouse, so the terminal's own drag-select works
+      case 'm':
+        return { action: 'mouse_toggle' };
+
       // Help
       case 'H':
         return { action: 'show_help' };

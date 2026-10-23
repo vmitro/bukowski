@@ -10,6 +10,7 @@ scripts=(
   "$here/02-boot.js"
   "$here/14-scroll-follow-after-resize.js"
   "$here/18-keymap.js"
+  "$here/27-mouse-capture.js"
   "$here/17-tab-keys.js"
   "$here/22-pane-identity.js"
   "$here/23-socket-binding.js"

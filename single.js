@@ -86,6 +86,7 @@ class Viewport {
     // Vim mode state
     this.mode = 'insert';        // 'insert' | 'normal' | 'visual' | 'vline'
     this.commandPending = false; // true after Ctrl+Space, awaiting mode key
+    this.mouseCaptured = true;   // C-Space m releases it for native selection
     this.prevMode = 'insert';    // track where we came from for visual mode
 
     // Normal mode virtual cursor
@@ -304,11 +305,14 @@ class Viewport {
     // Mode indicator
     const modeNames = { insert: 'INSERT', normal: 'NORMAL', visual: 'VISUAL', vline: 'V-LINE' };
     const modeStr = this.commandPending ? '[C-SPC]' : `[${modeNames[this.mode]}]`;
+    // While we hold the mouse, the terminal's own drag-select is dead; say so
+    // whenever it is available instead.
+    const selectStr = this.mouseCaptured ? '' : '[SELECT] ';
 
     // Search prompt or tips
     let leftPart;
     if (this.search.isActive) {
-      leftPart = this.search.getStatus();
+      leftPart = selectStr + this.search.getStatus();
     } else {
       const scrollIndicator = this.followTail ? '' : '[SCROLL] ';
       const searchStatus = this.search.getStatus();
@@ -324,7 +328,7 @@ class Viewport {
         }
       }
       const tips = inVisual ? 'y:yank ' : '';
-      leftPart = `${modeStr} ${selInfo}${scrollIndicator}${searchStatus ? searchStatus + ' ' : ''}${tips}Esc:exit`;
+      leftPart = `${modeStr} ${selectStr}${selInfo}${scrollIndicator}${searchStatus ? searchStatus + ' ' : ''}${tips}Esc:exit`;
     }
 
     const pos = `[${from}-${to}/${totalLines}] ${pctStr}`;
@@ -580,6 +584,18 @@ setTimeout(() => {
         vp.normalCursor.col = buffer.cursorX;
         vp.mode = 'normal';
         vp.vim.ensureLineVisible(vp.normalCursor.line);
+        vp.draw();
+        return;
+      }
+      // Release/re-take the mouse so the terminal's own selection works. Behind
+      // the C-Space prefix, not a bare key: Claude Code's own Ctrl+T opens its
+      // todo panel, and a wrapper must not eat it. Idea from frnhr's fork
+      // (frnhr/bukowski, Dec 2025), which used bare Ctrl+T.
+      if (str === 'm') {
+        vp.mouseCaptured = !vp.mouseCaptured;
+        process.stdout.write(vp.mouseCaptured
+          ? '\x1b[?1000h\x1b[?1006h'
+          : '\x1b[?1000l\x1b[?1006l');
         vp.draw();
         return;
       }
