@@ -172,6 +172,26 @@ function getDiagnostics() {
 const CHANNEL_ROLE = process.env.BUKOWSKI_BRIDGE_ROLE === 'channel'
   || process.argv.includes('--role=channel');
 
+/**
+ * The pane id this bridge was told to serve, via `--agent-id <id>`.
+ *
+ * Takes precedence over BUKOWSKI_AGENT_ID deliberately. The env can be
+ * INHERITED rather than earned — Claude Code's pre-warmed process pool hands a
+ * spare carrying one pane's env to a session in another workspace (bug-22) —
+ * whereas this argument is written onto the command line for exactly one pane
+ * by the bukowski that spawned it. An argument is evidence; an inherited env is
+ * a rumour.
+ */
+function agentIdFromArgs(argv = process.argv) {
+  const eq = argv.find((a) => a.startsWith('--agent-id='));
+  if (eq) return eq.slice('--agent-id='.length) || null;
+  const i = argv.indexOf('--agent-id');
+  if (i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('--')) return argv[i + 1];
+  return null;
+}
+
+const ASSIGNED_AGENT_ID = agentIdFromArgs();
+
 // Agent ID assigned by bukowski
 let agentId = null;
 let agentType = null;
@@ -457,7 +477,7 @@ function tryConnectToBukowski() {
     });
 
     // Use session agent ID if running inside bukowski, otherwise generate external ID
-    const sessionAgentId = process.env.BUKOWSKI_AGENT_ID || null;
+    const sessionAgentId = ASSIGNED_AGENT_ID || process.env.BUKOWSKI_AGENT_ID || null;
 
     // Send init message (fire and forget - don't block)
     // Include ancestor PIDs so MCPServer can match to session agent by PTY PID,
@@ -971,6 +991,7 @@ function main() {
   bridgeLog('start', {
     cwd: process.cwd(),
     role: CHANNEL_ROLE ? 'channel' : 'tools',
+    argAgent: ASSIGNED_AGENT_ID,
     envSocket: process.env.BUKOWSKI_MCP_SOCKET,
     envAgent: process.env.BUKOWSKI_AGENT_ID,
     ppid: process.ppid,

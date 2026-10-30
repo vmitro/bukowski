@@ -10,6 +10,7 @@ const {
   SOCKET_DISCOVERY_FILE,
   SOCKET_META_FILE,
   getFreshSessionArgs,
+  getPaneBindingArgs,
   LEGACY_SOCKET_FILE,
   FIPA_REMINDER,
   findClaudePath,
@@ -491,7 +492,7 @@ terminal.registerSignalHandlers();
     // Rebuild command too: saved command may be stale (e.g. 'node' from a prior install
     // with a local claude entrypoint, while current install uses 'claude' from PATH)
     const baseArgs = typeConfig.args || [];
-    const combinedArgs = [...baseArgs];
+    const combinedArgs = [...baseArgs, ...getPaneBindingArgs(AGENT_TYPES, agent.type, agent.id)];
     const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, agent.type, combinedArgs);
     // Mint a new id rather than clearing it. Leaving agentSessionId null sends
     // the next save back to mtime discovery, which is what crossed two panes'
@@ -1870,7 +1871,9 @@ terminal.registerSignalHandlers();
           const sessionId = agent.agentSessionId;
           const isValidUuid = sessionId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId);
           const resumeArgs = typeConfig.getResumeArgs?.(isValidUuid ? sessionId : null) || [];
-          const combinedArgs = [...baseArgs, ...resumeArgs];
+          // -c overrides are global options: they must precede `resume`.
+          const binding = getPaneBindingArgs(AGENT_TYPES, agent.type, agent.id);
+          const combinedArgs = [...baseArgs, ...binding, ...resumeArgs];
           const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, agent.type, combinedArgs);
           agent.command = typeConfig.command;
           agent.args = [...combinedArgs, ...fipaArgs];
@@ -1974,7 +1977,10 @@ terminal.registerSignalHandlers();
 
     // Combine base args with any extra CLI args (e.g., --continue)
     // Inject FIPA reminder if user didn't provide their own prompt
-    const baseArgs = [...agentConfig.args, ...extraArgs];
+    // Bind the bridge to THIS pane before any subcommand, so a codex agent has
+    // one identity instead of a pane and a churning seat (bug-28).
+    const binding = getPaneBindingArgs(AGENT_TYPES, type, newId);
+    const baseArgs = [...agentConfig.args, ...binding, ...extraArgs];
     const fipaArgs = getFIPAPromptArgs(AGENT_TYPES, type, baseArgs);
     const fresh = getFreshSessionArgs(AGENT_TYPES, type, baseArgs);
     const fullArgs = [...baseArgs, ...fresh.args, ...fipaArgs];

@@ -110,6 +110,55 @@ const FIPA_REMINDER_INLINE = FIPA_REMINDER.replace(/\n+/g, '. ');
 //
 // Resolved once at module load; passed via --settings JSON so each spawned
 // Claude agent gets event-driven delivery without PTY-injected text.
+const MCP_BRIDGE_SCRIPT = path.resolve(__dirname, '..', 'mcp', 'bukowski-mcp-bridge.js');
+
+/**
+ * Tell a codex pane's MCP bridge which agent it belongs to.
+ *
+ * codex runs a machine-global app-server-daemon, and the daemon — not the pane
+ * — spawns the MCP bridge. So the bridge is nowhere in the pane's process tree
+ * and cannot be matched to it: it falls through to the external-agent path and
+ * is minted a SEAT (codex-projects-4) distinct from the pane it serves
+ * (codex-1). One agent, two identities, and the consequences filled a week:
+ * the seat number changes on every instance restart, daemon bounce and /clear;
+ * mail to the pane wakes the agent but truncates at 200 chars and lands in a
+ * queue nothing drains; mail to the seat carries the full text but raises no
+ * notification at all, because a seat has no pty and codex has no channel
+ * support. There is no single address that both wakes and delivers (bug-28),
+ * and a retired seat number silently becomes some other agent's pane alias
+ * (bug-21).
+ *
+ * The cure is to stop guessing: codex honours `-c key=value` overrides of its
+ * own config per invocation, and the daemon spawns the server from that config,
+ * so we can hand the bridge its pane id on the command line. The bridge then
+ * declares that id at initialize, the server takes an explicit agentId ahead of
+ * everything else, and no seat is minted — one identity that the PTY nudge
+ * wakes and get_pending_messages reads.
+ *
+ * Trust note: `agentId` is taken at face value by the server, so a local
+ * process could claim to be codex-1. That is not new — BUKOWSKI_AGENT_ID is
+ * equally forgeable and equally local — but it is why this is passed only for
+ * panes we spawn ourselves.
+ *
+ * BUKOWSKI_NO_PANE_BINDING=1 opts out, leaving the old external-seat behaviour.
+ * @param {object} agentTypes
+ * @param {string} type
+ * @param {string} agentId - the pane's id, e.g. "codex-2"
+ * @returns {string[]} args to prepend (before any subcommand), or []
+ */
+function getPaneBindingArgs(agentTypes, type, agentId) {
+  const cfg = agentTypes?.[type];
+  if (!cfg?.bindsBridgeToPane) return [];
+  if (!agentId || process.env.BUKOWSKI_NO_PANE_BINDING === '1') return [];
+  // The override must name a COMPLETE server: overriding args alone would
+  // leave a config without a command if the user has no bukowski entry yet.
+  // These are the same values install.js writes.
+  return [
+    '-c', 'mcp_servers.bukowski.command="node"',
+    '-c', `mcp_servers.bukowski.args=${JSON.stringify([MCP_BRIDGE_SCRIPT, '--agent-id', agentId])}`,
+  ];
+}
+
 const FIPA_CLAUDE_USERPROMPT_HOOK = path.resolve(__dirname, '..', 'mcp', 'hooks', 'userprompt-submit.js');
 const FIPA_CLAUDE_STOP_HOOK = path.resolve(__dirname, '..', 'mcp', 'hooks', 'stop.js');
 const FIPA_CLAUDE_SETTINGS_JSON = JSON.stringify({
@@ -190,6 +239,9 @@ function createAgentTypes(claudePath, codexPath) {
       args: codexPath ? [codexPath] : [],
       name: 'Codex',
       promptFlag: null,
+      // Its bridge is spawned by the machine-global daemon, so it must be TOLD
+      // which pane it serves; see getPaneBindingArgs.
+      bindsBridgeToPane: true,
       getResumeArgs: (sessionId) => sessionId
         ? ['resume', sessionId]
         : ['resume', '--last']
@@ -393,6 +445,8 @@ module.exports = {
   SOCKET_META_FILE,
   LEGACY_SOCKET_FILE,
   getFreshSessionArgs,
+  getPaneBindingArgs,
+  MCP_BRIDGE_SCRIPT,
   FIPA_REMINDER,
   FIPA_REMINDER_INLINE,
 
