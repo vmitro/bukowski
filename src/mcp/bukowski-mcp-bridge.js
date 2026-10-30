@@ -763,6 +763,17 @@ const TOOLS = [
     }
   },
   {
+    name: 'set_notifications',
+    description: 'Turn your own delivery notifications on or off. Muting suppresses only the INTERRUPTIONS — the channel push and the PTY nudge — while messages keep arriving in your queue, so get_pending_messages still returns everything you missed. Use it when a long build or review should not be interrupted; the change is published on the event bus as agent:<id>:notifications so peers can see you are quiet rather than guess it from silence.',
+    inputSchema: {
+      type: 'object',
+      required: ['enabled'],
+      properties: {
+        enabled: { type: 'boolean', description: 'false to go quiet, true to resume being notified' }
+      }
+    }
+  },
+  {
     name: 'register_agent',
     description: 'Report the identity this connection was assigned at its bridge handshake, '
       + 'and optionally claim a NAME for yourself. The seat id (codex-projects-4) changes on '

@@ -856,7 +856,14 @@ terminal.registerSignalHandlers();
       // they always get the PTY nudge. (If channels are disabled via
       // BUKOWSKI_NO_CHANNELS, claude falls back to the PTY nudge too.)
       const claudeViaChannel = agent?.type === 'claude' && channelsEnabled();
-      if (agent?.pty && message.sender?.name !== to && !claudeViaChannel) {
+      // An agent that asked for quiet (set_notifications) keeps receiving mail
+      // — it is already queued above — but is not typed at. Checked here as
+      // well as in notifyNewMessage so BOTH wake paths honour one switch.
+      const muted = mcpServer.isMuted?.(to);
+      if (muted) {
+        console.log(`[fipa] ${to} is muted; queued without a nudge`);
+      }
+      if (agent?.pty && !muted && message.sender?.name !== to && !claudeViaChannel) {
         let prompt;
         if (agent.type === 'claude') {
           const sender = message.sender?.name || 'unknown';

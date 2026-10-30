@@ -88,6 +88,9 @@ class MCPServer extends EventEmitter {
     // this box that an agent controls and that survives its seat changing.
     // See _claimAlias.
     this.agentAliases = new Map();
+    // Agents that asked not to be interrupted. See setNotifications: the
+    // MAIL still arrives, only the poking stops.
+    this.mutedAgents = new Set();
 
     // Federation hub, attached by the host process once it's running.
     // Used so `list_agents` can also surface remote agents reachable
@@ -249,6 +252,17 @@ class MCPServer extends EventEmitter {
           type: 'object',
           properties: {
             status: { type: 'string', enum: ['active', 'completed', 'all'], description: 'Filter by status' }
+          }
+        }
+      },
+      {
+        name: 'set_notifications',
+        description: 'Turn your own delivery notifications on or off. Muting suppresses only the INTERRUPTIONS — the channel push and the PTY nudge — while messages keep arriving in your queue, so get_pending_messages still returns everything you missed. Use it when a long build or review should not be interrupted; the change is published on the event bus as agent:<id>:notifications so peers can see you are quiet rather than guess it from silence.',
+        inputSchema: {
+          type: 'object',
+          required: ['enabled'],
+          properties: {
+            enabled: { type: 'boolean', description: 'false to go quiet, true to resume being notified' }
           }
         }
       },
@@ -840,6 +854,13 @@ class MCPServer extends EventEmitter {
         return out;
       }
 
+      case 'set_notifications': {
+        if (typeof args.enabled !== 'boolean') {
+          throw new Error('set_notifications requires enabled: true|false');
+        }
+        return this.setNotifications(callerAgentId, args.enabled);
+      }
+
       case 'register_agent': {
         // Registration happens at the bridge's `initialize`, never here. This
         // tool only REPORTS the identity that handshake produced.
@@ -1384,6 +1405,48 @@ class MCPServer extends EventEmitter {
   }
 
   /**
+   * Let an agent stop being interrupted — without stopping its mail.
+   *
+   * Until now the only control was BUKOWSKI_NO_CHANNELS, a process-wide
+   * environment variable read at launch: one agent could not quiet itself, and
+   * nobody could change it without restarting the instance. An agent deep in a
+   * build does not want a channel block injected mid-turn or a line typed into
+   * its prompt every time a peer joins; its only recourse was to ask a human.
+   *
+   * Muting suppresses DELIVERY NOTIFICATIONS only — the channel push and the
+   * PTY nudge. The message is still queued, so get_pending_messages returns
+   * everything that arrived while the agent was quiet. That asymmetry is the
+   * whole point: silence is a scheduling choice, not a dropped message.
+   *
+   * The state change is published on the normal event bus
+   * (agent:<id>:notifications), so peers can see that an agent has gone quiet
+   * instead of inferring it from silence — which is exactly the inference this
+   * fleet keeps getting wrong.
+   * @param {string} agentId
+   * @param {boolean} enabled
+   */
+  setNotifications(agentId, enabled) {
+    if (!agentId) return { ok: false, error: 'this connection has no identity' };
+    const was = !this.mutedAgents.has(agentId);
+    if (enabled) this.mutedAgents.delete(agentId);
+    else this.mutedAgents.add(agentId);
+    if (was !== !!enabled) {
+      try {
+        const fed = this.federationHub?.federatedIdFor?.(agentId) || agentId;
+        this.eventBus.publish(`agent:${fed}:notifications`, { enabled: !!enabled }, {
+          actor: fed, ts: Date.now(),
+        });
+      } catch { /* an unpublishable event must not block the mute */ }
+    }
+    return { ok: true, agentId, notifications: !!enabled, changed: was !== !!enabled };
+  }
+
+  /** Has this agent asked not to be interrupted? Delivery still happens. */
+  isMuted(agentId) {
+    return !!agentId && this.mutedAgents.has(agentId);
+  }
+
+  /**
    * A name an agent chose for itself, and the rules it has to pass.
    *
    * Generated ids are the wrong thing to address. A pane id (codex-1) reaches
@@ -1670,6 +1733,12 @@ class MCPServer extends EventEmitter {
     // delivers it at the safe turn boundary. Idle agents get the immediate push.
     if (this._isBusy(agentId)) {
       this._debugPush(agentId, 'busy-suppressed');
+      return;
+    }
+    // The agent asked for quiet. The message is already queued, so this costs
+    // it nothing but the interruption (setNotifications).
+    if (this.isMuted(agentId)) {
+      this._debugPush(agentId, 'muted');
       return;
     }
     // Broadcast the channel event to EVERY connection this agent holds: the
