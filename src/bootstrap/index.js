@@ -242,9 +242,18 @@ function createAgentTypes(claudePath, codexPath) {
       // Its bridge is spawned by the machine-global daemon, so it must be TOLD
       // which pane it serves; see getPaneBindingArgs.
       bindsBridgeToPane: true,
-      getResumeArgs: (sessionId) => sessionId
-        ? ['resume', sessionId]
-        : ['resume', '--last']
+      // No known conversation means START A FRESH ONE, never `resume --last`.
+      // codex conversations live in the machine-global app-server-daemon, so
+      // "the last conversation" is the same one for every pane in every
+      // workspace: two codex panes restored without ids both resolve to it,
+      // the first wins and the second gets "this conversation is open in
+      // another app". Worse, the id then gets CAPTURED into both panes'
+      // sessions, so one agent's conversation is saved as another's — observed
+      // 2026-10-30 with 01a1646c (created in azra-agent) stored as codex-1 of
+      // both the projects and managed sessions, and a projects Guardian thread
+      // stored as azra-agent's. A fresh session is always correct; borrowing
+      // the newest one is a guess that silently crosses agents.
+      getResumeArgs: (sessionId) => (sessionId ? ['resume', sessionId] : [])
     },
     gemini: {
       command: 'gemini',

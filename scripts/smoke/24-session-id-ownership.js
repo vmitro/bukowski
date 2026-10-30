@@ -80,6 +80,31 @@ const realFresh = getFreshSessionArgs(real, 'claude', real.claude.args);
 ok(realFresh.sessionId !== null, 'the real claude config yields an id for a fresh spawn');
 ok(real.claude.getResumeArgs('x').length === 2, 'resume path is unchanged');
 
+console.log('7. an unknown codex conversation starts a FRESH one, never --last');
+// codex conversations live in the machine-global app-server-daemon, so
+// `resume --last` resolves to the same conversation for every pane in every
+// workspace. Two restored codex panes without ids therefore land on ONE
+// conversation: the first wins, the second is told "open in another app", and
+// the id is captured into both sessions — observed 2026-10-30, where a
+// conversation created in azra-agent was saved as codex-1 of both the projects
+// and managed sessions. A fresh session is always correct; the newest one is a
+// guess that crosses agents.
+ok(real.codex.getResumeArgs('01a1646c-d6c6').length === 2,
+  'a KNOWN conversation is still resumed by id');
+ok(real.codex.getResumeArgs('01a1646c-d6c6')[0] === 'resume',
+  'via the resume subcommand');
+const freshCodex = real.codex.getResumeArgs(null);
+ok(Array.isArray(freshCodex) && freshCodex.length === 0,
+  'an UNKNOWN conversation yields no resume args at all');
+ok(!freshCodex.includes('--last'),
+  'never --last: it is shared across every pane and workspace');
+ok(real.codex.getResumeArgs(undefined).length === 0, 'undefined is treated the same');
+ok(real.codex.getResumeArgs('').length === 0, 'so is an empty string');
+// claude is deliberately untouched: its sessions are not daemon-shared and it
+// mints ids at spawn (bug-20), so --continue stays its no-id behaviour.
+ok(real.claude.getResumeArgs(null)[0] === '--continue',
+  'claude keeps --continue — its conversations are not daemon-shared');
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
 console.log('OK: session-id ownership smoke passed');
