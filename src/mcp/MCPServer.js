@@ -229,7 +229,7 @@ class MCPServer extends EventEmitter {
       },
       {
         name: 'list_agents',
-        description: 'List every addressable agent: local session agents, external bridge clients, and federated peers. Address an agent by any name in its `aliases` — self-chosen names (register_agent alias) come first and are the stable way to reach it — or by its `id`, which for an external client changes whenever its bridge restarts. A session agent also answers to its federated `claude-<host>-N` form. Anything not listed here is not routable.',
+        description: 'List every addressable agent: local session agents, external bridge clients, and federated peers. Address an agent by any name in its `aliases` — self-chosen names (register_agent alias) come first and are the stable way to reach it — or by its `id`, which for an external client changes whenever its bridge restarts. A session agent also answers to its federated `claude-<host>-N` form. A federated entry carries `kind`: "pane" reaches its SCREEN (and, on a codex box without pane binding, a queue nothing drains), "seat" reaches the queue its tools poll (but raises no notification for codex), "room" is a chat room with no per-agent queue; null means the owning box is too old to say, so do not assume. Anything not listed here is not routable.',
         inputSchema: {
           type: 'object',
           properties: {}
@@ -810,6 +810,20 @@ class MCPServer extends EventEmitter {
               // next hop). Equals host in a 2-node link; differs once a hub
               // relays a third box's agents (proxy-jump / hub-and-spoke).
               via: info.via || info.peerHost,
+              // What this NAME is on its own box, so a sender can tell a
+              // readable inbox from a screen nudge before sending (bug-29):
+              //   pane — a pty agent's federated alias. Reaches its screen; for
+              //          a codex on pre-4088ea7 code the full text lands in a
+              //          queue nothing drains.
+              //   seat — an external bridge client. Reaches the queue its tools
+              //          poll, but raises no notification for codex (bug-28).
+              //   room — a chat room, fanned to participants, no per-agent queue.
+              // null means the owning box predates this field; treat as unknown
+              // rather than assuming either.
+              kind: info.kind || null,
+              // For a pane, the local id it answers to on its own box — the
+              // thing a human reads in that pane's status bar.
+              paneId: info.kind === 'pane' ? (info.localTargetId || null) : null,
               aliases: [],
               source: 'federated'
             });

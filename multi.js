@@ -1055,9 +1055,18 @@ terminal.registerSignalHandlers();
         return n;
       }
       function snapshotLocalRoster() {
+        // `kind` is what a REMOTE box cannot otherwise work out. Locally a pane
+        // and a bridge seat are distinguishable (source 'session' vs 'external',
+        // and a pane carries its federated spelling in `aliases`); none of that
+        // crossed the wire, so from another host codex-projects-1 (a pane alias),
+        // codex-projects-4 (a seat) and a chat room were three entries of
+        // identical shape. A sender then cannot tell which name reaches a
+        // readable queue, which only nudges a screen, or which is a room — and
+        // reaching for the pane alias is the natural mistake, because that is
+        // the name federation advertises for a pane (bug-29).
         const ptyAgents = session.getAllAgents()
           .filter(isFederatable)
-          .map(a => ({ localId: a.id, type: a.type, federatedId: federatedIdFor(a) }));
+          .map(a => ({ localId: a.id, type: a.type, federatedId: federatedIdFor(a), kind: 'pane' }));
         // External bridge clients (codex/gemini connecting purely through the
         // MCP bridge — no pty, no session pane) must federate too, else peers
         // can route TO them (their host learns our roster) but never learn of
@@ -1066,7 +1075,7 @@ terminal.registerSignalHandlers();
         // both the externalAgents key and the messageQueue key, so localId and
         // federatedId are the same.
         const bridgeAgents = (mcpServer.getExternalAgents?.() || [])
-          .map(a => ({ localId: a.id, type: a.type, federatedId: a.id }));
+          .map(a => ({ localId: a.id, type: a.type, federatedId: a.id, kind: 'seat' }));
         // Chat rooms federate as themselves. A room id is `chat-<convId>` where
         // convId is a globally-unique UUID, so its federatedId == localId (like
         // bridge agents). This lets a remote agent ADDRESS the room; when its
@@ -1075,7 +1084,7 @@ terminal.registerSignalHandlers();
         // co-located agents can post into it.
         const roomAgents = session.getAllAgents()
           .filter(a => a.type === 'chat')
-          .map(a => ({ localId: a.id, type: 'chat', federatedId: a.id }));
+          .map(a => ({ localId: a.id, type: 'chat', federatedId: a.id, kind: 'room' }));
         return [...ptyAgents, ...bridgeAgents, ...roomAgents];
       }
 
@@ -1251,7 +1260,8 @@ terminal.registerSignalHandlers();
       const onAgentAdded = (agent) => {
         if (isFederatable(agent)) {
           federationHub.announceLocalAgent({
-            localId: agent.id, type: agent.type, federatedId: federatedIdFor(agent)
+            localId: agent.id, type: agent.type, federatedId: federatedIdFor(agent),
+            kind: agent.type === 'chat' ? 'room' : 'pane'
           });
         }
         syncChatAgentsRoster();
@@ -1352,7 +1362,8 @@ terminal.registerSignalHandlers();
     if (federationHub) {
       try {
         federationHub.announceLocalAgent({
-          localId: agentId, type: agentType || agentId.split('-')[0], federatedId: agentId
+          localId: agentId, type: agentType || agentId.split('-')[0], federatedId: agentId,
+          kind: 'seat'
         });
       } catch { /* federation optional */ }
     }

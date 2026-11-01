@@ -24,6 +24,7 @@ scripts=(
   "$here/20-fipa-reply-tools.js"
   "$here/10-local-alias-fipa.js"
   "$here/11-events.js"
+  "$here/31-federated-kind.js"
   "$here/19-stale-federated-roster.js"
   "$here/03-federation.js"
   "$here/09-external-agent-federation.js"

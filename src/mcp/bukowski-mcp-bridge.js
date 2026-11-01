@@ -739,7 +739,7 @@ const TOOLS = [
   },
   {
     name: 'list_agents',
-    description: 'List every addressable agent: local session agents, external bridge clients, and federated peers. Address an agent by any name in its `aliases` — self-chosen names (register_agent alias) come first and are the stable way to reach it — or by its `id`, which for an external client changes whenever its bridge restarts. A session agent also answers to its federated `claude-<host>-N` form. Anything not listed here is not routable.',
+    description: 'List every addressable agent: local session agents, external bridge clients, and federated peers. Address an agent by any name in its `aliases` — self-chosen names (register_agent alias) come first and are the stable way to reach it — or by its `id`, which for an external client changes whenever its bridge restarts. A session agent also answers to its federated `claude-<host>-N` form. A federated entry carries `kind`: "pane" reaches its SCREEN (and, on a codex box without pane binding, a queue nothing drains), "seat" reaches the queue its tools poll (but raises no notification for codex), "room" is a chat room with no per-agent queue; null means the owning box is too old to say, so do not assume. Anything not listed here is not routable.',
     inputSchema: { type: 'object', properties: {} }
   },
   {

@@ -220,7 +220,7 @@ class FederationHub extends EventEmitter {
       if (outPath.includes(peer.host)) continue;
       this._send(peer, {
         type: 'roster', op: 'add',
-        agent: { federatedId, localId: info.localTargetId, type: info.type },
+        agent: { federatedId, localId: info.localTargetId, type: info.type, kind: info.kind || null },
         origin: { host: info.peerHost, machineHost: info.machineHost },
         path: outPath,
       });
@@ -715,7 +715,8 @@ class FederationHub extends EventEmitter {
               via: peer.host,
               path,
               localTargetId: msg.agent.localId,
-              type: msg.agent.type || null
+              type: msg.agent.type || null,
+              kind: msg.agent.kind || null
             });
           } else if (msg.op === 'remove' && msg.agent?.federatedId) {
             changed = this.remoteAgents.delete(msg.agent.federatedId);
@@ -800,7 +801,13 @@ class FederationHub extends EventEmitter {
       const roster = this.getLocalRoster() || [];
       return roster
         .filter(a => a && a.localId && a.federatedId)
-        .map(a => ({ localId: a.localId, type: a.type || null, federatedId: a.federatedId }));
+        // `kind` ('pane'|'seat'|'room') travels with the record: a remote box
+        // cannot derive it, and without it every entry looks alike (bug-29).
+        // Unknown to older peers, which simply ignore the field.
+        .map(a => ({
+          localId: a.localId, type: a.type || null, federatedId: a.federatedId,
+          kind: a.kind || null,
+        }));
     } catch {
       return [];
     }
@@ -825,7 +832,8 @@ class FederationHub extends EventEmitter {
         via: peerHost,
         path: [peerHost],
         localTargetId: entry.localId,
-        type: entry.type || null
+        type: entry.type || null,
+        kind: entry.kind || null
       });
       // A directly-connected neighbour's own agents (from its hello snapshot)
       // must also cross the mesh — relay to our other peers so the far side of
@@ -833,7 +841,10 @@ class FederationHub extends EventEmitter {
       if (changed) {
         this._fanRosterDelta({
           op: 'add',
-          agent: { federatedId: entry.federatedId, localId: entry.localId, type: entry.type || null },
+          agent: {
+            federatedId: entry.federatedId, localId: entry.localId,
+            type: entry.type || null, kind: entry.kind || null,
+          },
           origin,
           path: [peerHost],
         }, peerHost);
@@ -874,7 +885,7 @@ class FederationHub extends EventEmitter {
       this.remoteAgents.delete(fid);
       this._fanRosterDelta({
         op: 'remove',
-        agent: { federatedId: fid, localId: info.localTargetId, type: info.type },
+        agent: { federatedId: fid, localId: info.localTargetId, type: info.type, kind: info.kind || null },
         origin,
         path: [this.host],
       }, peerHost);
@@ -902,7 +913,7 @@ class FederationHub extends EventEmitter {
       this.remoteAgents.delete(fid);
       this._fanRosterDelta({
         op: 'remove',
-        agent: { federatedId: fid, localId: info.localTargetId, type: info.type },
+        agent: { federatedId: fid, localId: info.localTargetId, type: info.type, kind: info.kind || null },
         origin: { host: info.peerHost, machineHost: info.machineHost },
         path: [this.host],
       }, neighbourHost);
