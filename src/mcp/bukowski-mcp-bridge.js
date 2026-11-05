@@ -778,7 +778,11 @@ const TOOLS = [
     description: 'Report the identity this connection was assigned at its bridge handshake, '
       + 'and optionally claim a NAME for yourself. The seat id (codex-projects-4) changes on '
       + 'every instance restart, daemon bounce and /clear; a claimed alias does not, so '
-      + 'announce the alias and let others address that. Returns the seat, every name that '
+      + 'announce the alias and let others address that. A claim PERSISTS across this '
+      + 'instance being respawned (scoped to this instance, dropped after 14 days unused), '
+      + 'so the name survives the restart that churns your seat id; pass alias:null to give '
+      + 'it back. A name reserved by an agent that is no longer running is reassigned to you '
+      + 'with a warning, since a live claimant always beats a stale record. Returns the seat, every name that '
       + 'routes to you, and a warning for any name of yours that resolves to a different '
       + 'agent. Does NOT create an identity — the bridge is assigned one during initialize.',
     inputSchema: {

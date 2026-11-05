@@ -21,6 +21,8 @@ const { resolvePaneAgent } = require('../utils/procTree');
  *
  * Communication is via Unix socket in /tmp/bukowski-mcp-<pid>.sock
  */
+const { AliasStore } = require('./AliasStore');
+
 class MCPServer extends EventEmitter {
   constructor(session, fipaHub, ipcHub, dashboardStore = null) {
     super();
@@ -88,6 +90,12 @@ class MCPServer extends EventEmitter {
     // this box that an agent controls and that survives its seat changing.
     // See _claimAlias.
     this.agentAliases = new Map();
+    // Durable half of the above, scoped to this instance (cwd-keyed). Claims
+    // loaded from disk are RECORDS, not bindings: nothing resolves to one
+    // until the agent it names exists again, so a stale claim cannot shadow a
+    // live agent. Promoted into agentAliases by _rebindPersisted.
+    this.aliasStore = new AliasStore();
+    this.persistedAliases = this.aliasStore.load();
     // Agents that asked not to be interrupted. See setNotifications: the
     // MAIL still arrives, only the poking stops.
     this.mutedAgents = new Set();
@@ -271,7 +279,11 @@ class MCPServer extends EventEmitter {
         description: 'Report the identity this connection was assigned at its bridge handshake, '
           + 'and optionally claim a NAME for yourself. The seat id (codex-projects-4) changes on '
           + 'every instance restart, daemon bounce and /clear; a claimed alias does not, so '
-          + 'announce the alias and let others address that. Returns the seat, every name that '
+          + 'announce the alias and let others address that. A claim PERSISTS across this '
+          + 'instance being respawned (scoped to this instance, dropped after 14 days unused), '
+          + 'so the name survives the restart that churns your seat id; pass alias:null to give '
+          + 'it back. A name reserved by an agent that is no longer running is reassigned to you '
+          + 'with a warning, since a live claimant always beats a stale record. Returns the seat, every name that '
           + 'routes to you, and a warning for any name of yours that resolves to a different '
           + 'agent. Does NOT create an identity — the bridge is assigned one during initialize.',
         inputSchema: {
@@ -907,7 +919,14 @@ class MCPServer extends EventEmitter {
         // Claim a name if one was offered. Reported either way, so a refusal is
         // visible rather than a silently ignored argument.
         let aliasResult = null;
-        if (args.alias !== undefined) {
+        if (args.alias === null || args.alias === '') {
+          // Explicit release. A persisted claim outlives the process that made
+          // it, so there has to be a way to give a name back without editing a
+          // file by hand — otherwise a rename means squatting your own old name
+          // until the TTL expires.
+          const dropped = this._releaseAliases(callerAgentId);
+          aliasResult = { ok: true, released: dropped, alias: null };
+        } else if (args.alias !== undefined) {
           aliasResult = this._claimAlias(callerAgentId, args.alias);
           // A claim is a fact about this agent that other boxes need. Nothing
           // re-announced it, so a name claimed after the handshake reached peers
@@ -1528,12 +1547,32 @@ class MCPServer extends EventEmitter {
     if (holder && holder !== agentId && this._agentExists(holder)) {
       return { ok: false, error: `"${alias}" is held by ${holder}` };
     }
+    // A PERSISTED claim from a previous life of this instance yields to a live
+    // agent — the record is only a reservation, and a live claimant always
+    // wins. Reported rather than silent, because the previous holder may still
+    // believe it owns the name.
+    let tookOver = null;
+    const stale = this.persistedAliases.get(alias);
+    if (stale && stale.agentId !== agentId && !this._agentExists(stale.agentId)) {
+      tookOver = stale.agentId;
+    }
     for (const [name, owner] of this.agentAliases) {
       if (owner === agentId && name !== alias) this.agentAliases.delete(name);
     }
+    for (const [name, rec] of this.persistedAliases) {
+      if (rec.agentId === agentId && name !== alias) this.persistedAliases.delete(name);
+    }
     this.agentAliases.set(alias, agentId);
+    this._persistAlias(agentId, alias);
     this.emit('agent:alias', { agentId, alias });
-    return { ok: true, alias, agentId };
+    const res = { ok: true, alias, agentId, persisted: true };
+    if (tookOver) {
+      res.tookOverStaleClaim = tookOver;
+      res.warning = `"${alias}" was a stale persisted claim of ${tookOver}, `
+        + 'which is not running. It has been reassigned to you; if that agent '
+        + 'returns it must claim a different name.';
+    }
+    return res;
   }
 
   /** Does this id name an agent that exists right now? @private */
@@ -1548,6 +1587,7 @@ class MCPServer extends EventEmitter {
    * @private
    */
   _resolveAlias(name) {
+    this._rebindPersisted();
     const target = this.agentAliases.get(String(name || '').toLowerCase());
     if (!target) return null;
     if (!this._agentExists(target)) {
@@ -1558,10 +1598,73 @@ class MCPServer extends EventEmitter {
   }
 
   /** Every self-chosen name pointing at this agent. @private */
+  /**
+   * Promote every persisted claim whose agent exists RIGHT NOW into the live
+   * map. This is what makes a name survive a respawn: a pane keeps its local id
+   * (claude-1) across restart, so its claim rebinds the first time anything
+   * asks. A bridge seat's id churns (bug-26), so its old record simply never
+   * rebinds and the agent re-claims instead — which is correct, and is why an
+   * unbound record must not resolve.
+   *
+   * Cheap: both maps hold a handful of entries. Called from the read paths
+   * rather than on a timer so there is no window where a restored name is
+   * invisible to the roster.
+   * @private
+   */
+  _rebindPersisted() {
+    if (!this.persistedAliases?.size) return;
+    let dirty = false;
+    for (const [alias, rec] of this.persistedAliases) {
+      if (this.agentAliases.has(alias)) continue;
+      if (!this._agentExists(rec.agentId)) continue;
+      // Never let a record resurrect a name that is now a real agent id or a
+      // pane's federated spelling — the same shadowing guard _claimAlias uses.
+      if (this._agentExists(alias) || this.federationHub?.resolveLocalAlias?.(alias)) {
+        this.persistedAliases.delete(alias);
+        dirty = true;
+        continue;
+      }
+      this.agentAliases.set(alias, rec.agentId);
+      rec.lastSeen = Date.now();
+      dirty = true;
+      this.emit('agent:alias', { agentId: rec.agentId, alias, restored: true });
+    }
+    if (dirty) this.aliasStore.save(this.persistedAliases);
+  }
+
+  /** Record a live claim durably, refreshing its TTL. @private */
+  _persistAlias(agentId, alias) {
+    const prev = this.persistedAliases.get(alias);
+    this.persistedAliases.set(alias, {
+      agentId,
+      agentType: this.externalAgents.get(agentId)?.type
+        || this.session?.getAgent?.(agentId)?.type
+        || prev?.agentType
+        || null,
+      claimedAt: prev && prev.agentId === agentId ? prev.claimedAt : Date.now(),
+      lastSeen: Date.now(),
+    });
+    this.aliasStore.save(this.persistedAliases);
+  }
+
+  /** Forget this agent's claims, in memory and on disk. @private */
+  _releaseAliases(agentId) {
+    const dropped = [];
+    for (const [name, owner] of this.agentAliases) {
+      if (owner === agentId) { this.agentAliases.delete(name); dropped.push(name); }
+    }
+    for (const [name, rec] of this.persistedAliases) {
+      if (rec.agentId === agentId) { this.persistedAliases.delete(name); if (!dropped.includes(name)) dropped.push(name); }
+    }
+    if (dropped.length) this.aliasStore.save(this.persistedAliases);
+    return dropped;
+  }
+
   // Self-chosen names routing to this agent, for the federation roster
   // snapshot. Only _claimAlias writes agentAliases, so this is exactly the
   // claimed set — never the minted <type>-<host>-N spelling.
   getClaimedAliases(agentId) {
+    this._rebindPersisted();
     return this._aliasesOf(agentId);
   }
 

@@ -5,6 +5,13 @@
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 
+# Alias claims are persisted per instance (~/.bukowski/aliases by default).
+# Several tests claim names, so without this the suite writes into the real
+# store and leaves live claims behind for the running fleet to trip over.
+BUKOWSKI_ALIAS_ROOT="$(mktemp -d -t bukowski-smoke-aliases-XXXXXX)"
+export BUKOWSKI_ALIAS_ROOT
+trap 'rm -rf "$BUKOWSKI_ALIAS_ROOT"' EXIT
+
 scripts=(
   "$here/01-require.sh"
   "$here/02-boot.js"
@@ -26,6 +33,7 @@ scripts=(
   "$here/11-events.js"
   "$here/31-federated-kind.js"
   "$here/32-federated-aliases.js"
+  "$here/33-alias-persistence.js"
   "$here/19-stale-federated-roster.js"
   "$here/03-federation.js"
   "$here/09-external-agent-federation.js"
