@@ -6,6 +6,7 @@
 //
 // Wire protocol (newline-delimited JSON, same shape as IPCHub):
 //   { type:'hello',     host, machineHost, sessionId, startedAt, agents:[...] }
+//     agents[] entries: { federatedId, localId, type, kind, aliases:[] }
 //   { type:'roster',    op:'add'|'remove', agent }
 //   { type:'forward',   from, to, message, hops:[host,...] }
 //   { type:'heartbeat', ts }
@@ -220,7 +221,10 @@ class FederationHub extends EventEmitter {
       if (outPath.includes(peer.host)) continue;
       this._send(peer, {
         type: 'roster', op: 'add',
-        agent: { federatedId, localId: info.localTargetId, type: info.type, kind: info.kind || null },
+        agent: {
+          federatedId, localId: info.localTargetId, type: info.type,
+          kind: info.kind || null, aliases: info.aliases || [],
+        },
         origin: { host: info.peerHost, machineHost: info.machineHost },
         path: outPath,
       });
@@ -716,7 +720,8 @@ class FederationHub extends EventEmitter {
               path,
               localTargetId: msg.agent.localId,
               type: msg.agent.type || null,
-              kind: msg.agent.kind || null
+              kind: msg.agent.kind || null,
+              aliases: Array.isArray(msg.agent.aliases) ? msg.agent.aliases : []
             });
           } else if (msg.op === 'remove' && msg.agent?.federatedId) {
             changed = this.remoteAgents.delete(msg.agent.federatedId);
@@ -807,6 +812,12 @@ class FederationHub extends EventEmitter {
         .map(a => ({
           localId: a.localId, type: a.type || null, federatedId: a.federatedId,
           kind: a.kind || null,
+          // Self-chosen names (register_agent alias). These are the only
+          // identity an agent controls and the one senders are told to prefer,
+          // but they used to stop at the instance boundary: nothing put them on
+          // the wire, so a remote caller addressing one got "Unknown agent"
+          // while list_agents showed the seat with aliases: [] (bug-31).
+          aliases: Array.isArray(a.aliases) ? a.aliases.filter(Boolean) : [],
         }));
     } catch {
       return [];
@@ -833,7 +844,8 @@ class FederationHub extends EventEmitter {
         path: [peerHost],
         localTargetId: entry.localId,
         type: entry.type || null,
-        kind: entry.kind || null
+        kind: entry.kind || null,
+        aliases: Array.isArray(entry.aliases) ? entry.aliases : []
       });
       // A directly-connected neighbour's own agents (from its hello snapshot)
       // must also cross the mesh — relay to our other peers so the far side of
@@ -844,6 +856,7 @@ class FederationHub extends EventEmitter {
           agent: {
             federatedId: entry.federatedId, localId: entry.localId,
             type: entry.type || null, kind: entry.kind || null,
+            aliases: Array.isArray(entry.aliases) ? entry.aliases : [],
           },
           origin,
           path: [peerHost],
@@ -865,9 +878,54 @@ class FederationHub extends EventEmitter {
     const oldLen = existing
       ? (Array.isArray(existing.path) ? existing.path.length : 1)
       : Infinity;
-    if (existing && oldLen <= newLen) return false;
+    // A strictly longer route never displaces a shorter one.
+    if (existing && oldLen < newLen) return false;
+    // Equal-length restatements used to be rejected outright, which was fine
+    // while an entry was pure routing but silently killed every late FACT about
+    // an agent: an alias claimed after the first record arrives by the SAME
+    // route and so was dropped, leaving the claim invisible forever (bug-31).
+    //
+    // The refusal still has to hold for a DIFFERENT equal-length route, or two
+    // peers advertising the same agent ping-pong forever. So split the two
+    // cases: a peer restating its own entry may revise the facts, a competing
+    // route of equal length may not displace the incumbent.
+    if (existing && oldLen === newLen) {
+      const sameRoute = (existing.via || null) === (entry.via || null)
+        && (existing.peerHost || null) === (entry.peerHost || null);
+      if (!sameRoute) return false;
+      if (!this._remoteFactsDiffer(existing, entry)) return false;
+    }
     this.remoteAgents.set(federatedId, entry);
     return true;
+  }
+
+  // Content equality for the non-routing fields of a remote record. `via` and
+  // `path` are deliberately excluded: they are route choice, not facts about the
+  // agent, and comparing them would let two equal-length routes flap forever.
+  _remoteFactsDiffer(a, b) {
+    const names = (e) => (Array.isArray(e.aliases) ? e.aliases : []).map(String).sort().join('\u0000');
+    return (a.localTargetId || null) !== (b.localTargetId || null)
+      || (a.type || null) !== (b.type || null)
+      || (a.kind || null) !== (b.kind || null)
+      || names(a) !== names(b);
+  }
+
+  /**
+   * Resolve a SELF-CHOSEN name claimed by an agent on another box to its
+   * federatedId. The counterpart of resolveLocalAlias for names we did not
+   * mint: federation advertises <type>-<host>-N, but agents are told to prefer
+   * the name they claimed, and before bug-31 nothing on the receiving side
+   * could turn one back into a route. Case-insensitive, like the local claim
+   * map. Returns null when no remote agent answers to this name.
+   */
+  resolveRemoteAlias(name) {
+    const want = String(name || '').toLowerCase();
+    if (!want) return null;
+    for (const [federatedId, info] of this.remoteAgents) {
+      const aliases = Array.isArray(info.aliases) ? info.aliases : [];
+      if (aliases.some((a) => String(a).toLowerCase() === want)) return federatedId;
+    }
+    return null;
   }
 
   /**

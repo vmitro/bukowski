@@ -1066,7 +1066,11 @@ terminal.registerSignalHandlers();
         // the name federation advertises for a pane (bug-29).
         const ptyAgents = session.getAllAgents()
           .filter(isFederatable)
-          .map(a => ({ localId: a.id, type: a.type, federatedId: federatedIdFor(a), kind: 'pane' }));
+          .map(a => ({
+            localId: a.id, type: a.type, federatedId: federatedIdFor(a), kind: 'pane',
+            // Self-chosen names, so they reach other boxes too (bug-31).
+            aliases: mcpServer?.getClaimedAliases?.(a.id) || [],
+          }));
         // External bridge clients (codex/gemini connecting purely through the
         // MCP bridge — no pty, no session pane) must federate too, else peers
         // can route TO them (their host learns our roster) but never learn of
@@ -1075,7 +1079,10 @@ terminal.registerSignalHandlers();
         // both the externalAgents key and the messageQueue key, so localId and
         // federatedId are the same.
         const bridgeAgents = (mcpServer.getExternalAgents?.() || [])
-          .map(a => ({ localId: a.id, type: a.type, federatedId: a.id, kind: 'seat' }));
+          .map(a => ({
+            localId: a.id, type: a.type, federatedId: a.id, kind: 'seat',
+            aliases: mcpServer?.getClaimedAliases?.(a.id) || [],
+          }));
         // Chat rooms federate as themselves. A room id is `chat-<convId>` where
         // convId is a globally-unique UUID, so its federatedId == localId (like
         // bridge agents). This lets a remote agent ADDRESS the room; when its
@@ -1084,7 +1091,10 @@ terminal.registerSignalHandlers();
         // co-located agents can post into it.
         const roomAgents = session.getAllAgents()
           .filter(a => a.type === 'chat')
-          .map(a => ({ localId: a.id, type: 'chat', federatedId: a.id, kind: 'room' }));
+          .map(a => ({
+            localId: a.id, type: 'chat', federatedId: a.id, kind: 'room',
+            aliases: mcpServer?.getClaimedAliases?.(a.id) || [],
+          }));
         return [...ptyAgents, ...bridgeAgents, ...roomAgents];
       }
 

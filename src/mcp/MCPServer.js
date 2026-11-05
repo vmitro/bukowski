@@ -824,7 +824,11 @@ class MCPServer extends EventEmitter {
               // For a pane, the local id it answers to on its own box — the
               // thing a human reads in that pane's status bar.
               paneId: info.kind === 'pane' ? (info.localTargetId || null) : null,
-              aliases: [],
+              // Self-chosen names claimed on the owning box. Hardcoded [] until
+              // bug-31: the wire carried no aliases and this row could not have
+              // shown one anyway, so the "prefer the claimed name" guidance held
+              // only inside a single instance.
+              aliases: Array.isArray(info.aliases) ? info.aliases : [],
               source: 'federated'
             });
           }
@@ -903,7 +907,14 @@ class MCPServer extends EventEmitter {
         // Claim a name if one was offered. Reported either way, so a refusal is
         // visible rather than a silently ignored argument.
         let aliasResult = null;
-        if (args.alias !== undefined) aliasResult = this._claimAlias(callerAgentId, args.alias);
+        if (args.alias !== undefined) {
+          aliasResult = this._claimAlias(callerAgentId, args.alias);
+          // A claim is a fact about this agent that other boxes need. Nothing
+          // re-announced it, so a name claimed after the handshake reached peers
+          // only if a hello happened to follow (bug-31). resyncRoster is
+          // idempotent on receivers and now carries aliases.
+          if (aliasResult?.ok) this.federationHub?.resyncRoster?.();
+        }
 
         const federatedId = this.federationHub?.federatedIdFor?.(callerAgentId) || null;
         const routable = [...this._aliasesOf(callerAgentId), callerAgentId];
@@ -1268,6 +1279,13 @@ class MCPServer extends EventEmitter {
     const localAlias = this.federationHub?.resolveLocalAlias?.(to) || null;
     if (localAlias) to = localAlias;
 
+    // ...and a name claimed by an agent on ANOTHER box resolves to the
+    // federatedId that routes there. Checked after both local forms so a local
+    // agent always wins a contested name, which keeps delivery on this
+    // instance rather than sending it over a link (bug-31).
+    const remoteNamed = this.federationHub?.resolveRemoteAlias?.(to) || null;
+    if (remoteNamed) to = remoteNamed;
+
     // Validate target agent exists (session, external, federated, or
     // the special "user" identity).
     const sessionAgent = this.session.getAgent(to);
@@ -1540,6 +1558,13 @@ class MCPServer extends EventEmitter {
   }
 
   /** Every self-chosen name pointing at this agent. @private */
+  // Self-chosen names routing to this agent, for the federation roster
+  // snapshot. Only _claimAlias writes agentAliases, so this is exactly the
+  // claimed set — never the minted <type>-<host>-N spelling.
+  getClaimedAliases(agentId) {
+    return this._aliasesOf(agentId);
+  }
+
   _aliasesOf(agentId) {
     const out = [];
     for (const [name, owner] of this.agentAliases) {
