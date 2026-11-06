@@ -987,12 +987,21 @@ terminal.registerSignalHandlers();
       // (local-only broadcast) from @swarm (federated broadcast).
       const local = session.getAllAgents()
         .filter(a => a.type !== 'chat')
-        // Only agents with a live IPC socket are addressable. An agent in the
-        // session roster but not (yet) connected to IPCHub has no delivery
-        // path, so including it makes a @chat/@swarm fan-out emit a bogus
-        // `agent_not_connected` for it (one dead target per broadcast). Mirror
-        // IPCHub's own routability check so the roster only lists what routes.
-        .filter(a => ipcHub.isAgentConnected(a.id))
+        // Only agents with a live delivery path are addressable. An agent in
+        // the session roster that nothing can reach has no path, so including
+        // it makes a @chat/@swarm fan-out emit a bogus `agent_not_connected`
+        // for it (one dead target per broadcast).
+        //
+        // BOTH registries, because there are two. Asking IPCHub alone was the
+        // bug: claude/codex agents connect to the MCP socket, so they live in
+        // mcpServer's clients/externalAgents and never appear in
+        // ipcHub.agentSockets — measured zero connections on every
+        // session-*.sock against 33 on the MCP sockets. The local half of this
+        // roster was therefore ALWAYS empty, and `@chat` answered every send
+        // with "no reachable agents for @chat — nothing sent". @swarm still
+        // worked, because the federated half below does not consult IPCHub.
+        // deliverFipaToLocal already routes these via mcpServer.queueMessage.
+        .filter(a => ipcHub.isAgentConnected(a.id) || mcpServer?.isAgentReachable?.(a.id))
         .map(a => ({ id: a.id, name: a.name, type: a.type, source: 'session' }));
       // Same liveness rule as the local half above, which had it and this
       // half did not: an entry stays in remoteAgents until a delta or a link

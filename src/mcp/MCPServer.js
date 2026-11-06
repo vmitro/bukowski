@@ -1741,6 +1741,24 @@ class MCPServer extends EventEmitter {
    * Find the socket for a given agent ID
    * @private
    */
+  /**
+   * Whether an agent can be reached through THIS server — a live bridge
+   * connection that identified as it, or a registered external seat.
+   *
+   * The companion to IPCHub.isAgentConnected, and the half that was missing:
+   * claude/codex agents connect to the MCP socket, never to IPCHub's master
+   * socket, so they live in `clients`/`externalAgents` and not in
+   * `agentSockets`. A caller that asks only IPCHub whether an agent is
+   * reachable gets `false` for every agent on the box.
+   * @param {string} agentId
+   * @returns {boolean}
+   */
+  isAgentReachable(agentId) {
+    if (!agentId) return false;
+    const socket = this._findSocketForAgent(agentId);
+    return !!socket && !socket.destroyed;
+  }
+
   _findSocketForAgent(agentId) {
     // Check session agents (via clients map)
     for (const [socket, state] of this.clients) {
