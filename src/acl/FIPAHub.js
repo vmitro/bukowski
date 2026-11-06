@@ -161,6 +161,31 @@ class FIPAHub extends EventEmitter {
    * @returns {Promise<FIPAMessage|null>} - Response if expecting one
    */
   async send(message) {
+    // Stamp the sender into its federated form before ANYTHING reads it: the
+    // formatter, the IPC payload's _fipaMessage, and the conversation index
+    // all take the name as it stands right here.
+    //
+    // IPCHub rewrote it too, but only on the federation-handoff branch
+    // (IPCHub.js:197-226) — so a same-instance delivery arrived carrying a
+    // bare seat ordinal, and the index recorded one on EVERY hop, since it is
+    // written before routing. A bare ordinal is correct inside its own
+    // instance, which is why there was no local victim; the harm is that the
+    // string travels. A peer reading it resolves local-wins against its own
+    // seat of that number, so one seat could also appear twice in its own
+    // thread, bare from its send and federated from the inbound copy (bug-32).
+    //
+    // SENDER only. The receiver keeps the name the caller addressed, because
+    // that name is what IPCHub routes on; receiver identity is bug-33.
+    //
+    // The IPC-level `from` stays LOCAL below: IPCHub routes and skips
+    // broadcast echoes by local id, and its handoff branch federates `from`
+    // itself for the wire.
+    const localSender = message.sender?.name;
+    const federatedSender = this._federatedSender(localSender);
+    if (federatedSender && federatedSender !== localSender) {
+      message.sender.name = federatedSender;
+    }
+
     const receivers = Array.isArray(message.receiver)
       ? message.receiver.map(r => r.name)
       : [message.receiver.name];
@@ -187,10 +212,10 @@ class FIPAHub extends EventEmitter {
     if (receivers.length === 1) {
       // Single recipient
       if (expectsResponse) {
-        return this._sendAndWait(message, payload, receivers[0], conversation);
+        return this._sendAndWait(message, payload, receivers[0], conversation, localSender);
       } else {
         this.ipcHub.send(
-          message.sender.name,
+          localSender,
           receivers[0],
           `fipa:${message.performative}`,
           payload,
@@ -204,7 +229,7 @@ class FIPAHub extends EventEmitter {
       // Broadcast to multiple recipients
       for (const receiver of receivers) {
         this.ipcHub.send(
-          message.sender.name,
+          localSender,
           receiver,
           `fipa:${message.performative}`,
           payload,
@@ -221,7 +246,7 @@ class FIPAHub extends EventEmitter {
    * Send message and wait for response
    * @private
    */
-  _sendAndWait(message, payload, to, conversation) {
+  _sendAndWait(message, payload, to, conversation, localSender = message.sender?.name) {
     const timeout = message.replyBy
       ? message.replyBy - Date.now()
       : 30000;
@@ -246,13 +271,33 @@ class FIPAHub extends EventEmitter {
       });
 
       this.ipcHub.send(
-        message.sender.name,
+        localSender,
         to,
         `fipa:${message.performative}`,
         payload,
         this._getSummary(message)
       );
     });
+  }
+
+  /**
+   * A local agent id in its federated form (claude-1 -> claude-<host>-1).
+   * Returns the id unchanged when there is no federation attached, when the
+   * sender is not one of our federatable agents ('user', 'system', a chat
+   * room), or when it is already federated — the router handles all three.
+   * Same router IPCHub uses for the wire hop, so both paths agree on the name.
+   * @private
+   */
+  _federatedSender(localId) {
+    if (!localId) return localId;
+    const router = this.ipcHub?.federation;
+    if (typeof router?.federateSenderId !== 'function') return localId;
+    try {
+      // Called on the router so a method-style one keeps its receiver.
+      return router.federateSenderId(localId) || localId;
+    } catch {
+      return localId;  // advisory: never fail a send over a naming lookup
+    }
   }
 
   /**

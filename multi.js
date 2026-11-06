@@ -819,6 +819,17 @@ terminal.registerSignalHandlers();
       });
     }
 
+    // A sender name back in LOCAL terms. FIPA senders are stamped federated
+    // at send time (FIPAHub.send, bug-32), so "is this message from the agent
+    // I'm about to hand it to" can no longer be a string compare against a
+    // local id — claude-bukowski-1 !== claude-1 and every self-echo guard
+    // would stop firing. Returns the id unchanged for a remote peer or when
+    // federation is off, which is what the guards want: not one of ours.
+    function localSenderId(name) {
+      if (!name) return name;
+      return federationHub?.resolveLocalAlias?.(name) || name;
+    }
+
     // Canonical "deliver a FIPA message to a local recipient" path. Used
     // by both the local fipa:sent emitter and the federation `forward`
     // handler. Without the federation branch, messages arriving from
@@ -863,7 +874,7 @@ terminal.registerSignalHandlers();
       if (muted) {
         console.log(`[fipa] ${to} is muted; queued without a nudge`);
       }
-      if (agent?.pty && !muted && message.sender?.name !== to && !claudeViaChannel) {
+      if (agent?.pty && !muted && localSenderId(message.sender?.name) !== to && !claudeViaChannel) {
         let prompt;
         if (agent.type === 'claude') {
           const sender = message.sender?.name || 'unknown';
@@ -1217,7 +1228,11 @@ terminal.registerSignalHandlers();
         for (const [fid, info] of federationHub.remoteAgents) {
           if (info?.type !== 'chat') targets.add(fid);
         }
+        // Both forms: `targets` keys our own agents by LOCAL id while a
+        // stamped sender is federated, so deleting only one leaves the
+        // sender reflecting the room back at itself.
         targets.delete(sender);
+        targets.delete(localSenderId(sender));
         targets.delete(room);
         targets.delete('user');
         targets.delete(undefined);

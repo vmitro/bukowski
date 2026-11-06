@@ -30,6 +30,7 @@ scripts=(
   "$here/21-list-agents-aliases.js"
   "$here/20-fipa-reply-tools.js"
   "$here/10-local-alias-fipa.js"
+  "$here/34-sender-identity.js"
   "$here/11-events.js"
   "$here/31-federated-kind.js"
   "$here/32-federated-aliases.js"
