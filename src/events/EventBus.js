@@ -37,7 +37,7 @@
 const EventEmitter = require('events');
 
 const RETAIN_N = 50;          // retained events per topic (late-joiner catchup)
-const MAX_TOPICS = 500;       // LRU-evicted by last publish time
+const MAX_TOPICS = 513;       // LRU-evicted by last publish time
 const QUEUE_CAP = 200;        // per-subscriber pending events (drop-oldest)
 const MAX_PAYLOAD = 4096;     // bytes, JSON-stringified
 const WAKE_COOLDOWN_MS = 60_000; // re-wake a stuck non-empty queue at most this often

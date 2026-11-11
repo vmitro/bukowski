@@ -163,5 +163,35 @@ wbus.publish('agent:x:status', { n: 5 }, { actor: 'src' });
 assert.strictEqual(wakes.filter((w) => w.agentId === 'src').length, 0, 'publisher is never woken for its own event');
 console.log('OK: courtesy wake coalesces a burst, re-arms after poll, skips publisher');
 
+// ── topic store is bounded, and the LRU evicts the IDLEST topic ───────────
+// MAX_TOPICS is a leak bound, not a tuning knob: once it binds, a quiet topic
+// silently loses its whole retained ring. That is an involuntary loss of
+// history on top of the RETAIN_N ring, so the branch gets exercised here
+// rather than trusted — an eviction policy nobody runs is how bug-5(b)
+// happened (a predicate asking a structurally empty registry).
+{
+  const { MAX_TOPICS } = require('../../src/events/EventBus')._internals;
+  assert.strictEqual(MAX_TOPICS, 513, 'topic cap is 513; update this test deliberately if it changes');
+
+  const lru = new EventBus({ host: 'testbox', maxTopics: 3 });
+  lru.publish('a:x:one', { n: 1 }, { ts: 1000 });
+  lru.publish('b:x:two', { n: 2 }, { ts: 2000 });
+  lru.publish('c:x:three', { n: 3 }, { ts: 3000 });
+  // Touch the oldest so idleness, not insertion order, decides who dies.
+  lru.publish('a:x:one', { n: 4 }, { ts: 4000 });
+
+  lru.publish('d:x:four', { n: 5 }, { ts: 5000 });
+  const names = () => lru.topics ? [...lru.topics.keys()].sort() : [];
+  assert.strictEqual(lru.topics.size, 3, 'store stays at the cap');
+  assert.deepStrictEqual(names(), ['a:x:one', 'c:x:three', 'd:x:four'],
+    `idlest topic (b) evicted, re-touched one (a) survived, got ${JSON.stringify(names())}`);
+
+  // The eviction took the ring with it: a late joiner cannot recover it.
+  const after = lru.subscribe('latecomer', 'b:x:two');
+  assert.strictEqual(after.retained.length, 0,
+    'an evicted topic has no retained history — the loss is unrecoverable, not deferred');
+  console.log('OK: topic store bounded at MAX_TOPICS=513, LRU drops the idlest + its ring');
+}
+
 console.log('OK: events smoke passed');
 process.exit(0);
