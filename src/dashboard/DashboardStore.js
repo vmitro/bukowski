@@ -879,6 +879,33 @@ class DashboardStore {
     return { ok: true, op: 'link', projectId: p.id, entryId: entry.id, rel, rev: p.rev };
   }
 
+  // Remove typed links — the mirror of linkBlockedOn, which was add-only. The
+  // live gap it fills: a blocked-on edge left behind after its dependency
+  // resolved is a STALE tail that the archive guard (_liveBlockedOn) treats as
+  // a real block, so without a remove path such an entry can never be archived.
+  // Gated like link (owner-host residents or the user). Pass targets to drop
+  // those edges of `rel`; omit targets to drop every edge of that rel. A match
+  // of nothing is a no-op: no rev bump, no signal (the bug-13 pattern).
+  removeLink(caller, args, ctx = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    const { entry, category } = this._findEntry(p, args.entryId);
+    if (!this._sameResidency(caller, entry.owner) && caller !== 'user') {
+      throw derr('NOT_RESPONSIBLE', `only agents resident on ${entry.owner}'s host may unlink ${entry.id}`, { caller });
+    }
+    const rel = args.rel || 'blocked-on';
+    const targets = (args.targets || []).map(String).filter(Boolean);
+    const before = entry.links.length;
+    entry.links = entry.links.filter((l) => l.rel !== rel || (targets.length ? !targets.includes(l.target) : false));
+    const removed = before - entry.links.length;
+    if (!removed) {
+      return { ok: true, op: 'unlink', projectId: p.id, entryId: entry.id, rel, removed: 0, unchanged: true, rev: p.rev };
+    }
+    const ts = ctx.ts || Date.now();
+    this._mutate(p, { ts, actor: caller, op: 'unlink', category, entry_id: entry.id, after: `${rel}:${targets.join(',') || '*'}` }, ctx);
+    return { ok: true, op: 'unlink', projectId: p.id, entryId: entry.id, rel, removed, unchanged: false, rev: p.rev };
+  }
+
   // ── archive: hide a settled entry from the default digest/query without
   //    deleting it (anti-clutter; task-4). Reversible, audited, never drops
   //    the entry or its history. `archived` is a SEPARATE flag from `status`:

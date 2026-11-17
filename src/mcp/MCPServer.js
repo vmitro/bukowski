@@ -1117,6 +1117,16 @@ class MCPServer extends EventEmitter {
         this._signalDashboardChange(r.projectId, { op: 'link', entryId: r.entryId, rev: r.rev, by: callerAgentId });
         return r;
       }
+      case 'dashboard_unlink': {
+        requireString('projectId'); requireString('entryId');
+        const r = this._dash().removeLink(callerAgentId, args, { ts: Date.now() });
+        // A no-op unlink (nothing matched) persisted nothing and bumped no rev;
+        // signalling it would wake participants over a change that didn't happen.
+        if (!r.unchanged) {
+          this._signalDashboardChange(r.projectId, { op: 'unlink', entryId: r.entryId, rev: r.rev, by: callerAgentId });
+        }
+        return r;
+      }
 
       // ── coordination events (subscribeable facts; never touch the FIPA
       //    inbox or stop-hook). See src/events/EventBus.js. ────────────────

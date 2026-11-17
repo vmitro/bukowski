@@ -143,6 +143,29 @@ assert.strictEqual(res.skipped.length, 1, 'the missing id is skipped, not fatal'
 assert.strictEqual(res.skipped[0].id, 'bug-999', 'skip names the missing id');
 console.log('OK: bulk archive succeeds on valid ids and reports the skips');
 
+// ── dashboard_unlink clears a stale blocked-on tail so archive can proceed ───
+// A blocked-on edge left behind after its dependency resolved reads to the
+// archive guard as a real block. removeLink is the escape: drop the stale tail
+// and the target archives even though the (now mis-linked) holder is still open.
+const t2 = mk(MED, 'meddaemon', 'depended-on, tail went stale');
+const holder = mk(AZRA, 'azra', 'holder with a stale blocked-on edge');
+store.linkBlockedOn(AZRA, { projectId: PID, entryId: holder, rel: 'blocked-on', targets: [t2] });
+expectErr('BLOCKED_TAIL', () => store.archiveEntry(CURATOR, { projectId: PID, entryId: t2, reason: 'x' }));
+// gate: a non-resident of the holder's host cannot unlink it
+expectErr('NOT_RESPONSIBLE', () => store.removeLink(MED, { projectId: PID, entryId: holder, targets: [t2] }));
+// owner drops the stale tail; archive now proceeds though `holder` is still open
+const ur = store.removeLink(AZRA, { projectId: PID, entryId: holder, rel: 'blocked-on', targets: [t2] });
+assert.strictEqual(ur.removed, 1, 'unlink removes the one stale blocked-on edge');
+store.archiveEntry(CURATOR, { projectId: PID, entryId: t2, reason: 'tail was stale, unlinked' });
+assert.strictEqual(store.queryEntries(CURATOR, { projectId: PID, entryId: t2 }).entries[0].archived, true,
+  'archive proceeds after the stale blocked-on tail is unlinked');
+// a no-op unlink (missing target) changes nothing and bumps no rev
+const revBefore = store.projects.get(PID).rev;
+const noop = store.removeLink(AZRA, { projectId: PID, entryId: holder, targets: ['nope'] });
+assert.strictEqual(noop.unchanged, true, 'unlink of a missing target is a no-op');
+assert.strictEqual(store.projects.get(PID).rev, revBefore, 'no-op unlink does not bump rev');
+console.log('OK: dashboard_unlink clears a stale blocked-on tail; no-op unlink bumps nothing');
+
 // ── audit: the archive op + reason is in the append-only log ─────────────────
 const auditDir = path.join(ROOT, PID, '_audit');
 const auditTxt = fs.readdirSync(auditDir).map((f) => fs.readFileSync(path.join(auditDir, f), 'utf-8')).join('');

@@ -199,6 +199,19 @@ const DASHBOARD_TOOLS = [
       },
     },
   },
+  {
+    name: 'dashboard_unlink',
+    description: 'Remove typed links from an entry (owner-host residents or the user) — the mirror of dashboard_link, which is add-only. Pass rel (default blocked-on) and the targets to remove; omit targets to drop every edge of that rel. Clears a stale blocked-on tail that would otherwise keep an entry from being archived.',
+    inputSchema: {
+      type: 'object', required: ['projectId', 'entryId'],
+      properties: {
+        projectId: { type: 'string' },
+        entryId: { type: 'string' },
+        rel: { type: 'string', enum: ['blocked-on', 'supersedes', 'caused-by'], description: 'edge type to remove (default blocked-on)' },
+        targets: { type: 'array', items: { type: 'string' }, description: 'specific targets to remove; omit to remove every edge of this rel' },
+      },
+    },
+  },
 ];
 
 module.exports = { DASHBOARD_TOOLS };
