@@ -47,6 +47,7 @@ function serializeTask(e, category) {
   if (e.links && e.links.length) fm.push(`links: ${e.links.map((l) => `${l.rel}:${l.target}`).join(', ')}`);
   if (e.causal_parent) fm.push(`causal_parent: ${e.causal_parent}`);
   if (e.tags && e.tags.length) fm.push(`tags: ${e.tags.join(', ')}`);
+  if (e.archived) fm.push('archived: true');
   fm.push(`ts: ${e.ts}`);
   if (e.rev) fm.push(`rev: ${e.rev}`);
   let s = `---\n${fm.join('\n')}\n---\n\n# ${e.oneliner}\n`;
@@ -88,6 +89,7 @@ function parseTask(text) {
     rev: fm.rev ? Number(fm.rev) : 0,
     owner: fm.owner || null,
     priority: fm.priority != null ? Number(fm.priority) : 0,
+    archived: fm.archived === 'true' || fm.archived === '1',
   };
   return { entry, category: fm.category };
 }

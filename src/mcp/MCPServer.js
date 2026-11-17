@@ -1093,6 +1093,24 @@ class MCPServer extends EventEmitter {
         this._signalDashboardChange(r.projectId, { op: 'promote', entryId: r.entryId, rev: r.rev, by: callerAgentId });
         return r;
       }
+      case 'dashboard_archive_entry': {
+        requireString('projectId'); requireString('reason');
+        const r = this._dash().archiveEntry(callerAgentId, args, { ts: Date.now() });
+        // Only signal if something actually changed — a call that archived
+        // nothing (all skipped) bumped no rev and must not wake participants.
+        if (r.archived.length) {
+          this._signalDashboardChange(r.projectId, { op: 'archive', entryId: r.archived[0], rev: r.rev, by: callerAgentId });
+        }
+        return r;
+      }
+      case 'dashboard_unarchive_entry': {
+        requireString('projectId');
+        const r = this._dash().unarchiveEntry(callerAgentId, args, { ts: Date.now() });
+        if (r.unarchived.length) {
+          this._signalDashboardChange(r.projectId, { op: 'unarchive', entryId: r.unarchived[0], rev: r.rev, by: callerAgentId });
+        }
+        return r;
+      }
       case 'dashboard_link': {
         requireString('projectId'); requireString('entryId');
         const r = this._dash().linkBlockedOn(callerAgentId, args, { ts: Date.now() });

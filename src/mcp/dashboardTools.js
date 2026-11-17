@@ -101,14 +101,15 @@ const DASHBOARD_TOOLS = [
         state: { type: 'string' },
         tag: { type: 'string', description: 'match entries carrying this tag (tips are the tagged category)' },
         q: { type: 'string', description: 'case-insensitive keyword over one-liner, tags, and tip bodies' },
-        entryId: { type: 'string', description: 'fetch this single entry in full (includes tip body)' },
+        entryId: { type: 'string', description: 'fetch this single entry in full (includes tip body); always returned even when archived' },
         blockedOnly: { type: 'boolean' },
+        includeArchived: { type: 'boolean', description: 'archived entries are hidden by default; set true to include them in the list' },
       },
     },
   },
   {
     name: 'dashboard_digest',
-    description: 'Compact human/agent-readable digest of a project (roadmap + per-category entries). Pass sinceRev for a delta.',
+    description: 'Compact human/agent-readable digest of a project (roadmap + per-category entries). Pass sinceRev for a delta. Archived entries are excluded by default; pass includeArchived:true to show them.',
     inputSchema: {
       type: 'object', required: ['projectId'],
       properties: {
@@ -116,6 +117,7 @@ const DASHBOARD_TOOLS = [
         repo: { type: 'string' },
         categories: { type: 'array', items: { type: 'string', enum: CATEGORY_ENUM } },
         sinceRev: { type: 'number' },
+        includeArchived: { type: 'boolean', description: 'include archived entries in the digest (hidden by default)' },
       },
     },
   },
@@ -153,6 +155,31 @@ const DASHBOARD_TOOLS = [
     name: 'dashboard_comment_entry',
     description: 'Append an audit-only comment to an entry (any project participant). Never mutates the entry body.',
     inputSchema: { type: 'object', required: ['projectId', 'entryId', 'text'], properties: { projectId: { type: 'string' }, entryId: { type: 'string' }, text: { type: 'string' } } },
+  },
+  {
+    name: 'dashboard_archive_entry',
+    description: 'Archive one or more entries: hide them from the default dashboard_digest and dashboard_query without deleting them (anti-clutter for settled/stale entries). Reversible via dashboard_unarchive_entry; a get-by-id (dashboard_query{entryId}) still returns an archived entry. Allowed by the project curator, a resident of the entry owner\'s host, or the user. Refused when live work is still blocked-on the entry. A reason is required and kept in the audit log.',
+    inputSchema: {
+      type: 'object', required: ['projectId', 'reason'],
+      properties: {
+        projectId: { type: 'string' },
+        entryId: { type: 'string', description: 'single entry to archive' },
+        entryIds: { type: 'array', items: { type: 'string' }, description: 'bulk: several entries to archive in one call' },
+        reason: { type: 'string', description: 'why it is being archived; kept in the audit log' },
+      },
+    },
+  },
+  {
+    name: 'dashboard_unarchive_entry',
+    description: 'Reverse an archive: make the entry visible to the default digest/query again. Any project participant may unarchive (recovery never depends on an offline owner/curator). Accepts a single entryId or bulk entryIds.',
+    inputSchema: {
+      type: 'object', required: ['projectId'],
+      properties: {
+        projectId: { type: 'string' },
+        entryId: { type: 'string', description: 'single entry to unarchive' },
+        entryIds: { type: 'array', items: { type: 'string' }, description: 'bulk: several entries to unarchive in one call' },
+      },
+    },
   },
   {
     name: 'dashboard_promote',

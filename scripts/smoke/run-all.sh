@@ -42,6 +42,7 @@ scripts=(
   "$here/05-channels.js"
   "$here/15-dashboard-entry-ownership.js"
   "$here/16-digest-since-rev.js"
+  "$here/36-dashboard-archive.js"
   "$here/06-dashboard-store.js"
   "$here/07-dashboard.js"
   "$here/08-dashboard-pane.js"

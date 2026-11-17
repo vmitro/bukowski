@@ -81,6 +81,7 @@ function serializeEntry(e) {
   if (e.causal_parent) s += `  ::cause ${e.causal_parent}`;
   if (e.repo) s += `  ::repo ${e.repo}`;
   if (e.tags && e.tags.length) s += `  ::tags ${e.tags.join(',')}`;
+  if (e.archived) s += '  ::arch 1';
   s += `  ::ts ${e.ts}`;
   if (e.rev) s += `  ::rev ${e.rev}`;
   s += `  ::owner ${e.owner}`;
@@ -98,7 +99,7 @@ function parseEntryLine(line) {
   if (!m) return null;
   const e = {
     id: m[1], status: m[2], oneliner: m[3].trim(),
-    refs: [], links: [], causal_parent: null, repo: null, tags: [], body: null, ts: null, rev: 0, owner: null,
+    refs: [], links: [], causal_parent: null, repo: null, tags: [], body: null, ts: null, rev: 0, owner: null, archived: false,
   };
   for (const seg of segPart.split('  ::').map((s) => s.trim()).filter(Boolean)) {
     const sp = seg.indexOf(' ');
@@ -111,6 +112,7 @@ function parseEntryLine(line) {
     else if (key === 'tags') e.tags = val.split(',').map((x) => x.trim()).filter(Boolean);
     else if (key === 'ts') e.ts = Number(val);
     else if (key === 'rev') e.rev = Number(val) || 0;
+    else if (key === 'arch') e.archived = val === '1' || val === 'true';
     else if (key === 'owner') e.owner = val || null;
   }
   return e;
@@ -719,7 +721,7 @@ class DashboardStore {
         id: this._nextId(p, category), oneliner, refs,
         links: [], owner, status: stateArg || 'open', repo: args.repo,
         causal_parent: args.causal_parent || null,
-        tags: tags || [], body: body || null, ts,
+        tags: tags || [], body: body || null, ts, archived: false,
       };
       p.categories[category].push(entry);
     }
@@ -875,6 +877,105 @@ class DashboardStore {
     const ts = ctx.ts || Date.now();
     this._mutate(p, { ts, actor: caller, op: 'link', category, entry_id: entry.id, after: `${rel}:${targets.join(',')}` }, ctx);
     return { ok: true, op: 'link', projectId: p.id, entryId: entry.id, rel, rev: p.rev };
+  }
+
+  // ── archive: hide a settled entry from the default digest/query without
+  //    deleting it (anti-clutter; task-4). Reversible, audited, never drops
+  //    the entry or its history. `archived` is a SEPARATE flag from `status`:
+  //    a closed-and-archived entry keeps its closed status, and get-by-id
+  //    (queryEntries{entryId}) always returns it regardless of the flag.
+  _ids(args) {
+    const ids = Array.isArray(args.entryIds) && args.entryIds.length
+      ? args.entryIds.map(String).filter(Boolean)
+      : (args.entryId ? [String(args.entryId)] : []);
+    if (!ids.length) throw derr('BAD_KEY', 'entryId or entryIds required');
+    return ids;
+  }
+
+  // The refuse-on-blocked-tail guard: archiving an entry that LIVE work still
+  // declares itself blocked-on would hide an active dependency. Returns the id
+  // of the first live, non-archived entry whose blocked-on edge points at this
+  // one, or null. Closed/wontfix/archived holders don't count — their block is
+  // already settled.
+  _liveBlockedOn(p, entry) {
+    const settled = (s) => s === 'closed' || s === 'wontfix';
+    const hits = (target) => target === entry.id || String(target).endsWith(`/entry/${entry.id}`);
+    for (const cat of CATEGORIES) {
+      for (const e2 of p.categories[cat] || []) {
+        if (e2.id === entry.id || e2.archived || settled(e2.status)) continue;
+        if ((e2.links || []).some((l) => l.rel === 'blocked-on' && hits(l.target))) return e2.id;
+      }
+    }
+    return null;
+  }
+
+  // Archive is allowed by the entry owner's host-residents OR the project
+  // curator OR the user. The curator route is deliberate: stale entries are
+  // archived exactly when their owner's seat may be long gone, and gating
+  // archive as tightly as close (owner-only) would reinstate the tip-7
+  // owner-offline deadlock for the very cleanup meant to relieve it. Recovery
+  // is even looser — see unarchiveEntry (any participant).
+  archiveEntry(caller, args, ctx = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    const ids = this._ids(args);
+    const single = ids.length === 1;
+    const reason = String(args.reason || '').trim();
+    if (!reason) throw derr('BAD_KEY', 'archive reason required (kept in the audit log)');
+    const archived = [];
+    const skipped = [];
+    for (const id of ids) {
+      let found;
+      try { found = this._findEntry(p, id); }
+      catch { if (single) throw derr('NO_ENTRY', `no such entry: ${id}`); skipped.push({ id, reason: 'no such entry' }); continue; }
+      const { entry, category } = found;
+      if (caller !== p.curator && !this._sameResidency(caller, entry.owner) && caller !== 'user') {
+        const msg = `archive ${id} needs the curator (${p.curator}) or a resident of ${entry.owner}'s host`;
+        if (single) throw derr('NOT_RESPONSIBLE', msg, { caller, owner: entry.owner });
+        skipped.push({ id, reason: msg }); continue;
+      }
+      if (entry.archived) { skipped.push({ id, reason: 'already archived' }); continue; }
+      const blocker = this._liveBlockedOn(p, entry);
+      if (blocker) {
+        const msg = `${blocker} is still blocked-on ${id}; resolve or close it before archiving`;
+        if (single) throw derr('BLOCKED_TAIL', msg, { entryId: id, blockedBy: blocker });
+        skipped.push({ id, reason: msg }); continue;
+      }
+      entry.archived = true;
+      const ts = ctx.ts || Date.now();
+      entry.ts = ts;
+      this._mutate(p, { ts, actor: caller, op: 'archive', category, entry_id: id, before: 'active', after: reason }, ctx);
+      archived.push(id);
+    }
+    return { ok: true, op: 'archive', projectId: p.id, archived, skipped, rev: p.rev };
+  }
+
+  // Unarchive: ANY project participant may reverse an archive. This is the
+  // deadlock escape — recovery of a wrongly-hidden entry never waits on an
+  // offline owner or curator. Audited like the archive it reverses; the
+  // original archive record stays in the append-only log.
+  unarchiveEntry(caller, args, ctx = {}) {
+    caller = this._federate(caller);
+    const p = this._project(args.projectId);
+    const ids = this._ids(args);
+    const single = ids.length === 1;
+    const isParticipant = p.participants.includes(caller) || caller === p.curator || caller === 'user';
+    if (!isParticipant) throw derr('NOT_RESPONSIBLE', 'only project participants may unarchive', { caller });
+    const unarchived = [];
+    const skipped = [];
+    for (const id of ids) {
+      let found;
+      try { found = this._findEntry(p, id); }
+      catch { if (single) throw derr('NO_ENTRY', `no such entry: ${id}`); skipped.push({ id, reason: 'no such entry' }); continue; }
+      const { entry, category } = found;
+      if (!entry.archived) { skipped.push({ id, reason: 'not archived' }); continue; }
+      entry.archived = false;
+      const ts = ctx.ts || Date.now();
+      entry.ts = ts;
+      this._mutate(p, { ts, actor: caller, op: 'unarchive', category, entry_id: id, before: 'archived', after: 'active' }, ctx);
+      unarchived.push(id);
+    }
+    return { ok: true, op: 'unarchive', projectId: p.id, unarchived, skipped, rev: p.rev };
   }
 
   transferCurator(caller, args, ctx = {}) {
@@ -1061,6 +1162,10 @@ class DashboardStore {
     const out = [];
     for (const cat of cats) {
       for (const e of p.categories[cat] || []) {
+        // Archived entries are hidden from the default list (anti-clutter,
+        // task-4); includeArchived surfaces them. A targeted get-by-id above
+        // always returns regardless, so nothing becomes unreachable.
+        if (e.archived && !args.includeArchived) continue;
         if (args.repo && e.repo !== args.repo) continue;
         if (args.state && e.status !== args.state) continue;
         if (args.blockedOnly && !(e.links || []).some((l) => l.rel === 'blocked-on')) continue;
@@ -1084,7 +1189,7 @@ class DashboardStore {
       lines.push('', '## roadmap', serializeRoadmap(p.name, p.roadmap).split('\n').slice(2).join('\n').trimEnd());
     }
     for (const cat of cats) {
-      const entries = (p.categories[cat] || []).filter((e) => !sinceRev || (e.rev || 0) > sinceRev);
+      const entries = (p.categories[cat] || []).filter((e) => (args.includeArchived || !e.archived) && (!sinceRev || (e.rev || 0) > sinceRev));
       if (!entries.length) continue;
       lines.push('', `## ${cat}`);
       for (const e of entries) {
