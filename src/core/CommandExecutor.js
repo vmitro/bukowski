@@ -103,9 +103,13 @@ class CommandExecutor {
 
       case 'name':
       case 'rename':
-        if (args[0]) {
-          this.session.name = args[0];
-        }
+      case 'rename-session':
+        this._renameSession(args);
+        break;
+
+      case 'rename-agent':
+      case 'aname':
+        this._renameAgent(args);
         break;
 
       case 'dashboard':
@@ -186,6 +190,56 @@ class CommandExecutor {
         this.onSetEchoTimeout(ms);
         process.env.BUKOWSKI_FIPA_ECHO_TIMEOUT_MS = String(ms);
       }
+    }
+  }
+
+  // Vim/tmux philosophy: name the object in the command, never guess the target
+  // from context. `rename-session` acts on the session, `rename-agent` on the
+  // focused pane's agent — two explicit verbs, no magic focus-sensing.
+  _renameSession(args) {
+    if (!args[0]) {
+      this.onShowStatusMessage('E: usage :rename-session <name>');
+      return;
+    }
+    this.session.name = args[0];
+    this.onShowStatusMessage(`session renamed → ${args[0]}`);
+    this._persistName();
+  }
+
+  _renameAgent(args) {
+    if (!args[0]) {
+      this.onShowStatusMessage('E: usage :rename-agent <name>');
+      return;
+    }
+    const agent = this._focusedAgent();
+    if (!agent) {
+      this.onShowStatusMessage('E: no focused agent');
+      return;
+    }
+    const old = agent.name;
+    agent.name = args[0];
+    this.onShowStatusMessage(`agent ${old} → ${args[0]}`);
+    this._persistName();
+  }
+
+  // The focused layout node is a pane; map it to its agent.
+  _focusedAgent() {
+    const pid = this.layoutManager.focusedPaneId;
+    const pane = this.layoutManager.getAllPanes().find(p => p.id === pid);
+    if (!pane || !pane.agentId) return null;
+    return this.session.getAgent(pane.agentId) || null;
+  }
+
+  // Persist a name change without the agent-session-id capture pass that :w runs
+  // (that pass can re-resolve a codex rollout onto a sibling's id). A plain
+  // session.save writes the live layout + new name only.
+  _persistName() {
+    try {
+      this.session.focusedPaneId = this.layoutManager.focusedPaneId;
+      const conv = this.fipaHub && this.fipaHub.conversations;
+      Promise.resolve(this.session.save(undefined, conv)).catch(() => {});
+    } catch {
+      // best-effort; periodic autosave will persist on next tick
     }
   }
 
