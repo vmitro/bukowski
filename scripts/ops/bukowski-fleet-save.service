@@ -1,0 +1,11 @@
+[Unit]
+Description=bukowski fleet snapshot (client-independent tmux-resurrect save)
+Documentation=https://github.com/vmitro/bukowski scripts/ops/fleet-save.sh
+
+[Service]
+Type=oneshot
+# No TMUX_TMPDIR override: tmux derives $TMUX_TMPDIR/tmux-<uid>/default, so the
+# default /tmp already resolves to the interactive server's socket
+# (/tmp/tmux-<uid>/default). Overriding it sends tmux to the wrong path.
+ExecStart=%h/projects/bukowski/scripts/ops/fleet-save.sh
+Nice=10

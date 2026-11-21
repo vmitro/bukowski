@@ -1,0 +1,14 @@
+[Unit]
+Description=Snapshot the bukowski/tmux fleet every 5 min (belt-and-braces to continuum)
+
+[Timer]
+# Fire 2 min after boot, then every 5 min. Persistent=true runs a missed shot
+# once on next wake (laptop suspend/resume), so a snapshot is never skipped for
+# a whole suspend window.
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

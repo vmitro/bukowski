@@ -1,0 +1,10 @@
+# bukowski fleet manifest — regenerated 2026-11-21T11:42:28+01:00
+# source: /home/sheemeh/.bukowski/boot.log  (window 21600s back from 2026-11-05T23:22:06.957Z)
+# <restore-name>	<cwd>	<flags>   (TAB-separated; start-fleet.sh replays each)
+SAPMAN	/run/media/sheemeh/DATA/SAPMAN	--with-tatr-bridge --join vmitro@100.64.0.11
+azra	/home/sheemeh/projects/azra/azra	--with-tatr-bridge --join vmitro@100.64.0.11
+azra-agent	/home/sheemeh/projects/azra-agent	--with-tatr-bridge --join vmitro@100.64.0.11
+blcad	/home/sheemeh/projects	--with-tatr-bridge --join vmitro@100.64.0.11
+managed	/home/sheemeh/projects/managed	--with-tatr-bridge --join vmitro@100.64.0.11
+meddaemon	/home/sheemeh/projects/meddaemon	--with-tatr-bridge --join vmitro@100.64.0.11
+orbis-mock	/home/sheemeh/projects/orbis-mock	--with-tatr-bridge --join vmitro@100.64.0.11
