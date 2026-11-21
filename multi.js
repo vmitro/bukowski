@@ -282,7 +282,15 @@ terminal.registerSignalHandlers();
 
   // Create new session if not restored
   if (!session) {
-    const sessionName = cliArgs.sessionName || process.env.BUKOWSKI_SESSION || 'Main';
+    // A named restore (`--restore meddaemon`) that found nothing still carries
+    // intent: name the fresh session after the restore target so the next
+    // autosave persists it under that name and the NEXT crash-restore matches.
+    // Without this a cold `--restore meddaemon` would save as 'Main' and never
+    // be found by name again — the fleet manifest's named restores would all
+    // decay to 'Main'. 'latest' is a selector, not a name, so it's excluded.
+    const restoreName = (typeof cliArgs.restore === 'string' && cliArgs.restore !== 'latest')
+      ? cliArgs.restore : null;
+    const sessionName = cliArgs.sessionName || restoreName || process.env.BUKOWSKI_SESSION || 'Main';
     session = new Session(sessionName);
 
     // Create initial Claude agent
@@ -1884,6 +1892,52 @@ terminal.registerSignalHandlers();
     }
   }
 
+  // ── Autosave ────────────────────────────────────────────────────────────
+  // The engine historically saved a session only on an explicit `:w`; the
+  // SIGINT/SIGTERM shutdown destroyed the session WITHOUT saving. A host reboot
+  // (which SIGTERMs every pane) therefore lost the whole fleet's live state even
+  // though each agent's LLM transcript survived on disk. Autosave closes that:
+  //   - periodic async save bounds loss to AUTOSAVE_MS on an uncaught-exception
+  //     crash (which skips the shutdown callbacks),
+  //   - a synchronous save on clean SIGINT/SIGTERM captures the final state
+  //     (the signal handlers exit in the same tick, so it cannot be async).
+  // `--restore latest` then resumes the newest autosave; `--restore <name>`
+  // resumes the named one. Both re-inject each agent's resume args.
+  const AUTOSAVE_MS = Math.max(
+    5000,
+    parseInt(process.env.BUKOWSKI_AUTOSAVE_MS, 10) || 30000
+  );
+  let autosaveInFlight = false;
+
+  // Shared pre-save step: sync the focused pane and (best-effort) capture each
+  // agent's resume id so the snapshot can continue the right conversation.
+  function prepareSessionForSave() {
+    try { session.focusedPaneId = layoutManager.focusedPaneId; } catch { /* ignore */ }
+  }
+
+  async function autosaveSession() {
+    if (autosaveInFlight) return;      // never overlap saves
+    if (!session || !session.name) return;
+    autosaveInFlight = true;
+    try {
+      prepareSessionForSave();
+      await captureAgentSessions();    // scrape/guess per-agent resume ids
+      await session.save(undefined, fipaHub.conversations);
+    } catch { /* autosave is best-effort; a failed tick retries next interval */ }
+    finally { autosaveInFlight = false; }
+  }
+
+  // Synchronous last-write for the signal path. Uses whatever resume ids the
+  // last periodic autosave already captured (PTY-scraped ids are authoritative
+  // and sticky), so it does not need the async capture to run first.
+  function persistSessionSync() {
+    if (!session || !session.name) return;
+    try {
+      prepareSessionForSave();
+      session.saveSync(undefined, fipaHub.conversations);
+    } catch { /* best-effort */ }
+  }
+
   // Command execution delegated to CommandExecutor (initialized after dispatcher)
   let commandExecutor = null;
   function executeCommand(cmd) {
@@ -2531,8 +2585,17 @@ terminal.registerSignalHandlers();
     }
   }, 100);
 
+  // Periodic autosave so a crash/reboot loses at most AUTOSAVE_MS of state.
+  // unref() so the timer never keeps the process alive on its own.
+  const autosaveTimer = setInterval(autosaveSession, AUTOSAVE_MS);
+  if (typeof autosaveTimer.unref === 'function') autosaveTimer.unref();
+
   // Register shutdown callbacks for SIGINT/SIGTERM
   terminal.onShutdown(() => {
+    // Final synchronous save BEFORE tearing down fipaHub/session — otherwise the
+    // conversation state is gone before we can snapshot it.
+    persistSessionSync();
+    if (autosaveTimer) clearInterval(autosaveTimer);
     if (metricsTimer) clearInterval(metricsTimer);
     if (mcpServer) mcpServer.stop();
     if (ipcHub) ipcHub.stop();

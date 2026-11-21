@@ -104,6 +104,19 @@ class Session extends EventEmitter {
     return filepath;
   }
 
+  // Synchronous twin of save(). The SIGINT/SIGTERM handlers run their callbacks
+  // and then process.exit() in the same tick (TerminalManager), so a crash-exit
+  // save MUST complete synchronously — an awaited promise never resolves before
+  // the process is gone. This is the last-write net on a clean shutdown; the
+  // periodic autosave in multi.js bounds loss on an uncaught-exception crash,
+  // which skips these callbacks entirely.
+  saveSync(dir = DEFAULT_SESSION_DIR, conversationManager = null) {
+    fs.mkdirSync(dir, { recursive: true });
+    const filepath = path.join(dir, `${this.id}.json`);
+    fs.writeFileSync(filepath, JSON.stringify(this.toJSON(conversationManager), null, 2));
+    return filepath;
+  }
+
   static async load(filepath, AgentClass, LayoutNodeClass, ChatAgentClass = null, conversationManager = null, fipaHub = null) {
     const data = JSON.parse(await fs.promises.readFile(filepath, 'utf-8'));
     return Session.fromJSON(data, AgentClass, LayoutNodeClass, ChatAgentClass, conversationManager, fipaHub);

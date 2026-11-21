@@ -22,6 +22,7 @@ scripts=(
   "$here/22-pane-identity.js"
   "$here/23-socket-binding.js"
   "$here/24-session-id-ownership.js"
+  "$here/37-session-autosave.js"
   "$here/29-pane-binding.js"
   "$here/25-bridge-log.js"
   "$here/26-external-agent-identity.js"
