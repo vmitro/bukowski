@@ -214,7 +214,7 @@ class FederationHub extends EventEmitter {
     // spoke joining the hub immediately sees the rest of the mesh. Split-horizon:
     // never send a peer the agents we learned from it, nor any whose path
     // already includes it.
-    for (const [federatedId, info] of this.remoteAgents) {
+    for (const [key, info] of this.remoteAgents) {
       if (info.via === peer.host) continue;
       const basePath = info.path || [info.peerHost];
       const outPath = basePath.includes(this.host) ? basePath : basePath.concat(this.host);
@@ -222,7 +222,10 @@ class FederationHub extends EventEmitter {
       this._send(peer, {
         type: 'roster', op: 'add',
         agent: {
-          federatedId, localId: info.localTargetId, type: info.type,
+          // Always the BARE id on the wire — the receiving hop re-qualifies
+          // from (federatedId, origin.machineHost); sending the qualified key
+          // would double-qualify. origin.machineHost carries the true box.
+          federatedId: info.federatedId || key, localId: info.localTargetId, type: info.type,
           kind: info.kind || null, aliases: info.aliases || [],
         },
         origin: { host: info.peerHost, machineHost: info.machineHost },
@@ -286,7 +289,16 @@ class FederationHub extends EventEmitter {
    * routable via federation.
    */
   resolveRemote(federatedId) {
-    return this.remoteAgents.get(federatedId) || null;
+    const direct = this.remoteAgents.get(federatedId);
+    if (direct) return direct;
+    // A bare id whose key was qualified for a collision: resolve it only when
+    // exactly one machine claims it (unambiguous). Two or more → return null so
+    // the caller fails cleanly rather than guessing the wrong box.
+    const matches = [];
+    for (const e of this.remoteAgents.values()) {
+      if (e.federatedId === federatedId) matches.push(e);
+    }
+    return matches.length === 1 ? matches[0] : null;
   }
 
   /**
@@ -332,7 +344,7 @@ class FederationHub extends EventEmitter {
    */
   forwardIpcMessage(ipcMessage) {
     if (!ipcMessage || !ipcMessage.to) return false;
-    const remote = this.remoteAgents.get(ipcMessage.to);
+    const remote = this.resolveRemote(ipcMessage.to);
     if (!remote) return false;
 
     const rewritten = {
@@ -724,7 +736,8 @@ class FederationHub extends EventEmitter {
               aliases: Array.isArray(msg.agent.aliases) ? msg.agent.aliases : []
             });
           } else if (msg.op === 'remove' && msg.agent?.federatedId) {
-            changed = this.remoteAgents.delete(msg.agent.federatedId);
+            // Delete by (bare id, machine) — the stored key may be qualified.
+            changed = this._deleteRemote(msg.agent.federatedId, origin.machineHost);
           }
           if (changed) this.emit('roster', { from: peer.host, op: msg.op, agent: msg.agent });
           // Relay only when our knowledge actually changed — a longer path that
@@ -746,7 +759,7 @@ class FederationHub extends EventEmitter {
           // hubs away, not only a direct peer's agents.
           const dest = msg.ipcMessage && msg.ipcMessage._federatedTo;
           if (dest && !this.resolveLocalAlias(dest)) {
-            const remote = this.remoteAgents.get(dest);
+            const remote = this.resolveRemote(dest);
             if (remote && remote.via && remote.via !== peer.host) {
               this.forwardTo(remote.via, { ipcMessage: msg.ipcMessage, hops: msg.hops });
               break;
@@ -872,8 +885,64 @@ class FederationHub extends EventEmitter {
   // true iff we adopted this entry (new, or strictly shorter than what we had),
   // so callers relay only on a real change and the mesh converges instead of
   // re-flooding.
+  // A federatedId (claude-<host>-N) is only unique WITHIN one machine. The
+  // bare-host lock in PeerRegistry that prevents two instances minting the same
+  // claude-projects-1 is a filesystem O_EXCL lock, so it only arbitrates
+  // same-box instances — two boxes whose cwd basename both sanitize to
+  // "projects" each win their OWN local lock and both federate claude-projects-1.
+  // Keyed naively they overwrite each other in remoteAgents (one session's FIPA
+  // lands in the other's queue) and a remote one that matches a same-named LOCAL
+  // agent is shadowed outright (invisible in list_agents, replies "Unknown
+  // agent"). machineHost — the true per-box identity — rides on every record but
+  // was never part of the key. Pick a storage key that folds it in ON COLLISION:
+  // the bare id survives while a single machine owns it (friendly common case),
+  // but a clash across machines qualifies each claimant as `<id>@<machineHost>`
+  // so both stay addressable and distinct. Migrates a bare incumbent out of the
+  // way the first time a second machine appears.
+  _storeKeyFor(federatedId, machineHost) {
+    const mh = machineHost || 'unknown';
+    const qual = `${federatedId}@${mh}`;
+    // Already qualified for this very machine → keep updating that key.
+    if (this.remoteAgents.has(qual)) return qual;
+    const bare = this.remoteAgents.get(federatedId);
+    if (bare) {
+      // Same machine restating its own agent → stay on the bare key.
+      if ((bare.machineHost || 'unknown') === mh) return federatedId;
+      // A different machine holds the bare key: migrate it to its own
+      // qualified key and qualify the newcomer too.
+      this.remoteAgents.delete(federatedId);
+      this.remoteAgents.set(`${federatedId}@${bare.machineHost || 'unknown'}`, bare);
+      return qual;
+    }
+    // No bare incumbent. Qualify if a LOCAL agent owns the bare id (never
+    // shadow it) or another machine already advertises it qualified.
+    if (typeof this.resolveLocalAlias === 'function' && this.resolveLocalAlias(federatedId)) {
+      return qual;
+    }
+    for (const e of this.remoteAgents.values()) {
+      if (e.federatedId === federatedId && (e.machineHost || 'unknown') !== mh) return qual;
+    }
+    return federatedId;   // solo across the mesh → keep the friendly name
+  }
+
+  // Remove the remote record for (bare id, machine), whether it was stored
+  // under the bare key or a collision-qualified one.
+  _deleteRemote(federatedId, machineHost) {
+    const mh = machineHost || 'unknown';
+    if (this.remoteAgents.delete(`${federatedId}@${mh}`)) return true;
+    const bare = this.remoteAgents.get(federatedId);
+    if (bare && (bare.machineHost || 'unknown') === mh) {
+      return this.remoteAgents.delete(federatedId);
+    }
+    return false;
+  }
+
   _recordRemote(federatedId, entry) {
-    const existing = this.remoteAgents.get(federatedId);
+    // Carry the bare id on the record so reconcile/purge/fan match by it
+    // regardless of whether the storage key was qualified for collision.
+    entry.federatedId = federatedId;
+    const storeKey = this._storeKeyFor(federatedId, entry.machineHost);
+    const existing = this.remoteAgents.get(storeKey);
     const newLen = Array.isArray(entry.path) ? entry.path.length : 1;
     const oldLen = existing
       ? (Array.isArray(existing.path) ? existing.path.length : 1)
@@ -895,7 +964,7 @@ class FederationHub extends EventEmitter {
       if (!sameRoute) return false;
       if (!this._remoteFactsDiffer(existing, entry)) return false;
     }
-    this.remoteAgents.set(federatedId, entry);
+    this.remoteAgents.set(storeKey, entry);
     return true;
   }
 
@@ -937,13 +1006,13 @@ class FederationHub extends EventEmitter {
    */
   _reconcilePeerOwnRoster(peerHost, agents, origin) {
     const live = new Set(agents.map((e) => e && e.federatedId).filter(Boolean));
-    for (const [fid, info] of Array.from(this.remoteAgents.entries())) {
+    for (const [key, info] of Array.from(this.remoteAgents.entries())) {
       if (info.via !== peerHost || info.peerHost !== peerHost) continue;
-      if (live.has(fid)) continue;
-      this.remoteAgents.delete(fid);
+      if (live.has(info.federatedId || key)) continue;
+      this.remoteAgents.delete(key);
       this._fanRosterDelta({
         op: 'remove',
-        agent: { federatedId: fid, localId: info.localTargetId, type: info.type, kind: info.kind || null },
+        agent: { federatedId: info.federatedId || key, localId: info.localTargetId, type: info.type, kind: info.kind || null },
         origin,
         path: [this.host],
       }, peerHost);
@@ -957,7 +1026,7 @@ class FederationHub extends EventEmitter {
    * broadcast fan-out — must check; callers that merely route may not.
    */
   isRemoteReachable(federatedId) {
-    const info = this.remoteAgents.get(federatedId);
+    const info = this.resolveRemote(federatedId);
     return !!info && this.peers.has(info.via);
   }
 
@@ -966,12 +1035,12 @@ class FederationHub extends EventEmitter {
   // and propagate the removals across the rest of the mesh so downstream peers
   // don't keep routing to a now-unreachable agent.
   _purgePeerRoster(neighbourHost) {
-    for (const [fid, info] of Array.from(this.remoteAgents.entries())) {
+    for (const [key, info] of Array.from(this.remoteAgents.entries())) {
       if (info.via !== neighbourHost) continue;
-      this.remoteAgents.delete(fid);
+      this.remoteAgents.delete(key);
       this._fanRosterDelta({
         op: 'remove',
-        agent: { federatedId: fid, localId: info.localTargetId, type: info.type, kind: info.kind || null },
+        agent: { federatedId: info.federatedId || key, localId: info.localTargetId, type: info.type, kind: info.kind || null },
         origin: { host: info.peerHost, machineHost: info.machineHost },
         path: [this.host],
       }, neighbourHost);
