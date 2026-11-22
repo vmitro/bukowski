@@ -5,8 +5,11 @@
 // no message transport yet (that's FederationHub, Phase 2). What it gives
 // callers is:
 //   - a resolved "host" name with collision handling (BUKOWSKI_HOST env
-//     wins, then basename(cwd); appended with a 4-char pid hash if a live
-//     peer is already using the same host)
+//     wins, then basename(cwd); appended with a 4-char session-id hash if
+//     another session already owns the bare host). The bare host is claimed
+//     by session id, not pid, so a different session launched in the same
+//     cwd never inherits the previous session's federated id (claude-<host>-N)
+//     or its carried-over aliases — it gets a stable, unique suffixed host.
 //   - `peer:appeared` / `peer:gone` events as siblings come and go
 //   - cleanup of stale peer files (dead PID, or PID alive but its fedSocket
 //     is gone) on every scan
@@ -93,11 +96,12 @@ class PeerRegistry extends EventEmitter {
       if (this.peerFile) {
         try { fs.unlinkSync(this.peerFile); } catch { /* ignore */ }
       }
-      // Release the base-host claim so a future launch can reclaim the bare
-      // name instead of being pushed to a suffix forever.
-      if (this._hostLockPath) {
-        try { fs.unlinkSync(this._hostLockPath); } catch { /* ignore */ }
-      }
+      // NOTE: we deliberately do NOT unlink the base-host lock here. It is
+      // keyed on session id and must survive our exit so a different session
+      // launched in the same cwd suffixes instead of inheriting our bare host
+      // (and with it our federated id + observers' cached aliases). Our own
+      // session's relaunch reclaims the bare host via the session-id match in
+      // _claimBaseHost.
     };
     process.on('exit', this._exitHandler);
     return this.host;
@@ -128,10 +132,9 @@ class PeerRegistry extends EventEmitter {
     if (this.peerFile) {
       try { fs.unlinkSync(this.peerFile); } catch { /* ignore */ }
     }
-    if (this._hostLockPath) {
-      try { fs.unlinkSync(this._hostLockPath); } catch { /* ignore */ }
-      this._hostLockPath = null;
-    }
+    // The base-host lock is intentionally left in place (session-id pinned);
+    // see _exitHandler for why. We only drop our reference to it.
+    this._hostLockPath = null;
     if (this._exitHandler) {
       try { process.removeListener('exit', this._exitHandler); } catch { /* ignore */ }
       this._exitHandler = null;
@@ -229,15 +232,55 @@ class PeerRegistry extends EventEmitter {
     // is unique to it. resolvedHost is captured once by callers (multi.js), so
     // this MUST settle synchronously here — hence a lock, not a later reconcile.
     if (this._claimBaseHost(this._baseHost)) return this._baseHost;
-    return `${this._baseHost}-${shortHash(this.pid)}`;
+    // Suffix by session id (stable across this session's own restarts/resume),
+    // falling back to pid only when no session id was supplied. A pid-based
+    // suffix would change on every relaunch and churn the federated id.
+    return `${this._baseHost}-${shortHash(this.sessionId || this.pid)}`;
+  }
+
+  /** `<pid>:<sessionId>` — the owner tag written into the base-host lock. */
+  _ownerTag() {
+    return `${this.pid}:${this.sessionId || ''}`;
+  }
+
+  /**
+   * Parse a base-host lock's owner tag. New format is `<pid>:<sessionId>`;
+   * legacy locks (pre-fix) hold a bare pid with no session id.
+   * @private
+   */
+  _readOwnerTag(lockPath) {
+    let raw = '';
+    try { raw = fs.readFileSync(lockPath, 'utf8').trim(); }
+    catch { /* unreadable / racing writer */ }
+    const idx = raw.indexOf(':');
+    if (idx === -1) {
+      const pid = parseInt(raw, 10);
+      return { pid: Number.isInteger(pid) ? pid : null, sessionId: null };
+    }
+    const pid = parseInt(raw.slice(0, idx), 10);
+    const sessionId = raw.slice(idx + 1) || null;
+    return { pid: Number.isInteger(pid) ? pid : null, sessionId };
   }
 
   /**
    * Atomically claim ownership of the bare base host. Returns true if we own it.
-   * The owner writes its pid into a lock file created with the 'wx' (O_CREAT|
-   * O_EXCL) flag, so exactly one concurrent creator succeeds. If the lock is
-   * already held we reclaim it only when the recorded owner is us or is dead
-   * (unclean shutdown left a stale lock); a live foreign owner means we suffix.
+   * The owner writes `<pid>:<sessionId>` into a lock file created with the 'wx'
+   * (O_CREAT|O_EXCL) flag, so exactly one concurrent creator succeeds.
+   *
+   * Ownership is keyed on SESSION ID, not pid. We reclaim the bare host only
+   * when the lock belongs to our own session (a resume/relaunch of the same
+   * session, same session id but a fresh pid). A lock held by a DIFFERENT
+   * session keeps us on a suffixed host even after that session dies — we must
+   * never inherit its bare host, because the federated id (claude-<host>-N) and
+   * every observer's cached alias are derived from it, so inheriting the name
+   * silently rebinds the dead session's traffic to us (the collision this fix
+   * closes). The lock therefore persists across exit (see _exitHandler/stop):
+   * the bare host stays pinned to the session that first claimed it.
+   *
+   * Legacy locks (pre-fix, bare pid, no session id) are the one exception: we
+   * can't prove whose session they belonged to, so a dead legacy owner is
+   * treated as stale and reclaimed once (letting the first restart onto this
+   * code take the bare name); a live legacy owner still keeps it.
    * @private
    */
   _claimBaseHost(base) {
@@ -245,21 +288,30 @@ class PeerRegistry extends EventEmitter {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const fd = fs.openSync(lockPath, 'wx'); // atomic create-or-fail
-        try { fs.writeSync(fd, String(this.pid)); } finally { fs.closeSync(fd); }
+        try { fs.writeSync(fd, this._ownerTag()); } finally { fs.closeSync(fd); }
         this._hostLockPath = lockPath;
         return true;
       } catch (err) {
         if (err.code !== 'EEXIST') return false; // unexpected fs error → suffix, stay safe
-        let ownerPid = null;
-        try { ownerPid = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10); }
-        catch { /* unreadable/racing writer */ }
-        if (ownerPid === this.pid) { this._hostLockPath = lockPath; return true; }
-        if (!Number.isInteger(ownerPid) || !isPidAlive(ownerPid)) {
-          // Stale lock from a dead owner — drop it and retry the create.
+        const owner = this._readOwnerTag(lockPath);
+        // Is this our own session? Match on session id when both sides have one,
+        // otherwise fall back to pid (degenerate: no session id supplied).
+        const mine = (this.sessionId && owner.sessionId)
+          ? owner.sessionId === this.sessionId
+          : owner.pid === this.pid;
+        if (mine) {
+          // Our own session relaunching — reclaim the bare host, refreshing the
+          // lock so its pid reflects the live process.
+          try { fs.unlinkSync(lockPath); } catch { /* raced with a sibling */ }
+          continue;
+        }
+        if (owner.sessionId) return false; // foreign session pins the bare host → suffix
+        // Legacy lock without a session id: reclaim only if its pid is dead.
+        if (!Number.isInteger(owner.pid) || !isPidAlive(owner.pid)) {
           try { fs.unlinkSync(lockPath); } catch { /* another instance beat us to it */ }
           continue;
         }
-        return false; // live foreign owner holds the base host → we suffix
+        return false; // live legacy owner holds the base host → we suffix
       }
     }
     return false;
