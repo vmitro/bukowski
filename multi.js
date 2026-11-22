@@ -1890,6 +1890,30 @@ terminal.registerSignalHandlers();
         }
       }
     }
+
+    // Invariant: no two agents may share an agentSessionId. The per-agent guards
+    // above only prevent a collision WITHIN this pass; a stale duplicate already
+    // in the session file (e.g. resolveCodexSessionId once handed one codex pane
+    // its sibling's open rollout fd) would otherwise survive untouched. A shared
+    // id means both agents resume onto one conversation and one clobbers the
+    // other — the blcad codex-1/codex-2 corruption. Final sweep: keep the best
+    // claimant (a live PTY-scraped id outranks a guessed one, then earliest
+    // spawnedAt) and null the rest so only one agent owns each conversation.
+    const owners = new Map();
+    for (const agent of agents) {
+      const id = agent.agentSessionId;
+      if (!id) continue;
+      const prev = owners.get(id);
+      if (!prev) { owners.set(id, agent); continue; }
+      const captWins = !!prev.sessionIdCaptured !== !!agent.sessionIdCaptured;
+      const keep = captWins
+        ? (prev.sessionIdCaptured ? prev : agent)
+        : ((prev.spawnedAt || 0) <= (agent.spawnedAt || 0) ? prev : agent);
+      const drop = keep === prev ? agent : prev;
+      drop.agentSessionId = null;
+      drop.sessionIdCaptured = false;
+      owners.set(id, keep);
+    }
   }
 
   // ── Autosave ────────────────────────────────────────────────────────────
@@ -1911,20 +1935,35 @@ terminal.registerSignalHandlers();
 
   // Shared pre-save step: sync the focused pane and (best-effort) capture each
   // agent's resume id so the snapshot can continue the right conversation.
+  // Returns a restore fn the caller MUST run after the save completes.
+  // Zoom-safe: when a pane is zoomed, layoutManager.layout (=== session.layout)
+  // is a detached single-pane view and the real multi-pane tree lives in
+  // savedLayout. Saving the live layout then persists a 1-pane layout, so a
+  // later restore collapses the whole roster to one pane — the blcad corruption.
+  // Only `:w` guarded this; autosave and the signal-path sync save did not.
   function prepareSessionForSave() {
     try { session.focusedPaneId = layoutManager.focusedPaneId; } catch { /* ignore */ }
+    let restore = () => {};
+    try {
+      if (layoutManager.isZoomed && layoutManager.isZoomed() && layoutManager.savedLayout) {
+        const zoomedLayout = session.layout;
+        session.layout = layoutManager.savedLayout;
+        restore = () => { session.layout = zoomedLayout; };
+      }
+    } catch { /* on error, save the live layout rather than skip the save */ }
+    return restore;
   }
 
   async function autosaveSession() {
     if (autosaveInFlight) return;      // never overlap saves
     if (!session || !session.name) return;
     autosaveInFlight = true;
+    const restore = prepareSessionForSave();
     try {
-      prepareSessionForSave();
       await captureAgentSessions();    // scrape/guess per-agent resume ids
       await session.save(undefined, fipaHub.conversations);
     } catch { /* autosave is best-effort; a failed tick retries next interval */ }
-    finally { autosaveInFlight = false; }
+    finally { restore(); autosaveInFlight = false; }
   }
 
   // Synchronous last-write for the signal path. Uses whatever resume ids the
@@ -1932,10 +1971,11 @@ terminal.registerSignalHandlers();
   // and sticky), so it does not need the async capture to run first.
   function persistSessionSync() {
     if (!session || !session.name) return;
+    const restore = prepareSessionForSave();
     try {
-      prepareSessionForSave();
       session.saveSync(undefined, fipaHub.conversations);
     } catch { /* best-effort */ }
+    finally { restore(); }
   }
 
   // Command execution delegated to CommandExecutor (initialized after dispatcher)
